@@ -1,0 +1,72 @@
+# BS 7671:2018+A2 Table 41.3 Protective Device Characteristics
+# BS EN 60898 MCBs and BS EN 61009 RCBOs (Type B and Type C)
+# U0 = 230 V, Cmin = 0.95 (Zs,max = U0 * Cmin / Ia)
+# Let-through energy I²t (A²·s) based on BS EN 60898 Energy Limiting Class 3 (6 kA breaking capacity)
+
+schema_version: "1.0"
+standards_version: "BS7671-2018-A2-DEVICES-2024.1"
+source_reference: "BS 7671:2018+A2:2022 Table 41.3 & BS EN 60898-1 Class 3"
+
+u0_v: 230.0
+cmin: 0.95
+
+standard_ratings_a: [6, 10, 16, 20, 25, 32, 40, 50, 63]
+
+devices:
+  B:
+    6:
+      zs_max_ohm: 7.28
+      i2t_a2s: 8000.0
+    10:
+      zs_max_ohm: 4.37
+      i2t_a2s: 11000.0
+    16:
+      zs_max_ohm: 2.73
+      i2t_a2s: 15000.0
+    20:
+      zs_max_ohm: 2.19
+      i2t_a2s: 18000.0
+    25:
+      zs_max_ohm: 1.75
+      i2t_a2s: 22000.0
+    32:
+      zs_max_ohm: 1.37
+      i2t_a2s: 26000.0
+    40:
+      zs_max_ohm: 1.09
+      i2t_a2s: 36000.0
+    50:
+      zs_max_ohm: 0.87
+      i2t_a2s: 48000.0
+    63:
+      zs_max_ohm: 0.69
+      i2t_a2s: 65000.0
+
+  C:
+    6:
+      zs_max_ohm: 3.64
+      i2t_a2s: 10000.0
+    10:
+      zs_max_ohm: 2.19
+      i2t_a2s: 14000.0
+    16:
+      zs_max_ohm: 1.37
+      i2t_a2s: 19000.0
+    20:
+      zs_max_ohm: 1.09
+      i2t_a2s: 23000.0
+    25:
+      zs_max_ohm: 0.87
+      i2t_a2s: 28000.0
+    32:
+      zs_max_ohm: 0.68
+      i2t_a2s: 34000.0
+    40:
+      zs_max_ohm: 0.55
+      i2t_a2s: 45000.0
+    50:
+      zs_max_ohm: 0.44
+      i2t_a2s: 58000.0
+    63:
+      zs_max_ohm: 0.35
+      i2t_a2s: 78000.0

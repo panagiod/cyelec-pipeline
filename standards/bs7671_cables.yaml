@@ -1,0 +1,141 @@
+# BS 7671:2018+A2 Appendix 4 Cable Tables (Copper, 70°C PVC & 90°C XLPE rating factors)
+# Primary reference for Cyprus domestic/commercial installations:
+#   - Method B: Enclosed in conduit on/in a masonry wall (Cyprus default, Table 4D1A/4D1B)
+#   - Method C: Clipped direct (Table 4D2A/4D5)
+
+schema_version: "1.0"
+standards_version: "BS7671-2018-A2-CABLES-2024.1"
+source_reference: "BS 7671:2018+A2:2022 Appendix 4 (Tables 4D1A, 4D1B, 4D2A, 4D2B, 4B1, 4C1, 52.2, 54.3) & OSG Tables I1/I3"
+
+constants:
+  reference_ambient_c: 30
+  temp_resistance_multiplier_70c: 1.20
+  adiabatic_k_pvc_copper: 115.0
+  ring_final_min_iz_a: 20.0
+  ring_final_min_cable_mm2: 2.5
+
+# Copper conductor properties (70°C PVC insulated, 1.5 - 35 mm² plus 1.0 mm² resistance for CPC calculations)
+cables:
+  - size_mm2: 1.5
+    default_cpc_mm2: 1.5
+    method_b_1p_a: 17.5
+    method_b_3p_a: 15.5
+    method_c_1p_a: 20.0
+    method_c_3p_a: 17.5
+    mv_per_a_per_m_1p: 29.0
+    mv_per_a_per_m_3p: 25.0
+    r20_mohm_per_m: 12.10
+  - size_mm2: 2.5
+    default_cpc_mm2: 2.5
+    method_b_1p_a: 24.0
+    method_b_3p_a: 21.0
+    method_c_1p_a: 27.0
+    method_c_3p_a: 24.0
+    mv_per_a_per_m_1p: 18.0
+    mv_per_a_per_m_3p: 15.0
+    r20_mohm_per_m: 7.41
+  - size_mm2: 4.0
+    default_cpc_mm2: 4.0
+    method_b_1p_a: 32.0
+    method_b_3p_a: 28.0
+    method_c_1p_a: 37.0
+    method_c_3p_a: 32.0
+    mv_per_a_per_m_1p: 11.0
+    mv_per_a_per_m_3p: 9.5
+    r20_mohm_per_m: 4.61
+  - size_mm2: 6.0
+    default_cpc_mm2: 6.0
+    method_b_1p_a: 41.0
+    method_b_3p_a: 36.0
+    method_c_1p_a: 47.0
+    method_c_3p_a: 41.0
+    mv_per_a_per_m_1p: 7.3
+    mv_per_a_per_m_3p: 6.4
+    r20_mohm_per_m: 3.08
+  - size_mm2: 10.0
+    default_cpc_mm2: 10.0
+    method_b_1p_a: 57.0
+    method_b_3p_a: 50.0
+    method_c_1p_a: 64.0
+    method_c_3p_a: 57.0
+    mv_per_a_per_m_1p: 4.4
+    mv_per_a_per_m_3p: 3.8
+    r20_mohm_per_m: 1.83
+  - size_mm2: 16.0
+    default_cpc_mm2: 16.0
+    method_b_1p_a: 76.0
+    method_b_3p_a: 68.0
+    method_c_1p_a: 85.0
+    method_c_3p_a: 76.0
+    mv_per_a_per_m_1p: 2.8
+    mv_per_a_per_m_3p: 2.4
+    r20_mohm_per_m: 1.15
+  - size_mm2: 25.0
+    default_cpc_mm2: 16.0
+    method_b_1p_a: 101.0
+    method_b_3p_a: 89.0
+    method_c_1p_a: 110.0
+    method_c_3p_a: 96.0
+    mv_per_a_per_m_1p: 1.75
+    mv_per_a_per_m_3p: 1.50
+    r20_mohm_per_m: 0.727
+  - size_mm2: 35.0
+    default_cpc_mm2: 16.0
+    method_b_1p_a: 125.0
+    method_b_3p_a: 110.0
+    method_c_1p_a: 137.0
+    method_c_3p_a: 119.0
+    mv_per_a_per_m_1p: 1.25
+    mv_per_a_per_m_3p: 1.10
+    r20_mohm_per_m: 0.524
+
+# Supplementary resistance values for smaller CPC conductors (mΩ/m at 20°C)
+extra_cpc_r20_mohm_per_m:
+  1.0: 18.10
+
+# BS 7671 Table 4B1: Rating factors for ambient air temperature (reference 30°C)
+ca_ambient:
+  pvc_70c:
+    25: 1.03
+    30: 1.00
+    35: 0.94
+    40: 0.87
+    45: 0.79
+    50: 0.71
+    55: 0.61
+    60: 0.50
+  xlpe_90c:
+    25: 1.02
+    30: 1.00
+    35: 0.96
+    40: 0.91
+    45: 0.87
+    50: 0.82
+    55: 0.76
+    60: 0.71
+    65: 0.65
+    70: 0.58
+
+# BS 7671 Table 4C1 (Item 1): Rating factors for grouping of circuits/multicore cables
+cg_grouping:
+  1: 1.00
+  2: 0.80
+  3: 0.70
+  4: 0.65
+  5: 0.60
+  6: 0.57
+  7: 0.54
+  8: 0.52
+  9: 0.50
+  12: 0.45
+  16: 0.41
+  20: 0.38
+
+# BS 7671 Table 52.2: Rating factors for cables surrounded by thermal insulation (length in mm)
+ci_thermal_insulation:
+  0: 1.00
+  50: 0.89
+  100: 0.81
+  200: 0.68
+  400: 0.55
+  500: 0.50

@@ -1,0 +1,106 @@
+# Electricity Authority of Cyprus (EAC) & Cyprus Wiring Regulations Rules
+# Supports dual profiles:
+#   - cyprus_eac_17th_a3: BS 7671:2008+A3 (3.0 m bathroom socket exclusion)
+#   - cyprus_eac_18th_a2: BS 7671:2018+A2 (2.5 m bathroom socket exclusion, Reg 701.512.3)
+
+schema_version: "1.0"
+standards_version: "EAC-CYPRUS-RULES-2024.1"
+source_reference: "Electricity Authority of Cyprus (EAC) Wiring Regulations & BS 7671:2018+A2 / 2008+A3"
+
+default_profile: "cyprus_eac_18th_a2"
+
+profiles:
+  cyprus_eac_17th_a3:
+    standard_ref: "BS 7671:2008+A3:2015 (EAC 17th Ed. Baseline)"
+    bathroom_socket_exclusion_m: 3.0
+    rcd_socket_max_rating_a: 20
+  cyprus_eac_18th_a2:
+    standard_ref: "BS 7671:2018+A2:2022 (EAC 18th Ed. A2)"
+    bathroom_socket_exclusion_m: 2.5
+    rcd_socket_max_rating_a: 32
+
+system_nominal:
+  u0_v: 230.0
+  ul_v: 400.0
+  frequency_hz: 50.0
+  cmin: 0.95
+
+ambient_defaults_c:
+  indoor_conduit_c: 40
+  roof_outdoor_c: 45
+  default_installation_method: "B"
+
+earthing:
+  default_system: "TT"
+  supported_systems: ["TT", "TN-S", "TN-C-S"]
+  tt_touch_voltage_limit_v: 50.0
+  tt_electrode_stability_warning_ohm: 200.0
+  default_rcd_idn_ma: 30
+  default_ze_or_ra_ohm:
+    TT: 80.0
+    TN-S: 0.80
+    TN-C-S: 0.35
+
+voltage_drop_limits_pct:
+  lighting: 3.0
+  power: 5.0
+
+supply_rules:
+  mandatory_three_phase_building_types:
+    - "independent_house"
+    - "apartment_2bed"
+    - "apartment_3bed_plus"
+    - "office"
+    - "shop"
+    - "workshop"
+    - "industrial"
+  single_phase_allowed_building_types:
+    - "studio"
+    - "apartment_1bed"
+    - "common_area_small"
+  pv_three_phase_threshold_kva: 5.0
+  single_phase_max_kva: 13.8
+  ct_metering_threshold_a_per_phase: 100.0
+  substation_warning_kva: 100.0
+  substation_blocker_kva: 150.0
+  phase_imbalance_target_pct: 10.0
+
+supply_tiers:
+  single_phase:
+    - label: "1x40A (9.2 kVA)"
+      amps: 40
+      kva: 9.2
+    - label: "1x60A (13.8 kVA)"
+      amps: 60
+      kva: 13.8
+  three_phase:
+    - label: "3x30A (20.8 kVA)"
+      amps: 30
+      kva: 20.8
+    - label: "3x40A (27.7 kVA)"
+      amps: 40
+      kva: 27.7
+    - label: "3x60A (41.6 kVA)"
+      amps: 60
+      kva: 41.6
+    - label: "3x80A (55.4 kVA)"
+      amps: 80
+      kva: 55.4
+    - label: "3x100A (69.3 kVA)"
+      amps: 100
+      kva: 69.3
+    - label: "3x125A (86.6 kVA - CT Metering)"
+      amps: 125
+      kva: 86.6
+    - label: "3x160A (110.9 kVA - CT Metering)"
+      amps: 160
+      kva: 110.9
+    - label: "3x200A (138.6 kVA - CT Metering)"
+      amps: 200
+      kva: 138.6
+    - label: "3x250A (173.2 kVA - CT Metering / Substation)"
+      amps: 250
+      kva: 173.2
+    - label: "3x400A (277.1 kVA - CT Metering / Substation)"
+      amps: 400
+      kva: 277.1

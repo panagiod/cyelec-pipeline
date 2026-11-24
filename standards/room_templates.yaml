@@ -1,0 +1,261 @@
+# Bilingual English + Greek Room Templates & Cyprus Domestic Load Assumptions
+# Tier-1 deterministic Unicode-normalized (NFD accent-stripped, case-folded) lookup
+
+schema_version: "1.0"
+standards_version: "CYPRUS-ROOM-TEMPLATES-2024.1"
+source_reference: "Cyprus domestic design practice, BS 7671 Appendix 15 & OSG Table A2"
+
+circuit_defaults:
+  lighting_diversity: 0.66
+  lighting_power_factor: 0.95
+  lighting_circuit_max_connected_w: 1000.0
+  socket_ring_max_area_m2: 100.0
+  kitchen_ring_connected_w: 6000.0
+  kitchen_ring_diversity: 0.85
+  general_ring_connected_w: 4600.0
+  general_ring_diversity: 0.85
+  socket_power_factor: 0.95
+  split_ac_diversity: 0.85
+  split_ac_power_factor: 0.90
+  vertical_drop_allowance_m: 3.5
+
+rooms:
+  living_room:
+    aliases_en: ["living room", "living", "lounge", "sitting room", "salon"]
+    aliases_el: ["ΣΑΛΟΝΙ", "ΚΑΘΙΣΤΙΚΟ", "ΣΑΛΟΝΙ - ΤΡΑΠΕΖΑΡΙΑ"]
+    lighting_w_per_m2: 8.0
+    min_lighting_points: 2
+    lighting_zone: "day"
+    socket_count_default: 6
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 2000.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  kitchen:
+    aliases_en: ["kitchen", "kitchenette"]
+    aliases_el: ["ΚΟΥΖΙΝΑ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 2
+    lighting_zone: "day"
+    socket_count_default: 6
+    socket_group: "kitchen_utility"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "cooker_hob"
+        label: "Electric Cooker / Induction Hob"
+        category: "cooker"
+        connected_w: 7000.0
+        diversity: 0.53
+        power_factor: 1.0
+        min_breaker_in_a: 32
+        min_cable_mm2: 6.0
+        curve: "B"
+      - key: "oven"
+        label: "Built-in Electric Oven"
+        category: "oven"
+        connected_w: 3000.0
+        diversity: 1.0
+        power_factor: 1.0
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+      - key: "dishwasher"
+        label: "Dishwasher"
+        category: "appliance"
+        connected_w: 2200.0
+        diversity: 0.85
+        power_factor: 0.95
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+
+  kitchen_living:
+    aliases_en: ["kitchen/living", "open plan", "living/kitchen"]
+    aliases_el: ["ΣΑΛΟΚΟΥΖΙΝΑ", "ΣΑΛΟΝΙ-ΚΟΥΖΙΝΑ"]
+    lighting_w_per_m2: 9.0
+    min_lighting_points: 3
+    lighting_zone: "day"
+    socket_count_default: 8
+    socket_group: "kitchen_utility"
+    has_split_ac: true
+    ac_electrical_w: 2200.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "cooker_hob"
+        label: "Electric Cooker / Induction Hob"
+        category: "cooker"
+        connected_w: 7000.0
+        diversity: 0.53
+        power_factor: 1.0
+        min_breaker_in_a: 32
+        min_cable_mm2: 6.0
+        curve: "B"
+      - key: "oven"
+        label: "Built-in Electric Oven"
+        category: "oven"
+        connected_w: 3000.0
+        diversity: 1.0
+        power_factor: 1.0
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+      - key: "dishwasher"
+        label: "Dishwasher"
+        category: "appliance"
+        connected_w: 2200.0
+        diversity: 0.85
+        power_factor: 0.95
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+
+  master_bedroom:
+    aliases_en: ["master bedroom", "master bed", "bedroom 1"]
+    aliases_el: ["ΚΥΡΙΟ ΥΠΝΟΔΩΜΑΤΙΟ", "ΥΠΝΟΔΩΜΑΤΙΟ 1"]
+    lighting_w_per_m2: 7.0
+    min_lighting_points: 1
+    lighting_zone: "night"
+    socket_count_default: 4
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 1200.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  bedroom:
+    aliases_en: ["bedroom", "bed", "bedroom 2", "bedroom 3", "guest bedroom"]
+    aliases_el: ["ΥΠΝΟΔΩΜΑΤΙΟ", "ΥΠΝΟΔΩΜΑΤΙΟ 2", "ΥΠΝΟΔΩΜΑΤΙΟ 3", "ΔΩΜΑΤΙΟ"]
+    lighting_w_per_m2: 7.0
+    min_lighting_points: 1
+    lighting_zone: "night"
+    socket_count_default: 3
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 1200.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  bathroom:
+    aliases_en: ["bathroom", "bath", "main bathroom", "wc/bath"]
+    aliases_el: ["ΜΠΑΝΙΟ", "ΛΟΥΤΡΟ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 1
+    lighting_zone: "night"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: true
+    is_outdoor: false
+    dedicated_appliances: []
+
+  ensuite:
+    aliases_en: ["en-suite", "ensuite", "en suite", "shower room", "wc/shower"]
+    aliases_el: ["ΝΤΟΥΣ", "ΜΠΑΝΙΟ 2", "ΕΝ ΣΟΥΙΤ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 1
+    lighting_zone: "night"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: true
+    is_outdoor: false
+    dedicated_appliances: []
+
+  wc:
+    aliases_en: ["wc", "guest wc", "toilet", "cloakroom"]
+    aliases_el: ["ΤΟΥΑΛΕΤΑ", "ΑΠΟΧΩΡΗΤΗΡΙΟ", "WC ΞΕΝΩΝ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 1
+    lighting_zone: "night"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: true
+    is_outdoor: false
+    dedicated_appliances: []
+
+  corridor:
+    aliases_en: ["corridor", "hallway", "hall", "entrance", "foyer"]
+    aliases_el: ["ΔΙΑΔΡΟΜΟΣ", "ΕΙΣΟΔΟΣ", "ΧΩΛ"]
+    lighting_w_per_m2: 6.0
+    min_lighting_points: 2
+    lighting_zone: "night"
+    socket_count_default: 1
+    socket_group: "general"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  utility:
+    aliases_en: ["utility", "laundry", "utility room"]
+    aliases_el: ["ΠΛΥΣΤΑΡΙΟ", "ΒΟΗΘΗΤΙΚΟΣ ΧΩΡΟΣ"]
+    lighting_w_per_m2: 8.0
+    min_lighting_points: 1
+    lighting_zone: "day"
+    socket_count_default: 2
+    socket_group: "kitchen_utility"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "washing_machine"
+        label: "Washing Machine"
+        category: "appliance"
+        connected_w: 2200.0
+        diversity: 0.85
+        power_factor: 0.95
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+      - key: "solar_water_heater"
+        label: "Immersion / Solar Water Heater Booster"
+        category: "water_heater"
+        connected_w: 3000.0
+        diversity: 1.0
+        power_factor: 1.0
+        min_breaker_in_a: 16
+        min_cable_mm2: 2.5
+        curve: "B"
+
+  veranda:
+    aliases_en: ["veranda", "balcony", "terrace", "patio"]
+    aliases_el: ["ΒΕΡΑΝΤΑ", "ΜΠΑΛΚΟΝΙ"]
+    lighting_w_per_m2: 6.0
+    min_lighting_points: 1
+    lighting_zone: "day"
+    socket_count_default: 1
+    socket_group: "general"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: true
+    dedicated_appliances: []
+
+  storage:
+    aliases_en: ["storage", "store", "store room"]
+    aliases_el: ["ΑΠΟΘΗΚΗ"]
+    lighting_w_per_m2: 6.0
+    min_lighting_points: 1
+    lighting_zone: "day"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
