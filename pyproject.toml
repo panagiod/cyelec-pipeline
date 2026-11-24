@@ -74,7 +74,10 @@ packages = ["cyelec"]
 [[tool.mypy.overrides]]
 module = [
     "ezdxf.*",
+    "shapely.*",
+    "networkx.*",
     "scipy.*",
+    "ifcopenshell.*",
 ]
 ignore_missing_imports = true
 

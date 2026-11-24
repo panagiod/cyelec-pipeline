@@ -1,4 +1,4 @@
-"""Stateless end-to-end Phase 1 electrical engineering pipeline orchestrator."""
+"""Stateless end-to-end Phase 1 & Phase 2 electrical engineering pipeline orchestrator."""
 
 from __future__ import annotations
 
@@ -7,7 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cyelec import __version__
-from cyelec.models.building import BuildingModel
+from cyelec.ingest.dxf_ingest import ingest_dxf
+from cyelec.ingest.ifc_ingest import ingest_ifc
+from cyelec.ingest.room_classifier import RoomClassifierFallback
+from cyelec.models.building import BuildingModel, BuildingType
 from cyelec.models.electrical import (
     CircuitSpec,
     DesignOverrides,
@@ -21,12 +24,17 @@ from cyelec.models.electrical import (
     RunProvenance,
     SolvedCircuit,
 )
+from cyelec.models.spatial import Phase2DesignResult, SpatialLayoutResult
 from cyelec.render.calc_report import export_calc_reports
+from cyelec.render.layout_dxf import export_electrical_layout_dxf
 from cyelec.render.schedule_xlsx import export_load_schedule_csv, export_load_schedule_xlsx
 from cyelec.solver.balancer import balance_three_phase_loads
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits
+from cyelec.spatial.placement import place_electrical_devices
+from cyelec.spatial.router import route_circuits
+from cyelec.spatial.wet_zones import compute_building_wet_zones
 from cyelec.standards_loader import StandardsBundle, load_standards
 
 
@@ -59,6 +67,8 @@ def run_phase1_pipeline(
     *,
     overrides: DesignOverrides | None = None,
     standards_dir: Path | None = None,
+    routed_lengths_m: dict[str, float] | None = None,
+    extra_flags: list[ReviewFlag] | None = None,
 ) -> ElectricalDesignResult:
     """Execute stateless Phase 1 pipeline: grouping, MILP balancing, BS 7671 & EAC checks."""
     standards = load_standards(standards_dir)
@@ -91,10 +101,17 @@ def run_phase1_pipeline(
         else building
     )
 
-    # 1. Deterministic circuit grouping
+    # 1. Deterministic circuit grouping (injecting true NetworkX routed lengths when provided)
     raw_specs = generate_circuits(effective_building, standards, overrides=overrides)
+    if routed_lengths_m:
+        raw_specs = [
+            spec.model_copy(update={"length_m": routed_lengths_m[spec.circuit_id]})
+            if spec.circuit_id in routed_lengths_m
+            else spec
+            for spec in raw_specs
+        ]
 
-    # Pre-apply per-circuit overrides (e.g., diversity/fixed_phase) before MILP balancing
+    # Pre-apply per-circuit overrides (e.g., diversity/fixed_phase/length) before MILP balancing
     circuit_overrides = overrides.circuit_overrides if overrides is not None else {}
     effective_specs = [
         _apply_circuit_override(spec, circuit_overrides.get(spec.circuit_id))
@@ -157,6 +174,8 @@ def run_phase1_pipeline(
             requires_etek_signoff=True,
         )
     ]
+    if extra_flags:
+        review_flags.extend(extra_flags)
     review_flags.extend(eac_compliance.flags)
     if phase_balance is not None:
         review_flags.extend(phase_balance.flags)
@@ -189,6 +208,88 @@ def run_phase1_pipeline(
     )
 
 
+def run_phase2_pipeline(
+    source: Path | BuildingModel,
+    *,
+    overrides: DesignOverrides | None = None,
+    standards_dir: Path | None = None,
+    building_type: BuildingType | None = None,
+    project_name: str | None = None,
+    tier2_fallback: RoomClassifierFallback | None = None,
+) -> Phase2DesignResult:
+    """Execute stateless Phase 2 pipeline: DXF/IFC ingest, wet zones, placement, routing, solve."""
+    standards = load_standards(standards_dir)
+    eac_profile: EacProfile = (
+        overrides.eac_profile
+        if (overrides is not None and overrides.eac_profile is not None)
+        else standards.eac_rules.default_profile
+    )
+
+    spatial_flags: list[ReviewFlag] = []
+
+    # 1. Architectural ingestion (DXF / IFC) or direct BuildingModel
+    if isinstance(source, Path):
+        suffix = source.suffix.lower()
+        if suffix == ".dxf":
+            building, ingest_flags = ingest_dxf(
+                source,
+                standards=standards,
+                project_name=project_name,
+                building_type=building_type,
+                tier2_fallback=tier2_fallback,
+            )
+            spatial_flags.extend(ingest_flags)
+        elif suffix == ".ifc":
+            building, ingest_flags = ingest_ifc(
+                source,
+                standards=standards,
+                project_name=project_name,
+                building_type=building_type,
+                tier2_fallback=tier2_fallback,
+            )
+            spatial_flags.extend(ingest_flags)
+        else:
+            raise ValueError(f"Unsupported architectural input format: '{suffix}' (use .dxf/.ifc)")
+    else:
+        building = source
+
+    # 2. BS 7671 Section 701 wet zones (clipped to room walls)
+    wet_zones = compute_building_wet_zones(building, standards, eac_profile=eac_profile)
+
+    # 3. Deterministic valid-wall electrical accessory placement
+    placed_devices, placement_flags = place_electrical_devices(building, wet_zones, standards)
+    spatial_flags.extend(placement_flags)
+
+    # 4. Generate circuit list and route every circuit on NetworkX conduit graph
+    specs = generate_circuits(building, standards, overrides=overrides)
+    bound_devices, routed_circuits, routing_flags = route_circuits(
+        building, specs, placed_devices
+    )
+    spatial_flags.extend(routing_flags)
+
+    routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
+    total_conduit_m = round(sum(rc.total_routed_length_m for rc in routed_circuits), 2)
+
+    spatial = SpatialLayoutResult(
+        wet_zones=wet_zones,
+        devices=bound_devices,
+        routed_circuits=routed_circuits,
+        total_conduit_m=total_conduit_m,
+        flags=spatial_flags,
+    )
+
+    # 5. Feed true NetworkX routed lengths and spatial review flags into Phase 1 solvers
+    design = run_phase1_pipeline(
+        building,
+        overrides=overrides,
+        standards_dir=standards_dir,
+        routed_lengths_m=routed_lengths_m,
+        extra_flags=spatial_flags,
+    )
+
+    return Phase2DesignResult(design=design, spatial=spatial)
+
+
 def export_phase1_deliverables(
     result: ElectricalDesignResult,
     out_dir: Path,
@@ -214,3 +315,20 @@ def export_phase1_deliverables(
         "md": md_path,
         "html": html_path,
     }
+
+
+def export_phase2_deliverables(
+    result: Phase2DesignResult,
+    out_dir: Path,
+) -> dict[str, Path]:
+    """Write all Phase 1 deliverables plus spatial_layout.json and electrical_layout.dxf."""
+    outputs = export_phase1_deliverables(result.design, out_dir)
+    spatial_json = out_dir / "spatial_layout.json"
+    layout_dxf = out_dir / "electrical_layout.dxf"
+
+    spatial_json.write_text(result.spatial.model_dump_json(indent=2), encoding="utf-8")
+    export_electrical_layout_dxf(result, layout_dxf)
+
+    outputs["spatial_json"] = spatial_json
+    outputs["layout_dxf"] = layout_dxf
+    return outputs

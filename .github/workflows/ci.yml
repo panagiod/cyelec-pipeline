@@ -38,3 +38,5 @@ jobs:
           cyelec version
           cyelec check-standards
           cyelec solve-synth --out-dir /tmp/cyelec_ci_out
+          cyelec inspect-dxf /tmp/cyelec_ci_out/cyprus_3bed_120m2.dxf
+          cyelec solve-dxf /tmp/cyelec_ci_out/cyprus_3bed_120m2.dxf --out-dir /tmp/cyelec_ci_p2

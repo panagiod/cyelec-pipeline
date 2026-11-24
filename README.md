@@ -30,6 +30,12 @@ cyelec synth-plan --out out/cyprus_3bed/sample_plan.dxf
 
 # Run end-to-end Phase 1 pipeline (DXF + Excel + CSV + MD + A4-landscape HTML + JSON)
 cyelec solve-synth --out-dir out/cyprus_3bed
+
+# Phase 2: Inspect any architectural DXF (EN/EL rooms, doors, windows, fixtures, DB1)
+cyelec inspect-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf
+
+# Phase 2: End-to-end DXF -> Section 701 wet zones -> valid-wall placement -> NetworkX routing -> BS 7671/EAC deliverables + electrical_layout.dxf
+cyelec solve-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf --out-dir out/cyprus_3bed_phase2
 ```
 
 ## Development Checks

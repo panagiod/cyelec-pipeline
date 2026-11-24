@@ -8,8 +8,15 @@ from typing import Annotated
 import typer
 
 from cyelec import __version__
+from cyelec.ingest.dxf_ingest import ingest_dxf
+from cyelec.models.building import BuildingType
 from cyelec.models.electrical import DesignOverrides, EacProfile, EarthingSystem, ReviewSeverity
-from cyelec.pipeline import export_phase1_deliverables, run_phase1_pipeline
+from cyelec.pipeline import (
+    export_phase1_deliverables,
+    export_phase2_deliverables,
+    run_phase1_pipeline,
+    run_phase2_pipeline,
+)
 from cyelec.standards_loader import load_standards, resolve_standards_dir
 from cyelec.synth.sample_plan import generate_cyprus_3bed_dxf
 
@@ -141,6 +148,110 @@ def solve_synth(
     typer.echo(f"DXF:  {dxf_path}")
     for key, path in outputs.items():
         typer.echo(f"{key.upper():<4}: {path}")
+
+
+@app.command("inspect-dxf")
+def inspect_dxf_cmd(
+    dxf_path: Annotated[
+        Path,
+        typer.Argument(help="Path to architectural .dxf floorplan."),
+    ],
+) -> None:
+    """Ingest a DXF floorplan and print bilingual classified rooms, fixtures, doors, and DB1."""
+    model, flags = ingest_dxf(dxf_path)
+    typer.echo(f"File: {dxf_path} | SHA-256: {(model.source_sha256 or '')[:16]}")
+    typer.echo(
+        f"Inferred Building Type: {model.building_type.value} | "
+        f"Rooms: {len(model.rooms)} | Total Area: {model.total_floor_area_m2:.2f} m²"
+    )
+    typer.echo(
+        f"Walls: {len(model.walls)} | Doors: {len(model.doors)} | "
+        f"Windows: {len(model.windows)} | DB1: "
+        f"({model.db_anchor.location_mm.x_mm:.0f}, {model.db_anchor.location_mm.y_mm:.0f} mm)"
+    )
+    for r in model.rooms:
+        fixts = ", ".join(f.fixture_type for f in r.fixtures) or "-"
+        typer.echo(
+            f"  {r.id:<4} {r.normalized_type.value:<16} {r.area_m2:>6.2f} m² | "
+            f"Label: {r.raw_label} | Fixtures: {fixts}"
+        )
+    if flags:
+        typer.echo(f"Ingestion Flags ({len(flags)}):")
+        for f in flags:
+            typer.echo(f"  [{f.severity.value.upper()}] {f.code}: {f.message}")
+
+
+@app.command("solve-dxf")
+def solve_dxf(
+    input_path: Annotated[
+        Path,
+        typer.Argument(help="Input architectural .dxf (or .ifc) floorplan."),
+    ],
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output directory for Phase 2 deliverables."),
+    ] = Path("out/phase2"),
+    profile: Annotated[
+        EacProfile,
+        typer.Option("--profile", help="Cyprus EAC BS 7671 edition profile."),
+    ] = EacProfile.EAC_18TH_A2,
+    earthing: Annotated[
+        EarthingSystem,
+        typer.Option("--earthing", help="Site earthing system (Cyprus default: TT)."),
+    ] = EarthingSystem.TT,
+    building_type: Annotated[
+        BuildingType | None,
+        typer.Option("--building-type", help="Optional EAC building type override."),
+    ] = None,
+    ambient_c: Annotated[
+        int | None,
+        typer.Option("--ambient", help="Optional global ambient temperature override (°C)."),
+    ] = None,
+    pv_kva: Annotated[
+        float,
+        typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
+    ] = 0.0,
+) -> None:
+    """Run end-to-end Phase 2 pipeline from a DXF/IFC plan to layout DXF, Excel, and reports."""
+    overrides = DesignOverrides(
+        eac_profile=profile,
+        earthing_system=earthing,
+        ambient_temp_c=ambient_c,
+        pv_capacity_kva=pv_kva,
+    )
+    p2 = run_phase2_pipeline(input_path, overrides=overrides, building_type=building_type)
+    outputs = export_phase2_deliverables(p2, out_dir)
+    res = p2.design
+    sp = p2.spatial
+
+    blockers = sum(1 for f in res.review_flags if f.severity == ReviewSeverity.BLOCKER)
+    warnings = sum(1 for f in res.review_flags if f.severity == ReviewSeverity.WARNING)
+    infos = sum(1 for f in res.review_flags if f.severity == ReviewSeverity.INFO)
+
+    typer.echo(f"Project: {res.building.project_name} ({res.building.total_floor_area_m2:.2f} m²)")
+    typer.echo(
+        f"Spatial: {len(sp.wet_zones)} wet-zone room(s) | {len(sp.devices)} placed devices | "
+        f"Total NetworkX Routed Conduit: {sp.total_conduit_m:.1f} m"
+    )
+    typer.echo(
+        f"Circuits: {len(res.circuits)} | "
+        f"Connected: {res.eac_compliance.total_connected_kva:.2f} kVA | "
+        f"Diversified: {res.eac_compliance.total_diversified_kva:.2f} kVA | "
+        f"Supply: {res.eac_compliance.recommended_supply_tier}"
+    )
+    if res.phase_balance is not None:
+        pb = res.phase_balance
+        typer.echo(
+            f"3-Phase Balance (MILP {pb.solver_status}): "
+            f"L1={pb.phase_currents_a['L1']:.2f} A, "
+            f"L2={pb.phase_currents_a['L2']:.2f} A, "
+            f"L3={pb.phase_currents_a['L3']:.2f} A | "
+            f"Imbalance={pb.imbalance_pct:.2f}% "
+            f"({'PASS' if pb.within_target else 'WARNING'})"
+        )
+    typer.echo(f"Review Flags: {blockers} blockers, {warnings} warnings, {infos} info")
+    for key, path in outputs.items():
+        typer.echo(f"{key.upper():<12}: {path}")
 
 
 if __name__ == "__main__":
