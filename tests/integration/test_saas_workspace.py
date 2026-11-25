@@ -249,3 +249,103 @@ def test_admin_key_provisioning_prefix_auth_and_full_route_metering(
     assert ui.status_code == 200
     assert 'id="apiKeyInput"' in ui.text
 
+
+def test_gdpr_lifecycle_delete_export_and_store_protocol(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cyelec.saas.store import WorkspaceStore, WorkspaceStoreProtocol
+
+    store = WorkspaceStore(db_path=tmp_path / "gdpr_ws.db")
+    assert isinstance(store, WorkspaceStoreProtocol)
+
+    app = create_app(store=store)
+    client = TestClient(app)
+
+    # Provision API keys for Tenant A and Tenant B
+    key_a = client.post("/v1/tenants/me/api-key", headers={"X-Tenant-ID": "firm-gdpr-a"}).json()[
+        "api_key"
+    ]
+    key_b = client.post("/v1/tenants/me/api-key", headers={"X-Tenant-ID": "firm-gdpr-b"}).json()[
+        "api_key"
+    ]
+    monkeypatch.setenv("CYELEC_AUTH_REQUIRED", "1")
+
+    headers_a = {"X-API-Key": key_a}
+    headers_b = {"X-API-Key": key_b}
+
+    # Tenant A updates profile & creates 2 projects with revisions
+    client.put(
+        "/v1/tenants/me",
+        headers=headers_a,
+        json={
+            "display_name": "Larnaca GDPR MEP",
+            "boq_rate_overrides": {"switchgear_eur": {"main_board_3p": 450.0}},
+        },
+    )
+    p1 = client.post("/v1/projects", headers=headers_a, json={"name": "Project One"}).json()[
+        "project_id"
+    ]
+    p2 = client.post("/v1/projects", headers=headers_a, json={"name": "Project Two"}).json()[
+        "project_id"
+    ]
+    assert (
+        client.post(
+            f"/v1/projects/{p1}/revisions",
+            headers=headers_a,
+            json={"benchmark_template": "apartment_3bed"},
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            f"/v1/projects/{p2}/revisions",
+            headers=headers_a,
+            json={"benchmark_template": "apartment_3bed"},
+        ).status_code
+        == 201
+    )
+    pb = client.post("/v1/projects", headers=headers_b, json={"name": "Tenant B Project"}).json()[
+        "project_id"
+    ]
+
+    # 1. Cross-tenant DELETE MUST return 404 and leave Tenant A's project intact
+    assert client.delete(f"/v1/projects/{p1}", headers=headers_b).status_code == 404
+    assert client.get(f"/v1/projects/{p1}", headers=headers_a).status_code == 200
+
+    # 2. Owner DELETE removes Project One and its revisions, preserving Project Two
+    del_p1 = client.delete(f"/v1/projects/{p1}", headers=headers_a)
+    assert del_p1.status_code == 200
+    assert del_p1.json() == {"deleted": True, "project_id": p1}
+    assert client.get(f"/v1/projects/{p1}", headers=headers_a).status_code == 404
+    assert client.get(f"/v1/projects/{p1}/revisions", headers=headers_a).status_code == 404
+    assert client.get(f"/v1/projects/{p2}", headers=headers_a).status_code == 200
+
+    # 3. GDPR Art. 20 portable export contains profile, Project Two, revisions & usage (no secrets)
+    exp = client.get("/v1/tenants/me/export", headers=headers_a)
+    assert exp.status_code == 200, exp.text
+    bundle = exp.json()
+    assert bundle["tenant"]["tenant_id"] == "firm-gdpr-a"
+    assert bundle["tenant"]["display_name"] == "Larnaca GDPR MEP"
+    assert [p["project_id"] for p in bundle["projects"]] == [p2]
+    assert len(bundle["revisions_by_project"][p2]) == 1
+    assert bundle["usage"]["total_events"] == 2
+    raw_dump = exp.text
+    assert key_a not in raw_dump
+    assert "api_key_hash" not in raw_dump
+    assert "api_key_salt" not in raw_dump
+
+    # 4. GDPR Article 17 right to erasure wipes Tenant A + invalidates key, leaves Tenant B intact
+    del_me = client.delete("/v1/tenants/me", headers=headers_a)
+    assert del_me.status_code == 200
+    assert del_me.json() == {"deleted": True, "tenant_id": "firm-gdpr-a"}
+
+    # Erased tenant's API key is immediately revoked (401)
+    assert client.get("/v1/tenants/me", headers=headers_a).status_code == 401
+    assert store.list_projects("firm-gdpr-a") == []
+    assert store.get_usage_summary("firm-gdpr-a").total_events == 0
+
+    # Tenant B remains 100% untouched
+    assert client.get(f"/v1/projects/{pb}", headers=headers_b).status_code == 200
+
+

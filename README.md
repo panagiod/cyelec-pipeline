@@ -11,10 +11,10 @@ Deterministic-first, zero-commercial-CAD-license Python 3.12 electrical engineer
 ## Product Capabilities
 
 1. **Messy Real-World DXF Resilience:** Recursive AutoCAD `INSERT` block explosion (Layer `"0"` inheritance & block-name hints), wall-to-room `shapely.ops.polygonize` fallback when `A-ROOM` polylines are missing, Cyprus Greeklish/abbreviated room aliases (`SALONI`, `KOUZ.`, `YPN. 1`, `MPANIO`, `WC/NTOYS`), pre-ingest DXF layer inspection (`POST /v1/dxf/layers`, `cyelec inspect-dxf --layers`), and explicit `DxfLayerMapping`.
-2. **Multi-Floor Buildings & Sub-Distribution Boards (`MDB -> DB-GF / DB-1F`):** BS 7671 sub-main feeder sizing at Cyprus 40°C ambient, mandatory TT time-delayed 100 mA Type S selective RCDs (Reg 536.4.1.4), automatic cumulative voltage drop enforcement ($\Delta V_{\text{sub-main}} + \Delta V_{\text{final}} \le 3\%$ lighting / $5\%$ power), hierarchical SLD rendering, and a 2-storey Cyprus villa benchmark (`villa_2storey`).
-3. **Cyprus BOQ (EUR + 19% VAT), Tenant Branding, Bilingual EN/EL & Optional Native PDF:** Deterministic EUR Bill of Quantities exported as a 3rd live-formula Excel sheet (`Bill of Quantities`) + `boq.csv`, English / Greek / Bilingual (`EN / EL`) deliverables, consulting firm & ETEK engineer branding across reports/SLD/CAD `E-TITLE`, and optional BSD-licensed WeasyPrint native PDF export (`--pdf`).
-4. **Interactive Click-to-Edit Visual Floorplan Workbench:** Zero-CDN, GDPR-safe ETEK review dashboard (`GET /`) featuring click-to-reclassify rooms (`room_type_overrides`), click-to-relocate `DB1` (`db_location_override_mm`) with live NetworkX conduit re-routing, DXF Layer Mapping Wizard, live BOQ tab, and interactive Pass-2 circuit phase/grouping overrides.
-5. **Multi-Tenant SaaS Workspace, Revision Diffing & Usage Metering:** Tenant-scoped SQLite repository (`CYELEC_DB_PATH`) with `/v1/tenants/me`, `/v1/tenants/me/api-key`, `/v1/projects`, `/v1/projects/{id}/revisions`, `/v1/projects/{id}/diff/{rev_a}/{rev_b}`, and `/v1/tenant/usage`.
+2. **Multi-Floor Buildings, Multi-DXF Combiner & BS 7671:2018+A2 Checks (`MDB -> DB-GF / DB-1F`):** Combine separate floor DXF files (`cyelec solve-multifloor --floor GF=gf.dxf --floor 1F=1f.dxf` / `POST /v1/solve/dxf/multifloor`) into hierarchical `MDB -> DB-GF/DB-1F` sub-boards, BS 7671 sub-main feeder sizing at Cyprus 40°C ambient, TT time-delayed 100 mA Type S selective RCDs (Reg 536.4.1.4), cumulative $\Delta V$ enforcement ($\le 3\%$ lighting / $5\%$ power), hierarchical SLD SVG & DXF parity (with firm/ETEK titleblocks), and BS 7671:2018+A2 checks (PV bidirectional RCBO/busbar backfeed Reg 530.3.201 & 551.7.2, prospective fault current $I_{pf}$ `6 kA`/`10 kA` breaking capacity Reg 434.5.1, AFDD advisory Reg 421.1.7).
+3. **Cyprus BOQ (Custom Tenant Rate Cards + Unpriced Tender BOQ), Branding, Bilingual EN/EL & Optional Native PDF:** Deterministic EUR Bill of Quantities exported as a 3rd live-formula Excel sheet (`Bill of Quantities`) + `boq.csv`, per-tenant saved custom EUR rate cards (`PUT /v1/tenants/me` with `boq_rate_overrides` & reduced 5% VAT support), unpriced **Tender BOQ** mode (`--tender-boq` / `tender_boq_blank_rates=true` leaving contractor Unit Rate cells blank with live auto-calc formulas), English / Greek / Bilingual (`EN / EL`) deliverables, firm & ETEK engineer branding, and optional BSD-licensed WeasyPrint native PDF export (`--pdf`).
+4. **Interactive Click-to-Edit Visual Floorplan Workbench:** Zero-CDN, GDPR-safe ETEK review dashboard (`GET /`) featuring session-only `X-API-Key` auth (`sessionStorage`), click-to-reclassify rooms (`room_type_overrides`), click-to-relocate `DB1` (`db_location_override_mm`) with live NetworkX conduit re-routing, DXF Layer Mapping Wizard, live BOQ tab, and interactive Pass-2 circuit phase/grouping overrides.
+5. **Production Multi-Tenant EU SaaS Workspace, `O(1)` Prefix Auth & GDPR Lifecycle:** Backend-agnostic `WorkspaceStoreProtocol` (SQLite default via `CYELEC_DB_PATH`, PostgreSQL drop-in ready), `O(1)` prefix-indexed PBKDF2-SHA256 API keys + `CYELEC_ADMIN_KEY` provisioning (`POST /v1/admin/tenants/{tenant_id}/api-key`), revision diffing & Pass-2 override carry-forward (`/v1/projects/{id}/diff/{rev_a}/{rev_b}`), full-route usage metering (`/v1/tenant/usage`), and EU GDPR Articles 17 & 20 endpoints (`DELETE /v1/projects/{project_id}`, `GET /v1/tenants/me/export`, `DELETE /v1/tenants/me`).
 
 ## Standards Tables (`standards/`)
 
@@ -37,9 +37,12 @@ cyelec check-standards
 # Inspect DXF layers or classified bilingual rooms
 cyelec inspect-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf --layers
 
-# Run complete Cyprus EAC plan-approval pack (bilingual + branded + BOQ + optional PDF)
+# Run complete Cyprus EAC plan-approval pack (bilingual + branded + BOQ + optional --tender-boq / --pdf)
 cyelec solve-eac plan.dxf --out-dir out/eac_pack \
   --language bilingual --firm-name "Kypros MEP Ltd" --engineer "N. Papadopoulos" --etek-reg "ETEK-E-4821"
+
+# Combine separate floor DXFs into MDB -> DB-GF / DB-1F submission pack
+cyelec solve-multifloor --floor GF=ground.dxf --floor 1F=first.dxf --out-dir out/villa_pack
 
 # Run all 4 Cyprus benchmarks (Apartment, Villa PV+EV, 2-Storey Villa MDB->DB-GF/DB-1F, Commercial Office)
 cyelec benchmark-suite --out-dir out/benchmarks

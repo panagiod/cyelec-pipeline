@@ -9,6 +9,7 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -96,6 +97,69 @@ class UsageSummary(BaseModel):
     total_duration_ms: float
     total_payload_bytes: int
     counts_by_event_type: dict[str, int] = Field(default_factory=dict)
+
+
+class TenantExportBundle(BaseModel):
+    """EU GDPR Article 20 portable data export for a tenant (excludes API key secrets)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    exported_at_utc: str
+    tenant: TenantProfile
+    projects: list[ProjectSummary] = Field(default_factory=list)
+    revisions_by_project: dict[str, list[RevisionRecord]] = Field(default_factory=dict)
+    usage: UsageSummary
+
+
+@runtime_checkable
+class WorkspaceStoreProtocol(Protocol):
+    """Backend-agnostic multi-tenant store contract (SQLite default; PostgreSQL drop-in ready)."""
+
+    def close(self) -> None: ...
+    def get_or_create_tenant(self, tenant_id: str) -> TenantProfile: ...
+    def update_tenant_profile(
+        self,
+        tenant_id: str,
+        *,
+        display_name: str | None = None,
+        report_language: ReportLanguage | None = None,
+        branding: TenantBranding | None = None,
+        boq_rate_overrides: BoqRateOverrides | None = None,
+    ) -> TenantProfile: ...
+    def issue_tenant_api_key(self, tenant_id: str) -> str: ...
+    def resolve_tenant_by_api_key(self, api_key: str) -> str | None: ...
+    def create_project(
+        self, tenant_id: str, name: str, description: str = ""
+    ) -> ProjectSummary: ...
+    def get_project(self, tenant_id: str, project_id: str) -> ProjectSummary | None: ...
+    def list_projects(self, tenant_id: str) -> list[ProjectSummary]: ...
+    def delete_project(self, tenant_id: str, project_id: str) -> bool: ...
+    def save_revision(
+        self,
+        tenant_id: str,
+        project_id: str,
+        result: Phase2DesignResult,
+        *,
+        overrides: DesignOverrides | None = None,
+        notes: str = "",
+    ) -> RevisionRecord: ...
+    def list_revisions(self, tenant_id: str, project_id: str) -> list[RevisionSummary]: ...
+    def get_revision(
+        self, tenant_id: str, project_id: str, revision_number: int
+    ) -> RevisionRecord | None: ...
+    def get_latest_revision(self, tenant_id: str, project_id: str) -> RevisionRecord | None: ...
+    def record_usage(
+        self,
+        tenant_id: str,
+        event_type: str,
+        duration_ms: float,
+        payload_bytes: int,
+        *,
+        project_id: str | None = None,
+    ) -> None: ...
+    def get_usage_summary(self, tenant_id: str) -> UsageSummary: ...
+    def export_tenant_data(self, tenant_id: str) -> TenantExportBundle: ...
+    def delete_tenant_cascade(self, tenant_id: str) -> bool: ...
 
 
 class WorkspaceStore:
@@ -599,3 +663,64 @@ class WorkspaceStore:
             total_payload_bytes=total_bytes,
             counts_by_event_type=counts,
         )
+
+    # ------------------------------------------------------------------
+    # EU GDPR Lifecycle: Project Deletion, Art. 20 Export & Art. 17 Erasure
+    # ------------------------------------------------------------------
+    def delete_project(self, tenant_id: str, project_id: str) -> bool:
+        """Atomically delete a tenant-owned project and all its revisions."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT project_id FROM projects WHERE project_id = ? AND tenant_id = ?",
+                (project_id, tenant_id),
+            ).fetchone()
+            if row is None:
+                return False
+            self._conn.execute(
+                "DELETE FROM revisions WHERE project_id = ? AND tenant_id = ?",
+                (project_id, tenant_id),
+            )
+            self._conn.execute(
+                "DELETE FROM projects WHERE project_id = ? AND tenant_id = ?",
+                (project_id, tenant_id),
+            )
+            self._conn.commit()
+            return True
+
+    def export_tenant_data(self, tenant_id: str) -> TenantExportBundle:
+        """GDPR Article 20 portable JSON export for a tenant (excludes API key secrets)."""
+        with self._lock:
+            tenant = self.get_or_create_tenant(tenant_id)
+            projects = self.list_projects(tenant_id)
+            revisions_by_project: dict[str, list[RevisionRecord]] = {}
+            for proj in projects:
+                rev_summaries = self.list_revisions(tenant_id, proj.project_id)
+                recs: list[RevisionRecord] = []
+                for rs in rev_summaries:
+                    rec = self.get_revision(tenant_id, proj.project_id, rs.revision_number)
+                    if rec is not None:
+                        recs.append(rec)
+                revisions_by_project[proj.project_id] = recs
+            usage = self.get_usage_summary(tenant_id)
+        return TenantExportBundle(
+            exported_at_utc=_utc_now(),
+            tenant=tenant,
+            projects=projects,
+            revisions_by_project=revisions_by_project,
+            usage=usage,
+        )
+
+    def delete_tenant_cascade(self, tenant_id: str) -> bool:
+        """GDPR Article 17 right to erasure: atomically erase all data for a tenant."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tenant_id FROM tenants WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()
+            self._conn.execute("DELETE FROM usage_events WHERE tenant_id = ?", (tenant_id,))
+            self._conn.execute("DELETE FROM revisions WHERE tenant_id = ?", (tenant_id,))
+            self._conn.execute("DELETE FROM projects WHERE tenant_id = ?", (tenant_id,))
+            self._conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
+            self._conn.commit()
+            return row is not None
+

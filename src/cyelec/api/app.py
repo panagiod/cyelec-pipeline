@@ -39,9 +39,11 @@ from cyelec.saas.store import (
     ProjectSummary,
     RevisionRecord,
     RevisionSummary,
+    TenantExportBundle,
     TenantProfile,
     UsageSummary,
     WorkspaceStore,
+    WorkspaceStoreProtocol,
 )
 from cyelec.standards_loader import load_standards
 from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
@@ -139,6 +141,24 @@ class CreateRevisionRequest(BaseModel):
     overrides: DesignOverrides | None = None
     carry_forward_overrides: bool = True
     notes: str = ""
+
+
+class ProjectDeletedResponse(BaseModel):
+    """Confirmation envelope after deleting a tenant-owned project and its revisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deleted: bool
+    project_id: str
+
+
+class TenantDeletedResponse(BaseModel):
+    """Confirmation envelope after GDPR Article 17 cascade tenant erasure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deleted: bool
+    tenant_id: str
 
 
 def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
@@ -259,9 +279,16 @@ def _solve_multifloor_dxf_sync(
         return run_phase2_pipeline(model, overrides=overrides, extra_flags=mf_flags)
 
 
-def create_app(db_path: Path | None = None) -> FastAPI:
+def create_app(
+    db_path: Path | None = None,
+    *,
+    store: WorkspaceStoreProtocol | None = None,
+) -> FastAPI:
     """Create the Multi-Tenant EU B2B SaaS FastAPI application with strict tenant isolation."""
-    store = WorkspaceStore(db_path=db_path)
+    active_store: WorkspaceStoreProtocol = (
+        store if store is not None else WorkspaceStore(db_path=db_path)
+    )
+    store = active_store
     api = FastAPI(
         title="cyelec-pipeline SaaS API",
         version=__version__,
@@ -710,6 +737,25 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         raw_key = store.issue_tenant_api_key(tid)
         return ApiKeyIssuedResponse(tenant_id=tid, api_key=raw_key)
 
+    @api.get("/v1/tenants/me/export", response_model=TenantExportBundle)
+    def export_my_tenant_data(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> TenantExportBundle:
+        """EU GDPR Article 20 portable data export (excludes API key secrets)."""
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.export_tenant_data(tid)
+
+    @api.delete("/v1/tenants/me", response_model=TenantDeletedResponse)
+    def delete_my_tenant(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> TenantDeletedResponse:
+        """EU GDPR Article 17 right to erasure: cascade-delete tenant and all owned records."""
+        tid = _effective_tenant(request, x_tenant_id)
+        deleted = store.delete_tenant_cascade(tid)
+        return TenantDeletedResponse(deleted=deleted, tenant_id=tid)
+
     @api.post("/v1/projects", response_model=ProjectSummary, status_code=201)
     def create_project(
         request: Request,
@@ -738,6 +784,18 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         if proj is None:
             raise HTTPException(status_code=404, detail="Project not found.")
         return proj
+
+    @api.delete("/v1/projects/{project_id}", response_model=ProjectDeletedResponse)
+    def delete_project(
+        request: Request,
+        project_id: str,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> ProjectDeletedResponse:
+        """Delete a tenant-owned project and all its revisions (404 if not owned by tenant)."""
+        tid = _effective_tenant(request, x_tenant_id)
+        if not store.delete_project(tid, project_id):
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return ProjectDeletedResponse(deleted=True, project_id=project_id)
 
     @api.post(
         "/v1/projects/{project_id}/revisions",

@@ -12,9 +12,11 @@ from cyelec.saas.store import (
     ProjectSummary,
     RevisionRecord,
     RevisionSummary,
+    TenantExportBundle,
     TenantProfile,
     UsageSummary,
     WorkspaceStore,
+    WorkspaceStoreProtocol,
 )
 
 __all__ = [
@@ -24,9 +26,11 @@ __all__ = [
     "RevisionRecord",
     "RevisionSummary",
     "RoomDelta",
+    "TenantExportBundle",
     "TenantProfile",
     "UsageSummary",
     "WorkspaceStore",
+    "WorkspaceStoreProtocol",
     "carry_forward_overrides",
     "compute_revision_diff",
     "extract_key_prefix",
