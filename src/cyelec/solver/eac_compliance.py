@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-from cyelec.models.building import BuildingModel
+from cyelec.models.building import BuildingModel, BuildingType, RoomType
 from cyelec.models.electrical import (
     EacComplianceResult,
     EacProfile,
@@ -33,8 +33,9 @@ def evaluate_eac_compliance(
     eac_profile: EacProfile | None = None,
     phase_balance: PhaseBalanceResult | None = None,
     pv_capacity_kva_override: float | None = None,
+    prospective_fault_current_ka: float | None = None,
 ) -> EacComplianceResult:
-    """Evaluate Cyprus EAC 1P/3P supply rules, tiering, CT metering, and substation escalations."""
+    """Evaluate Cyprus EAC 1P/3P supply rules, tiering, CT metering, and BS 7671+A2 checks."""
     eac_rules = standards.eac_rules
     active_profile = eac_profile or eac_rules.default_profile
     profile_spec = eac_rules.profiles[active_profile]
@@ -139,6 +140,29 @@ def evaluate_eac_compliance(
             )
         )
 
+    # BS 7671:2018+A2:2022 Reg 530.3.201 (bidirectional RCBO) & Reg 551.7.2 (busbar backfeed)
+    if pv_kva > 0.0:
+        pv_i_a = (
+            (pv_kva * 1000.0) / (math.sqrt(3.0) * eac_rules.system_nominal.ul_v)
+            if supply_phases == 3
+            else (pv_kva * 1000.0) / eac_rules.system_nominal.u0_v
+        )
+        combined_busbar_a = selected_tier.amps + pv_i_a
+        busbar_warn = combined_busbar_a > 100.0 and not ct_metering_required
+        flags.append(
+            ReviewFlag(
+                code="BS7671_PV_BIDIRECTIONAL_AND_BUSBAR_CHECK",
+                severity=ReviewSeverity.WARNING if busbar_warn else ReviewSeverity.INFO,
+                category="bs7671",
+                regulation_ref="BS 7671:2018+A2 Reg 530.3.201 & Reg 551.7.2",
+                message=(
+                    f"PV backfeed ({pv_kva:.1f} kVA = {pv_i_a:.1f} A/phase): specify a "
+                    "bidirectional RCBO/RCD on the PV circuit and verify DB busbar rating >= "
+                    f"In + Ipv = {combined_busbar_a:.1f} A."
+                ),
+            )
+        )
+
     if ct_metering_required:
         flags.append(
             ReviewFlag(
@@ -150,6 +174,65 @@ def evaluate_eac_compliance(
                     f"Peak phase demand {max_phase_demand_a:.1f} A exceeds 100 A/phase; "
                     "EAC Current Transformer (CT) metering chamber and panel required."
                 ),
+            )
+        )
+
+    # Prospective Fault Current (Ipf) Breaking Capacity Check (BS 7671 Reg 434.5.1)
+    is_commercial = building.building_type in (
+        BuildingType.OFFICE,
+        BuildingType.SHOP,
+        BuildingType.WORKSHOP,
+        BuildingType.INDUSTRIAL,
+    )
+    eff_ipf_ka = (
+        prospective_fault_current_ka
+        if prospective_fault_current_ka is not None
+        else (10.0 if (ct_metering_required or is_commercial) else 6.0)
+    )
+    if eff_ipf_ka > 10.0:
+        flags.append(
+            ReviewFlag(
+                code="BS7671_IPF_EXCEEDS_10KA",
+                severity=ReviewSeverity.BLOCKER,
+                category="bs7671",
+                regulation_ref="BS 7671 Reg 434.5.1",
+                message=(
+                    f"Prospective fault current Ipf={eff_ipf_ka:.1f} kA exceeds standard 10 kA "
+                    "MCB/RCBO breaking capacity; specify MCCB / BS 88 HRC back-up protection."
+                ),
+            )
+        )
+    elif eff_ipf_ka > 6.0 or ct_metering_required:
+        flags.append(
+            ReviewFlag(
+                code="BS7671_IPF_10KA_SWITCHGEAR_REQUIRED",
+                severity=ReviewSeverity.WARNING,
+                category="bs7671",
+                regulation_ref="BS 7671 Reg 434.5.1 (BS EN 60898 / 61009)",
+                message=(
+                    f"Site Ipf={eff_ipf_ka:.1f} kA (>6 kA domestic rating): specify minimum "
+                    "10 kA breaking-capacity MCB/RCBO switchgear throughout MDB/sub-boards."
+                ),
+            )
+        )
+
+    # BS 7671:2018+A2 Reg 421.1.7 AFDD advisory for residential sleeping accommodation
+    has_sleeping = any(
+        r.normalized_type in (RoomType.BEDROOM, RoomType.MASTER_BEDROOM) for r in building.rooms
+    )
+    if active_profile == EacProfile.EAC_18TH_A2 and has_sleeping:
+        flags.append(
+            ReviewFlag(
+                code="BS7671_AFDD_ADVISORY_421_1_7",
+                severity=ReviewSeverity.INFO,
+                category="bs7671",
+                regulation_ref="BS 7671:2018+A2 Reg 421.1.7",
+                message=(
+                    "Sleeping accommodation detected under 18th+A2 profile: AFDDs are mandatory "
+                    "on AC socket final circuits in HRRBs (>=18 m), HMOs, and care homes, and "
+                    "recommended for residential bedroom socket circuits."
+                ),
+                requires_etek_signoff=False,
             )
         )
 

@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 
 from cyelec import __version__
-from cyelec.ingest.dxf_ingest import ingest_dxf, inspect_dxf_layers
+from cyelec.ingest.dxf_ingest import ingest_dxf, ingest_multi_floor_dxf, inspect_dxf_layers
 from cyelec.models.building import BuildingType, DxfLayerMapping
 from cyelec.models.electrical import (
     DesignOverrides,
@@ -443,6 +443,108 @@ def solve_eac(
         f"EAC Pack Complete: {res.building.project_name} | "
         f"Supply: {res.eac_compliance.recommended_supply_tier} | "
         f"Conduit: {sp.total_conduit_m:.1f} m{boq_msg} | Artifacts: {len(outputs)}"
+    )
+    for key, path in sorted(outputs.items()):
+        typer.echo(f"  {key.upper():<16}: {path}")
+
+
+@app.command("solve-multifloor")
+def solve_multifloor(
+    floor: Annotated[
+        list[str],
+        typer.Option(
+            "--floor",
+            "-f",
+            help="Floor spec in LABEL=PATH format (e.g., --floor GF=gf.dxf --floor 1F=1f.dxf).",
+        ),
+    ],
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output directory for multi-floor EAC pack."),
+    ] = Path("out/multifloor_pack"),
+    profile: Annotated[
+        EacProfile,
+        typer.Option("--profile", help="Cyprus EAC BS 7671 edition profile."),
+    ] = EacProfile.EAC_18TH_A2,
+    earthing: Annotated[
+        EarthingSystem,
+        typer.Option("--earthing", help="Site earthing system (Cyprus default: TT)."),
+    ] = EarthingSystem.TT,
+    building_type: Annotated[
+        BuildingType | None,
+        typer.Option("--building-type", help="Optional EAC building type override."),
+    ] = None,
+    pv_kva: Annotated[
+        float,
+        typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
+    ] = 0.0,
+    language: Annotated[
+        ReportLanguage,
+        typer.Option("--language", help="Deliverable language: en, el, or bilingual."),
+    ] = ReportLanguage.EN,
+    firm_name: Annotated[
+        str,
+        typer.Option("--firm-name", help="Consulting engineering firm name for branding."),
+    ] = "",
+    engineer: Annotated[
+        str,
+        typer.Option("--engineer", help="Licensed ETEK electrical engineer name."),
+    ] = "",
+    etek_reg: Annotated[
+        str,
+        typer.Option("--etek-reg", help="ETEK registration number (e.g., ETEK-E-1234)."),
+    ] = "",
+    layer_mapping: Annotated[
+        Path | None,
+        typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
+    ] = None,
+    zip_bundle: Annotated[
+        bool,
+        typer.Option("--zip/--no-zip", help="Also write eac_submission_pack.zip archive."),
+    ] = True,
+) -> None:
+    """Combine multiple architectural floor DXFs into MDB -> DB-<FLOOR> EAC deliverables."""
+    floor_files: list[tuple[str, Path]] = []
+    for item in floor:
+        if "=" not in item:
+            raise typer.BadParameter(
+                f"Invalid --floor '{item}'. Expected LABEL=PATH (e.g., GF=ground.dxf)."
+            )
+        label, raw_path = item.split("=", 1)
+        floor_files.append((label.strip(), Path(raw_path.strip())))
+
+    branding = (
+        TenantBranding(firm_name=firm_name, engineer_name=engineer, etek_reg_no=etek_reg)
+        if (firm_name or engineer or etek_reg)
+        else None
+    )
+    overrides = DesignOverrides(
+        eac_profile=profile,
+        earthing_system=earthing,
+        pv_capacity_kva=pv_kva,
+        report_language=language,
+        branding=branding,
+    )
+    mapping = _load_layer_mapping(layer_mapping)
+    model, mf_flags = ingest_multi_floor_dxf(
+        floor_files,
+        building_type=building_type,
+        pv_capacity_kva=pv_kva,
+        layer_mapping=mapping,
+    )
+    p2 = run_phase2_pipeline(model, overrides=overrides, extra_flags=mf_flags)
+    outputs = export_phase3_deliverables(p2, out_dir)
+    if zip_bundle:
+        outputs["zip_bundle"] = build_submission_zip(
+            outputs, out_dir / "eac_submission_pack.zip"
+        )
+
+    res = p2.design
+    boards = ", ".join(sb.board_id for sb in res.building.sub_boards) or res.building.db_anchor.id
+    typer.echo(
+        f"Multi-Floor EAC Pack Complete: {res.building.project_name} | "
+        f"Boards: {res.building.db_anchor.id} -> [{boards}] | "
+        f"Supply: {res.eac_compliance.recommended_supply_tier} | Artifacts: {len(outputs)}"
     )
     for key, path in sorted(outputs.items()):
         typer.echo(f"  {key.upper():<16}: {path}")

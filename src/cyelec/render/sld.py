@@ -579,8 +579,10 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     col_w = 2400.0
     margin = 1200.0
     sheet_w = max(32_000.0, 2.0 * margin + n * col_w)
-    sheet_h = 21_000.0
+    sub_shift = 2800.0 if result.sub_mains else 0.0
+    sheet_h = 21_000.0 + sub_shift
 
+    branding_line = format_branding_line(result.branding)
     # Drawing border & title strip
     msp.add_lwpolyline(
         [(0, 0), (sheet_w, 0), (sheet_w, sheet_h), (0, sheet_h)],
@@ -593,7 +595,7 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     msp.add_text(
         f"SINGLE-LINE DIAGRAM — {result.building.project_name} ({eac.recommended_supply_tier})",
         dxfattribs={"layer": "E-SLD-TEXT", "height": 360.0},
-    ).set_placement((600.0, 2200.0))
+    ).set_placement((600.0, 2350.0))
     msp.add_text(
         (
             f"PROFILE: {eac.eac_profile.value} | EARTHING: {result.earthing_system.value} "
@@ -601,12 +603,17 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             f"ETEK SIGN-OFF REQUIRED | SHA256: {result.provenance.input_sha256[:16]}"
         ),
         dxfattribs={"layer": "E-SLD-TEXT", "height": 220.0},
-    ).set_placement((600.0, 1200.0))
+    ).set_placement((600.0, 1450.0))
+    if branding_line:
+        msp.add_text(
+            f"PRACTICE / ETEK: {branding_line}",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 210.0},
+        ).set_placement((600.0, 650.0))
 
-    # Main busbar (y = 14_500 mm)
+    # Main busbar (y = 14_500 + sub_shift mm)
     bus_x0 = margin
     bus_x1 = sheet_w - margin
-    bus_y = 14_500.0
+    bus_y = 14_500.0 + sub_shift
     cx_inc = sheet_w / 2.0
 
     msp.add_line((bus_x0, bus_y), (bus_x1, bus_y), dxfattribs={"layer": "E-SLD-BUS"})
@@ -617,13 +624,15 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     )
 
     # EAC Meter & Main Isolator above busbar
-    msp.add_line((cx_inc, 19_800.0), (cx_inc, 18_500.0), dxfattribs={"layer": "E-SLD-WIRE"})
+    msp.add_line(
+        (cx_inc, bus_y + 5300.0), (cx_inc, bus_y + 4000.0), dxfattribs={"layer": "E-SLD-WIRE"}
+    )
     msp.add_lwpolyline(
         [
-            (cx_inc - 1400.0, 17_300.0),
-            (cx_inc + 1400.0, 17_300.0),
-            (cx_inc + 1400.0, 18_500.0),
-            (cx_inc - 1400.0, 18_500.0),
+            (cx_inc - 1400.0, bus_y + 2800.0),
+            (cx_inc + 1400.0, bus_y + 2800.0),
+            (cx_inc + 1400.0, bus_y + 4000.0),
+            (cx_inc - 1400.0, bus_y + 4000.0),
         ],
         close=True,
         dxfattribs={"layer": "E-SLD-DEV"},
@@ -631,16 +640,18 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     msp.add_text(
         f"EAC METER {eac.recommended_supply_tier}",
         dxfattribs={"layer": "E-SLD-TEXT", "height": 220.0},
-    ).set_placement((cx_inc - 1250.0, 17_750.0))
-    msp.add_line((cx_inc, 17_300.0), (cx_inc, 16_300.0), dxfattribs={"layer": "E-SLD-WIRE"})
+    ).set_placement((cx_inc - 1250.0, bus_y + 3250.0))
+    msp.add_line(
+        (cx_inc, bus_y + 2800.0), (cx_inc, bus_y + 1800.0), dxfattribs={"layer": "E-SLD-WIRE"}
+    )
 
     # Main Isolator box
     msp.add_lwpolyline(
         [
-            (cx_inc - 1400.0, 15_300.0),
-            (cx_inc + 1400.0, 15_300.0),
-            (cx_inc + 1400.0, 16_300.0),
-            (cx_inc - 1400.0, 16_300.0),
+            (cx_inc - 1400.0, bus_y + 800.0),
+            (cx_inc + 1400.0, bus_y + 800.0),
+            (cx_inc + 1400.0, bus_y + 1800.0),
+            (cx_inc - 1400.0, bus_y + 1800.0),
         ],
         close=True,
         dxfattribs={"layer": "E-SLD-DEV"},
@@ -648,11 +659,11 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     msp.add_text(
         f"MAIN ISOLATOR {eac.recommended_main_breaker_a}A",
         dxfattribs={"layer": "E-SLD-TEXT", "height": 220.0},
-    ).set_placement((cx_inc - 1250.0, 15_680.0))
-    msp.add_line((cx_inc, 15_300.0), (cx_inc, bus_y), dxfattribs={"layer": "E-SLD-WIRE"})
+    ).set_placement((cx_inc - 1250.0, bus_y + 1180.0))
+    msp.add_line((cx_inc, bus_y + 800.0), (cx_inc, bus_y), dxfattribs={"layer": "E-SLD-WIRE"})
 
     # Earth symbol on left
-    ex, ey = margin + 1200.0, 16_800.0
+    ex, ey = margin + 1200.0, bus_y + 2300.0
     msp.add_line((ex, ey + 600.0), (ex, ey), dxfattribs={"layer": "E-SLD-EARTH"})
     msp.add_line((ex - 450.0, ey), (ex + 450.0, ey), dxfattribs={"layer": "E-SLD-EARTH"})
     msp.add_line(
@@ -666,13 +677,59 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         dxfattribs={"layer": "E-SLD-EARTH", "height": 200.0},
     ).set_placement((ex - 900.0, ey + 750.0))
 
-    # Final circuits
     step_x = (bus_x1 - bus_x0) / max(1, n)
+    tap_bus_y = bus_y
+
+    # Optional Hierarchical Sub-Distribution Boards (MDB -> DB-GF / DB-1F)
+    if result.sub_mains:
+        sub_box_top = bus_y - 700.0
+        sub_box_bot = bus_y - 2000.0
+        sub_bus_y = bus_y - 2600.0
+        tap_bus_y = sub_bus_y
+        for sm in result.sub_mains:
+            indices = [i for i, c in enumerate(circuits) if c.spec.board_id == sm.board_id]
+            if not indices:
+                continue
+            sx0 = bus_x0 + step_x * min(indices) + 200.0
+            sx1 = bus_x0 + step_x * (max(indices) + 1) - 200.0
+            scx = (sx0 + sx1) / 2.0
+            msp.add_line(
+                (scx, bus_y - 250.0), (scx, sub_box_top), dxfattribs={"layer": "E-SLD-WIRE"}
+            )
+            msp.add_lwpolyline(
+                [
+                    (scx - 3200.0, sub_box_bot),
+                    (scx + 3200.0, sub_box_bot),
+                    (scx + 3200.0, sub_box_top),
+                    (scx - 3200.0, sub_box_top),
+                ],
+                close=True,
+                dxfattribs={"layer": "E-SLD-DEV"},
+            )
+            rcd_s = " + 100mA TYPE S" if sm.rcd_selective_type_s else ""
+            msp.add_text(
+                f"{sm.parent_board_id}->{sm.board_id} ({sm.floor}) {sm.breaker_in_a}A{rcd_s}",
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 200.0},
+            ).set_placement((scx - 3000.0, sub_box_top - 480.0))
+            msp.add_text(
+                (
+                    f"{sm.cable_mm2:g}/{sm.cpc_mm2:g}mm2 L={sm.length_m:.0f}m "
+                    f"dV={sm.voltage_drop_pct:.2f}% "
+                    f"CumL/P={sm.cumulative_lighting_vd_pct:.1f}/{sm.cumulative_power_vd_pct:.1f}%"
+                ),
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
+            ).set_placement((scx - 3000.0, sub_box_bot + 260.0))
+            msp.add_line(
+                (scx, sub_box_bot), (scx, sub_bus_y), dxfattribs={"layer": "E-SLD-WIRE"}
+            )
+            msp.add_line((sx0, sub_bus_y), (sx1, sub_bus_y), dxfattribs={"layer": "E-SLD-BUS"})
+
+    # Final circuits
     for idx, circ in enumerate(circuits):
         s = circ.spec
         cx = bus_x0 + step_x * (idx + 0.5)
-        # Drop wire
-        msp.add_line((cx, bus_y), (cx, 12_200.0), dxfattribs={"layer": "E-SLD-WIRE"})
+        # Drop wire from MDB or sub-board busbar
+        msp.add_line((cx, tap_bus_y), (cx, 12_200.0), dxfattribs={"layer": "E-SLD-WIRE"})
         # Breaker rectangle
         msp.add_lwpolyline(
             [

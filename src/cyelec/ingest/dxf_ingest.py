@@ -35,6 +35,7 @@ from cyelec.models.building import (
     Point2D,
     Room,
     RoomType,
+    SubBoardSpec,
     WallSegment,
     WindowOpening,
 )
@@ -775,3 +776,166 @@ def ingest_dxf(
         source_sha256=sha256,
     )
     return model, flags
+
+
+def _shift_point(pt: Point2D, dx_mm: float) -> Point2D:
+    return Point2D(x_mm=round(pt.x_mm + dx_mm, 2), y_mm=round(pt.y_mm, 2))
+
+
+def ingest_multi_floor_dxf(
+    floor_files: list[tuple[str, Path]],
+    *,
+    submain_lengths_m: dict[str, float] | None = None,
+    standards: StandardsBundle | None = None,
+    project_name: str | None = None,
+    building_type: BuildingType | None = None,
+    pv_capacity_kva: float = 0.0,
+    tier2_fallback: RoomClassifierFallback | None = None,
+    layer_mapping: DxfLayerMapping | None = None,
+    floor_gap_mm: float = 3000.0,
+) -> tuple[BuildingModel, list[ReviewFlag]]:
+    """Combine multiple architectural floor DXF files into one multi-board BuildingModel."""
+    if not floor_files:
+        raise ValueError("Provide at least one (floor_label, dxf_path) entry.")
+
+    std = standards or load_standards()
+    combined_rooms: list[Room] = []
+    combined_walls: list[WallSegment] = []
+    combined_doors: list[DoorOpening] = []
+    combined_windows: list[WindowOpening] = []
+    sub_boards: list[SubBoardSpec] = []
+    combined_flags: list[ReviewFlag] = []
+    hasher = hashlib.sha256()
+
+    cursor_x = 0.0
+    mdb_location: Point2D | None = None
+
+    for idx, (raw_floor, dxf_path) in enumerate(floor_files):
+        floor = raw_floor.strip().upper() or f"F{idx}"
+        f_model, f_flags = ingest_dxf(
+            dxf_path,
+            standards=std,
+            project_name=project_name,
+            building_type=building_type,
+            tier2_fallback=tier2_fallback,
+            layer_mapping=layer_mapping,
+        )
+        hasher.update(f"{floor}:{f_model.source_sha256 or ''}".encode())
+        combined_flags.extend(f_flags)
+
+        all_x = [p.x_mm for r in f_model.rooms for p in r.polygon_mm]
+        min_x = min(all_x) if all_x else 0.0
+        max_x = max(all_x) if all_x else 10_000.0
+        dx = cursor_x - min_x
+
+        for r in f_model.rooms:
+            new_rid = f"{floor}-{r.id}"
+            shifted_fixts = [
+                PlumbingFixture(
+                    id=f"{floor}-{fx.id}",
+                    room_id=new_rid,
+                    fixture_type=fx.fixture_type,
+                    polygon_mm=[_shift_point(p, dx) for p in fx.polygon_mm],
+                )
+                for fx in r.fixtures
+            ]
+            combined_rooms.append(
+                r.model_copy(
+                    update={
+                        "id": new_rid,
+                        "floor": floor,
+                        "raw_label": f"{r.raw_label} ({floor})",
+                        "polygon_mm": [_shift_point(p, dx) for p in r.polygon_mm],
+                        "fixtures": shifted_fixts,
+                    }
+                )
+            )
+
+        for w in f_model.walls:
+            combined_walls.append(
+                w.model_copy(
+                    update={
+                        "id": f"{floor}-{w.id}",
+                        "start": _shift_point(w.start, dx),
+                        "end": _shift_point(w.end, dx),
+                    }
+                )
+            )
+        for d in f_model.doors:
+            combined_doors.append(
+                d.model_copy(
+                    update={
+                        "id": f"{floor}-{d.id}",
+                        "room_id": f"{floor}-{d.room_id}",
+                        "hinge": _shift_point(d.hinge, dx),
+                    }
+                )
+            )
+        for win in f_model.windows:
+            combined_windows.append(
+                win.model_copy(
+                    update={
+                        "id": f"{floor}-{win.id}",
+                        "room_id": f"{floor}-{win.room_id}",
+                        "start": _shift_point(win.start, dx),
+                        "end": _shift_point(win.end, dx),
+                    }
+                )
+            )
+
+        shifted_db = _shift_point(f_model.db_anchor.location_mm, dx)
+        if mdb_location is None:
+            mdb_location = Point2D(x_mm=max(0.0, shifted_db.x_mm - 500.0), y_mm=shifted_db.y_mm)
+
+        default_len = 6.0 + 10.0 * idx
+        sm_len = (
+            submain_lengths_m.get(floor, default_len)
+            if submain_lengths_m is not None
+            else default_len
+        )
+        sub_boards.append(
+            SubBoardSpec(
+                board_id=f"DB-{floor}",
+                floor=floor,
+                parent_board_id="MDB",
+                location_mm=shifted_db,
+                submain_length_m=sm_len,
+                is_three_phase=True,
+            )
+        )
+        cursor_x = (max_x + dx) + floor_gap_mm
+
+    resolved_type = building_type or BuildingType.INDEPENDENT_HOUSE
+    total_area = round(sum(r.area_m2 for r in combined_rooms), 4)
+    floor_list = ", ".join(sb.floor for sb in sub_boards)
+
+    combined_flags.append(
+        ReviewFlag(
+            code="MULTIFLOOR_DXF_COMBINED",
+            severity=ReviewSeverity.INFO,
+            category="geometry",
+            message=(
+                f"Combined {len(sub_boards)} architectural floor DXF file(s) ({floor_list}) "
+                f"into unified MDB -> {', '.join(sb.board_id for sb in sub_boards)} hierarchy "
+                f"({total_area:.1f} m² total)."
+            ),
+        )
+    )
+
+    assert mdb_location is not None
+    model = BuildingModel(
+        project_name=project_name or f"Multi-Floor Building ({floor_list})",
+        building_type=resolved_type,
+        units="mm",
+        total_floor_area_m2=total_area,
+        rooms=combined_rooms,
+        walls=combined_walls,
+        doors=combined_doors,
+        windows=combined_windows,
+        db_anchor=DistributionBoardAnchor(id="MDB", location_mm=mdb_location),
+        sub_boards=sub_boards if len(sub_boards) >= 2 else [],
+        pv_capacity_kva=pv_capacity_kva,
+        source_file=",".join(str(p) for _, p in floor_files),
+        source_sha256=hasher.hexdigest(),
+    )
+    return model, combined_flags

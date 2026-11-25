@@ -165,6 +165,7 @@ class DesignOverrides(BaseModel):
     ze_or_ra_ohm: float | None = Field(default=None, gt=0.0)
     ambient_temp_c: int | None = Field(default=None, ge=10, le=70)
     pv_capacity_kva: float | None = Field(default=None, ge=0.0)
+    prospective_fault_current_ka: float | None = Field(default=None, gt=0.0)
     circuit_overrides: dict[str, CircuitOverride] = Field(default_factory=dict)
     room_type_overrides: dict[str, RoomType] = Field(default_factory=dict)
     db_location_override_mm: Point2D | None = None

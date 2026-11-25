@@ -207,6 +207,9 @@ def run_phase1_pipeline(
         eac_profile=eac_profile,
         phase_balance=phase_balance,
         pv_capacity_kva_override=pv_kva,
+        prospective_fault_current_ka=(
+            overrides.prospective_fault_current_ka if overrides is not None else None
+        ),
     )
 
     # 5. Aggregate statutory ETEK Human Review Flags Register
@@ -342,6 +345,7 @@ def run_phase2_pipeline(
     project_name: str | None = None,
     tier2_fallback: RoomClassifierFallback | None = None,
     layer_mapping: DxfLayerMapping | None = None,
+    extra_flags: list[ReviewFlag] | None = None,
 ) -> Phase2DesignResult:
     """Execute stateless Phase 2 pipeline: DXF/IFC ingest, wet zones, placement, routing, solve."""
     standards = load_standards(standards_dir)
@@ -351,7 +355,7 @@ def run_phase2_pipeline(
         else standards.eac_rules.default_profile
     )
 
-    spatial_flags: list[ReviewFlag] = []
+    spatial_flags: list[ReviewFlag] = list(extra_flags) if extra_flags else []
 
     # 1. Architectural ingestion (DXF / IFC) or direct BuildingModel
     if isinstance(source, Path):

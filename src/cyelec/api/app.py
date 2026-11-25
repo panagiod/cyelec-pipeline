@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import tempfile
 import time
@@ -19,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
-from cyelec.ingest.dxf_ingest import inspect_dxf_layers
+from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf, inspect_dxf_layers
 from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
 from cyelec.models.electrical import DesignOverrides, ReportLanguage, TenantBranding
 from cyelec.models.spatial import Phase2DesignResult
@@ -222,6 +223,34 @@ def _solve_dxf_bundle_sync(
         outputs = export_phase3_deliverables(p2, tmp / "pack")
         zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
         return p2, zip_path.read_bytes()
+
+
+def _solve_multifloor_dxf_sync(
+    floor_blobs: list[tuple[str, bytes]],
+    submain_lengths_m: dict[str, float] | None,
+    overrides: DesignOverrides | None,
+    building_type: BuildingType | None,
+    layer_mapping: DxfLayerMapping | None = None,
+) -> Phase2DesignResult:
+    with tempfile.TemporaryDirectory(prefix="cyelec_mf_") as tmp_dir:
+        tmp = Path(tmp_dir)
+        floor_files: list[tuple[str, Path]] = []
+        for idx, (label, data) in enumerate(floor_blobs):
+            p = tmp / f"floor_{idx}_{label}.dxf"
+            p.write_bytes(data)
+            floor_files.append((label, p))
+        model, mf_flags = ingest_multi_floor_dxf(
+            floor_files,
+            submain_lengths_m=submain_lengths_m,
+            building_type=building_type,
+            pv_capacity_kva=(
+                overrides.pv_capacity_kva
+                if (overrides is not None and overrides.pv_capacity_kva is not None)
+                else 0.0
+            ),
+            layer_mapping=layer_mapping,
+        )
+        return run_phase2_pipeline(model, overrides=overrides, extra_flags=mf_flags)
 
 
 def create_app(db_path: Path | None = None) -> FastAPI:
@@ -539,6 +568,95 @@ def create_app(db_path: Path | None = None) -> FastAPI:
                 "X-Tenant-ID": tid,
                 "X-Input-SHA256": p2.design.provenance.input_sha256,
             },
+        )
+
+    @api.post("/v1/solve/dxf/multifloor", response_model=SolvePreviewEnvelope)
+    async def solve_dxf_multifloor(
+        request: Request,
+        files: Annotated[
+            list[UploadFile],
+            File(description="Two or more architectural .dxf floorplans (e.g., GF.dxf, 1F.dxf)"),
+        ],
+        floors_json: Annotated[str | None, Form()] = None,
+        submain_lengths_json: Annotated[str | None, Form()] = None,
+        overrides_json: Annotated[str | None, Form()] = None,
+        building_type: Annotated[BuildingType | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> SolvePreviewEnvelope:
+        """Combine multiple uploaded floor DXF files into MDB -> DB-<FLOOR> preview solve."""
+        tid = _effective_tenant(request, x_tenant_id)
+        if not files:
+            raise HTTPException(status_code=400, detail="At least one .dxf floor file is required.")
+
+        default_labels = ["GF"] + [f"{i}F" for i in range(1, len(files))]
+        labels: list[str] = default_labels[: len(files)]
+        if floors_json and floors_json.strip():
+            try:
+                parsed_labels = json.loads(floors_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid floors_json: {exc}"
+                ) from exc
+            if not isinstance(parsed_labels, list) or len(parsed_labels) != len(files):
+                raise HTTPException(
+                    status_code=422,
+                    detail="floors_json must be a JSON array matching uploaded files count.",
+                )
+            labels = [str(lbl).strip().upper() or f"F{i}" for i, lbl in enumerate(parsed_labels)]
+
+        submain_lengths: dict[str, float] | None = None
+        if submain_lengths_json and submain_lengths_json.strip():
+            try:
+                raw_sm = json.loads(submain_lengths_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid submain_lengths_json: {exc}"
+                ) from exc
+            if not isinstance(raw_sm, dict):
+                raise HTTPException(
+                    status_code=422, detail="submain_lengths_json must be a JSON object."
+                )
+            submain_lengths = {str(k).strip().upper(): float(v) for k, v in raw_sm.items()}
+
+        t0 = time.perf_counter()
+        floor_blobs: list[tuple[str, bytes]] = []
+        total_bytes = 0
+        for label, uf in zip(labels, files, strict=True):
+            fname = uf.filename or f"{label}.dxf"
+            if Path(fname).suffix.lower() != ".dxf":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Multi-floor combiner only supports .dxf uploads (got '{fname}').",
+                )
+            blob = await _read_upload_bounded(uf)
+            total_bytes += len(blob)
+            floor_blobs.append((label, blob))
+
+        overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
+        layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
+        try:
+            p2 = await anyio.to_thread.run_sync(
+                _solve_multifloor_dxf_sync,
+                floor_blobs,
+                submain_lengths,
+                overrides,
+                building_type,
+                layer_mapping,
+            )
+        except (ValueError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, p2)
+        sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
+        store.record_usage(
+            tid, "solve_dxf_multifloor", (time.perf_counter() - t0) * 1000.0, total_bytes
+        )
+        return SolvePreviewEnvelope(
+            tenant_id=tid,
+            result=p2,
+            floorplan_svg=fp_svg,
+            sld_svg=sld_svg,
         )
 
     # ==================================================================

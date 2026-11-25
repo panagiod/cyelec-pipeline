@@ -23,6 +23,58 @@ _PHASE_ENUMS: tuple[PhaseAssignment, ...] = (
 )
 
 
+def _lpt_deterministic_fallback(
+    single_phase: list[CircuitSpec],
+    base_current_a: float,
+) -> list[int]:
+    """Deterministic LPT + single-move local search fallback respecting fixed_phase."""
+    n = len(single_phase)
+    chosen = [0] * n
+    totals = [base_current_a, base_current_a, base_current_a]
+    free_indices: list[int] = []
+
+    for i, circ in enumerate(single_phase):
+        if circ.fixed_phase in _PHASE_ENUMS:
+            p = _PHASE_ENUMS.index(circ.fixed_phase)
+            chosen[i] = p
+            totals[p] += circ.design_current_ib_a
+        else:
+            free_indices.append(i)
+
+    # Assign largest currents first to the currently lightest phase (tie-break by phase index)
+    free_indices.sort(key=lambda idx: (-single_phase[idx].design_current_ib_a, idx))
+    for i in free_indices:
+        best_p = min(range(3), key=lambda p: (totals[p], p))
+        chosen[i] = best_p
+        totals[best_p] += single_phase[i].design_current_ib_a
+
+    # Deterministic greedy single-circuit move polish to reduce max(I) - min(I)
+    improved = True
+    while improved:
+        improved = False
+        cur_spread = max(totals) - min(totals)
+        for i in free_indices:
+            cur_p = chosen[i]
+            cur_i = single_phase[i].design_current_ib_a
+            for cand_p in range(3):
+                if cand_p == cur_p:
+                    continue
+                totals[cur_p] -= cur_i
+                totals[cand_p] += cur_i
+                new_spread = max(totals) - min(totals)
+                if new_spread < cur_spread - 1e-9:
+                    chosen[i] = cand_p
+                    cur_spread = new_spread
+                    improved = True
+                    break
+                totals[cand_p] -= cur_i
+                totals[cur_p] += cur_i
+            if improved:
+                break
+
+    return chosen
+
+
 def balance_three_phase_loads(
     circuits: list[CircuitSpec],
     *,
@@ -147,17 +199,26 @@ def balance_three_phase_loads(
         integrality=integrality,
         bounds=bounds,
         constraints=constraints,
-        options={"time_limit": 10.0},
+        options={"time_limit": 2.0, "mip_rel_gap": 1e-3},
     )
 
-    if not res.success or res.x is None:
-        raise RuntimeError(f"MILP 3-phase load balancer failed: {res.message}")
+    chosen_phases: list[int]
+    if res.success and res.x is not None:
+        solver_status = "optimal"
+        chosen_phases = [int(np.argmax(res.x[3 * i : 3 * i + 3])) for i in range(n)]
+    elif res.x is not None:
+        # HiGHS reached time limit with a valid feasible near-optimal incumbent
+        solver_status = "feasible_time_limit"
+        chosen_phases = [int(np.argmax(res.x[3 * i : 3 * i + 3])) for i in range(n)]
+    else:
+        solver_status = "deterministic_lpt_fallback"
+        chosen_phases = _lpt_deterministic_fallback(single_phase, base_current_a)
 
     phase_i: dict[Literal["L1", "L2", "L3"], float] = {p: base_current_a for p in _PHASES}
     phase_kw: dict[Literal["L1", "L2", "L3"], float] = {p: base_power_kw for p in _PHASES}
 
     for i, circ in enumerate(single_phase):
-        chosen_p = int(np.argmax(res.x[3 * i : 3 * i + 3]))
+        chosen_p = chosen_phases[i]
         phase_key = _PHASES[chosen_p]
         assignments[circ.circuit_id] = _PHASE_ENUMS[chosen_p]
         phase_i[phase_key] += circ.design_current_ib_a
@@ -197,6 +258,6 @@ def balance_three_phase_loads(
         imbalance_a=round(imbalance_a, 2),
         imbalance_pct=round(imbalance_pct, 2),
         within_target=within_target,
-        solver_status="optimal",
+        solver_status=solver_status,
         flags=flags,
     )
