@@ -288,6 +288,10 @@ def route_circuits(
     """Route all circuits on a NetworkX conduit graph and measure true lengths & trunk sharing."""
     bound_devices, by_circuit = assign_devices_to_circuits(circuits, devices)
     graph, db_node, device_nodes = build_conduit_graph(building, bound_devices)
+    sub_board_nodes: dict[str, tuple[int, int]] = {
+        sb.board_id: _attach_node_to_graph(graph, sb.location_mm, kind="sub_board")
+        for sb in building.sub_boards
+    }
     rooms_by_id: dict[str, Room] = {r.id: r for r in building.rooms}
 
     circuit_edge_sets: dict[str, set[str]] = {}
@@ -295,6 +299,7 @@ def route_circuits(
     raw_routes: list[tuple[str, list[str], list[ConduitSegment], float, float]] = []
 
     for spec in circuits:
+        origin_node = sub_board_nodes.get(spec.board_id, db_node)
         c_devs = by_circuit.get(spec.circuit_id, [])
         target_nodes = [device_nodes[d.device_id] for d in c_devs if d.device_id in device_nodes]
 
@@ -306,10 +311,10 @@ def route_circuits(
                 for r in fallback_rooms
             ]
 
-        ordered_targets = _order_waypoints_greedy(graph, db_node, target_nodes)
-        waypoint_seq = [db_node, *ordered_targets]
+        ordered_targets = _order_waypoints_greedy(graph, origin_node, target_nodes)
+        waypoint_seq = [origin_node, *ordered_targets]
         if spec.topology == CircuitTopology.RING_FINAL and ordered_targets:
-            waypoint_seq.append(db_node)
+            waypoint_seq.append(origin_node)
 
         segments: list[ConduitSegment] = []
         horiz_m = 0.0

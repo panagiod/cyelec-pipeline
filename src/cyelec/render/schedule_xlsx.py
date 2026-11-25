@@ -331,8 +331,62 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
         c2.font = _BODY_FONT
         c2.border = _CELL_BORDER
 
+    # Optional Sub-Distribution Boards & Sub-Mains table (multi-floor buildings)
+    cursor_row = len(eac_rows) + 5
+    if result.sub_mains:
+        ws2.cell(
+            row=cursor_row,
+            column=1,
+            value="Sub-Distribution Boards & Sub-Main Feeders (BS 7671 Cumulative ΔV)",
+        ).font = _BOLD_FONT
+        sm_hdr_row = cursor_row + 1
+        sm_headers = [
+            "Board ID",
+            "Parent",
+            "Floor",
+            "Div. kVA",
+            "Ib (A)",
+            "Upstream Device (Type S RCD)",
+            "Cable / CPC (mm²)",
+            "Length (m)",
+            "Sub-Main ΔV (%)",
+            "Cumul. Light ΔV (%)",
+            "Cumul. Power ΔV (%)",
+            "Status",
+        ]
+        for col_idx, text in enumerate(sm_headers, start=1):
+            hdr_c = ws2.cell(row=sm_hdr_row, column=col_idx, value=text)
+            hdr_c.font = _HEADER_FONT
+            hdr_c.fill = _NAVY_FILL
+            hdr_c.alignment = Alignment(horizontal="center")
+            hdr_c.border = _CELL_BORDER
+        for sm_idx, sm in enumerate(result.sub_mains, start=1):
+            r = sm_hdr_row + sm_idx
+            sm_vals: list[str | int | float] = [
+                sm.board_id,
+                sm.parent_board_id,
+                sm.floor,
+                sm.diversified_kva,
+                sm.design_current_ib_a,
+                sm.device_label,
+                f"{sm.cable_mm2:g}/{sm.cpc_mm2:g}",
+                sm.length_m,
+                sm.voltage_drop_pct,
+                sm.cumulative_lighting_vd_pct,
+                sm.cumulative_power_vd_pct,
+                "PASS" if sm.overall_pass else "FAIL",
+            ]
+            for col_idx, val in enumerate(sm_vals, start=1):
+                sc = ws2.cell(row=r, column=col_idx, value=val)
+                sc.font = _BODY_FONT
+                sc.border = _CELL_BORDER
+            st_cell = ws2.cell(row=r, column=12)
+            st_cell.font = _BOLD_FONT
+            st_cell.fill = _PASS_FILL if sm.overall_pass else _FAIL_FILL
+        cursor_row = sm_hdr_row + len(result.sub_mains) + 2
+
     # Review Flags table
-    flags_start = len(eac_rows) + 5
+    flags_start = cursor_row
     flag_headers = [
         "Code",
         "Severity",

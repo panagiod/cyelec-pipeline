@@ -125,6 +125,7 @@ class CircuitSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     circuit_id: str
+    board_id: str = "DB1"
     description: str
     category: CircuitCategory
     topology: CircuitTopology
@@ -186,6 +187,49 @@ class SolvedCircuit(BaseModel):
     cpc_adiabatic_pass: bool
     overall_pass: bool
     upsize_reasons: list[str] = Field(default_factory=list)
+    flags: list[ReviewFlag] = Field(default_factory=list)
+
+
+class SolvedSubMain(BaseModel):
+    """Verified BS 7671 sub-main feeder connecting MDB to a floor sub-distribution board."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: str
+    parent_board_id: str
+    floor: str
+    circuit_ids: list[str] = Field(default_factory=list)
+    connected_kva: float
+    diversified_kva: float
+    design_current_ib_a: float
+    is_three_phase: bool
+    breaker_in_a: int
+    breaker_curve: BreakerCurve
+    rcd_selective_type_s: bool
+    rcd_idn_ma: int | None = None
+    device_label: str
+    cable_mm2: float
+    cpc_mm2: float
+    length_m: float
+    installation_method: Literal["B", "C"]
+    ca: float
+    cg: float
+    ci: float
+    it_tabulated_a: float
+    iz_derated_a: float
+    thermal_pass: bool
+    voltage_drop_v: float
+    voltage_drop_pct: float
+    max_final_lighting_vd_pct: float = 0.0
+    max_final_power_vd_pct: float = 0.0
+    cumulative_lighting_vd_pct: float = 0.0
+    cumulative_power_vd_pct: float = 0.0
+    cumulative_vd_pass: bool = True
+    r1_plus_r2_ohm: float
+    zs_ohm: float
+    zs_max_ohm: float
+    earth_fault_pass: bool
+    overall_pass: bool
     flags: list[ReviewFlag] = Field(default_factory=list)
 
 
@@ -252,6 +296,7 @@ class ElectricalDesignResult(BaseModel):
     earthing_system: EarthingSystem
     ze_or_ra_ohm: float
     circuits: list[SolvedCircuit]
+    sub_mains: list[SolvedSubMain] = Field(default_factory=list)
     phase_balance: PhaseBalanceResult | None = None
     eac_compliance: EacComplianceResult
     review_flags: list[ReviewFlag] = Field(default_factory=list)

@@ -105,6 +105,7 @@ class Room(BaseModel):
     id: str
     raw_label: str
     normalized_type: RoomType
+    floor: str = Field(default="GF")
     polygon_mm: list[Point2D] = Field(min_length=3)
     area_m2: float = Field(gt=0.0)
     ceiling_height_mm: float = Field(default=2900.0, gt=0.0)
@@ -123,13 +124,28 @@ class Room(BaseModel):
 
 
 class DistributionBoardAnchor(BaseModel):
-    """Location of the main distribution board (DB1) on the floorplan."""
+    """Location of the main distribution board (DB1 / MDB) on the floorplan."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: str = "DB1"
     location_mm: Point2D
     wall_id: str | None = None
+
+
+class SubBoardSpec(BaseModel):
+    """Sub-distribution board specification for multi-floor / multi-board buildings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: str
+    floor: str
+    parent_board_id: str = "MDB"
+    location_mm: Point2D
+    submain_length_m: float = Field(gt=0.0)
+    is_three_phase: bool = True
+    installation_method: Literal["B", "C"] = "B"
+    ambient_temp_c: int = Field(default=40, ge=10, le=70)
 
 
 class BuildingModel(BaseModel):
@@ -146,6 +162,7 @@ class BuildingModel(BaseModel):
     doors: list[DoorOpening] = Field(default_factory=list)
     windows: list[WindowOpening] = Field(default_factory=list)
     db_anchor: DistributionBoardAnchor
+    sub_boards: list[SubBoardSpec] = Field(default_factory=list)
     pv_capacity_kva: float = Field(default=0.0, ge=0.0)
     ev_charger_kw: float = Field(default=0.0, ge=0.0)
     extra_three_phase_load_kva: float = Field(default=0.0, ge=0.0)

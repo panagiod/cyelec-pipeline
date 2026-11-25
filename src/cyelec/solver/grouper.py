@@ -109,38 +109,38 @@ def _resolve_ambient_c(
     return standards.eac_rules.ambient_defaults_c.indoor_conduit_c
 
 
-def generate_circuits(
-    building: BuildingModel,
-    standards: StandardsBundle,
+def _generate_board_circuits(
     *,
-    overrides: DesignOverrides | None = None,
+    rooms: list[Room],
+    db: Point2D,
+    board_id: str,
+    floor_prefix: str,
+    standards: StandardsBundle,
+    overrides: DesignOverrides | None,
+    next_id: list[int],
+    emitted_keys: set[str],
 ) -> list[CircuitSpec]:
-    """Deterministically generate BS 7671 + Cyprus EAC final circuits from a BuildingModel."""
+    """Generate lighting, socket ring, split A/C, and appliance circuits for one board."""
     tmpl_std = standards.room_templates
     defaults = tmpl_std.circuit_defaults
     eac_std = standards.eac_rules
     u0 = eac_std.system_nominal.u0_v
     method: Literal["B", "C"] = eac_std.ambient_defaults_c.default_installation_method
     rcd_idn = eac_std.earthing.default_rcd_idn_ma
-    db = building.db_anchor.location_mm
 
     circuits: list[CircuitSpec] = []
-    next_idx = 1
 
     def _next_id() -> str:
-        nonlocal next_idx
-        cid = f"C{next_idx}"
-        next_idx += 1
+        cid = f"C{next_id[0]}"
+        next_id[0] += 1
         return cid
 
-    # ------------------------------------------------------------------
     # 1. Lighting circuits (BS 7671 Reg 314.1: split across >= 2 circuits)
-    # ------------------------------------------------------------------
     lighting_w: dict[str, float] = {}
     day_rooms: list[Room] = []
     night_rooms: list[Room] = []
 
-    for room in building.rooms:
+    for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         est_w = max(room.area_m2 * rt.lighting_w_per_m2, rt.min_lighting_points * 40.0)
         lighting_w[room.id] = round(est_w, 1)
@@ -149,11 +149,10 @@ def generate_circuits(
         else:
             night_rooms.append(room)
 
-    # Guarantee >= 2 lighting circuits whenever >= 2 rooms exist (Reg 314.1)
-    if (not day_rooms or not night_rooms) and len(building.rooms) >= 2:
-        midpoint = math.ceil(len(building.rooms) / 2)
-        day_rooms = building.rooms[:midpoint]
-        night_rooms = building.rooms[midpoint:]
+    if (not day_rooms or not night_rooms) and len(rooms) >= 2:
+        midpoint = math.ceil(len(rooms) / 2)
+        day_rooms = rooms[:midpoint]
+        night_rooms = rooms[midpoint:]
 
     lighting_groups: list[tuple[str, list[Room]]] = []
     if day_rooms:
@@ -162,14 +161,16 @@ def generate_circuits(
         )
         for i, chunk in enumerate(day_chunks, start=1):
             suffix = f" #{i}" if len(day_chunks) > 1 else ""
-            lighting_groups.append((f"Lighting - Day / Living Zone{suffix}", chunk))
+            lighting_groups.append((f"{floor_prefix}Lighting - Day / Living Zone{suffix}", chunk))
     if night_rooms:
         night_chunks = _chunk_by_max_watts(
             night_rooms, lighting_w, defaults.lighting_circuit_max_connected_w
         )
         for i, chunk in enumerate(night_chunks, start=1):
             suffix = f" #{i}" if len(night_chunks) > 1 else ""
-            lighting_groups.append((f"Lighting - Night / Sleeping Zone{suffix}", chunk))
+            lighting_groups.append(
+                (f"{floor_prefix}Lighting - Night / Sleeping Zone{suffix}", chunk)
+            )
 
     for desc, grp_rooms in lighting_groups:
         conn_w = max(100.0, round(sum(lighting_w[r.id] for r in grp_rooms), 1))
@@ -179,6 +180,7 @@ def generate_circuits(
         circuits.append(
             CircuitSpec(
                 circuit_id=_next_id(),
+                board_id=board_id,
                 description=desc,
                 category=CircuitCategory.LIGHTING,
                 topology=CircuitTopology.RADIAL,
@@ -205,12 +207,10 @@ def generate_circuits(
             )
         )
 
-    # ------------------------------------------------------------------
     # 2. 32 A Socket Ring Finals (BS 7671 Appendix 15, <= 100 m²/ring)
-    # ------------------------------------------------------------------
     kitchen_util_rooms: list[Room] = []
     general_socket_rooms: list[Room] = []
-    for room in building.rooms:
+    for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         if rt.socket_group == "kitchen_utility":
             kitchen_util_rooms.append(room)
@@ -228,7 +228,8 @@ def generate_circuits(
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
-                    description=f"Socket Ring Final - Kitchen & Utility{suffix}",
+                    board_id=board_id,
+                    description=f"{floor_prefix}Socket Ring Final - Kitchen & Utility{suffix}",
                     category=CircuitCategory.SOCKET_RING,
                     topology=CircuitTopology.RING_FINAL,
                     room_ids=[r.id for r in chunk],
@@ -265,7 +266,8 @@ def generate_circuits(
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
-                    description=f"Socket Ring Final - General{suffix}",
+                    board_id=board_id,
+                    description=f"{floor_prefix}Socket Ring Final - General{suffix}",
                     category=CircuitCategory.SOCKET_RING,
                     topology=CircuitTopology.RING_FINAL,
                     room_ids=[r.id for r in chunk],
@@ -291,10 +293,8 @@ def generate_circuits(
                 )
             )
 
-    # ------------------------------------------------------------------
     # 3. Dedicated Cyprus Split A/C Radials (Curve C, 0.85 summer diversity)
-    # ------------------------------------------------------------------
-    for room in building.rooms:
+    for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         if not rt.has_split_ac or rt.ac_electrical_w <= 0.0:
             continue
@@ -305,7 +305,8 @@ def generate_circuits(
         circuits.append(
             CircuitSpec(
                 circuit_id=_next_id(),
-                description=f"Split A/C Unit - {room.raw_label}",
+                board_id=board_id,
+                description=f"{floor_prefix}Split A/C Unit - {room.raw_label}",
                 category=CircuitCategory.SPLIT_AC,
                 topology=CircuitTopology.RADIAL,
                 room_ids=[room.id],
@@ -331,11 +332,8 @@ def generate_circuits(
             )
         )
 
-    # ------------------------------------------------------------------
     # 4. Dedicated Appliances (Cooker, Oven, Dishwasher, Washer, Solar WH)
-    # ------------------------------------------------------------------
-    emitted_keys: set[str] = set()
-    for room in building.rooms:
+    for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         for app in rt.dedicated_appliances:
             if app.key in emitted_keys:
@@ -346,7 +344,8 @@ def generate_circuits(
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
-                    description=f"{app.label} ({room.raw_label})",
+                    board_id=board_id,
+                    description=f"{floor_prefix}{app.label} ({room.raw_label})",
                     category=app.category,
                     topology=CircuitTopology.RADIAL,
                     room_ids=[room.id],
@@ -372,6 +371,74 @@ def generate_circuits(
                 )
             )
 
+    return circuits
+
+
+def generate_circuits(
+    building: BuildingModel,
+    standards: StandardsBundle,
+    *,
+    overrides: DesignOverrides | None = None,
+) -> list[CircuitSpec]:
+    """Deterministically generate BS 7671 + Cyprus EAC final circuits from a BuildingModel."""
+    tmpl_std = standards.room_templates
+    defaults = tmpl_std.circuit_defaults
+    eac_std = standards.eac_rules
+    u0 = eac_std.system_nominal.u0_v
+    method: Literal["B", "C"] = eac_std.ambient_defaults_c.default_installation_method
+    rcd_idn = eac_std.earthing.default_rcd_idn_ma
+
+    next_id = [1]
+    emitted_keys: set[str] = set()
+    circuits: list[CircuitSpec] = []
+
+    def _next_id() -> str:
+        cid = f"C{next_id[0]}"
+        next_id[0] += 1
+        return cid
+
+    if building.sub_boards:
+        floor_to_board = {sb.floor: sb for sb in building.sub_boards}
+        rooms_by_board: dict[str, list[Room]] = {sb.board_id: [] for sb in building.sub_boards}
+        default_board = building.sub_boards[0]
+        for room in building.rooms:
+            target_sb = floor_to_board.get(room.floor, default_board)
+            rooms_by_board[target_sb.board_id].append(room)
+
+        for sb in building.sub_boards:
+            b_rooms = rooms_by_board[sb.board_id]
+            if not b_rooms:
+                continue
+            circuits.extend(
+                _generate_board_circuits(
+                    rooms=b_rooms,
+                    db=sb.location_mm,
+                    board_id=sb.board_id,
+                    floor_prefix=f"[{sb.floor}] ",
+                    standards=standards,
+                    overrides=overrides,
+                    next_id=next_id,
+                    emitted_keys=emitted_keys,
+                )
+            )
+        primary_board_id = default_board.board_id
+        primary_db = default_board.location_mm
+    else:
+        primary_board_id = building.db_anchor.id
+        primary_db = building.db_anchor.location_mm
+        circuits.extend(
+            _generate_board_circuits(
+                rooms=building.rooms,
+                db=primary_db,
+                board_id=primary_board_id,
+                floor_prefix="",
+                standards=standards,
+                overrides=overrides,
+                next_id=next_id,
+                emitted_keys=emitted_keys,
+            )
+        )
+
     # Fallback: ensure Cyprus residential installations always include Immersion/Solar Water Heater
     if "solar_water_heater" not in emitted_keys:
         water_room = building.rooms[0]
@@ -380,6 +447,7 @@ def generate_circuits(
         circuits.append(
             CircuitSpec(
                 circuit_id=_next_id(),
+                board_id=primary_board_id,
                 description="Immersion / Solar Water Heater Booster",
                 category=CircuitCategory.WATER_HEATER,
                 topology=CircuitTopology.RADIAL,
@@ -392,7 +460,7 @@ def generate_circuits(
                 nominal_voltage_v=u0,
                 is_three_phase=False,
                 length_m=_estimate_radial_length_m(
-                    db, [water_room], defaults.vertical_drop_allowance_m
+                    primary_db, [water_room], defaults.vertical_drop_allowance_m
                 ),
                 installation_method=method,
                 ambient_temp_c=_resolve_ambient_c([water_room], standards, overrides),
@@ -406,9 +474,7 @@ def generate_circuits(
             )
         )
 
-    # ------------------------------------------------------------------
     # 5. Optional Dedicated EV Charger (BS 7671 Section 722, Mode 3)
-    # ------------------------------------------------------------------
     if building.ev_charger_kw > 0.0:
         ev_w = round(building.ev_charger_kw * 1000.0, 1)
         is_3p_ev = building.ev_charger_kw > 7.4
@@ -425,6 +491,7 @@ def generate_circuits(
         circuits.append(
             CircuitSpec(
                 circuit_id=_next_id(),
+                board_id=primary_board_id,
                 description=f"EV Charger Mode 3 ({building.ev_charger_kw:g} kW)",
                 category=CircuitCategory.EV_CHARGER,
                 topology=CircuitTopology.RADIAL,
@@ -449,11 +516,8 @@ def generate_circuits(
             )
         )
 
-    # ------------------------------------------------------------------
     # 6. Optional Commercial 3-Phase Central HVAC / Process Feeder(s)
-    # ------------------------------------------------------------------
     if building.extra_three_phase_load_kva > 0.0:
-        # Split into standard <= 35 kVA 3-phase sub-feeders (<= 63 A MCB per feeder)
         remaining_kva = building.extra_three_phase_load_kva
         feeder_idx = 1
         ul = eac_std.system_nominal.ul_v
@@ -466,6 +530,7 @@ def generate_circuits(
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
+                    board_id=primary_board_id,
                     description=f"3-Phase Commercial HVAC / Process Feeder #{feeder_idx}",
                     category=CircuitCategory.OTHER,
                     topology=CircuitTopology.RADIAL,

@@ -67,7 +67,8 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     col_w = 112
     margin_x = 56
     width = max(1580, margin_x * 2 + n * col_w)
-    height = 1040
+    sub_offset_y = 115 if result.sub_mains else 0
+    height = 1040 + sub_offset_y
 
     bus_x0 = margin_x + 30
     bus_x1 = width - margin_x - 30
@@ -278,29 +279,82 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         )
 
     # ------------------------------------------------------------------
+    # 2b. Optional Hierarchical Sub-Distribution Boards (MDB -> DB-GF / DB-1F)
+    # ------------------------------------------------------------------
+    if result.sub_mains:
+        span = bus_x1 - bus_x0
+        step_x = span / max(1, n)
+        sub_y = bus_y + 72
+        for sm in result.sub_mains:
+            indices = [i for i, c in enumerate(circuits) if c.spec.board_id == sm.board_id]
+            if not indices:
+                continue
+            sx0 = int(bus_x0 + step_x * min(indices) + 10)
+            sx1 = int(bus_x0 + step_x * (max(indices) + 1) - 10)
+            scx = (sx0 + sx1) // 2
+            sm_color = "#155724" if sm.overall_pass else "#721c24"
+            sm_bg = "#f0fff4" if sm.overall_pass else "#fff5f5"
+            parts.extend(
+                [
+                    (
+                        f'  <line x1="{scx}" y1="{bus_y + 12}" x2="{scx}" y2="{sub_y - 26}" '
+                        'stroke="#1b365d" stroke-width="2.4" />'
+                    ),
+                    (
+                        f'  <rect x="{scx - 165}" y="{sub_y - 26}" width="330" height="44" '
+                        f'rx="4" fill="{sm_bg}" stroke="{sm_color}" stroke-width="1.5" />'
+                    ),
+                    (
+                        f'  <text x="{scx}" y="{sub_y - 9}" text-anchor="middle" class="hdr">'
+                        f"{_esc(sm.parent_board_id)} -&gt; {_esc(sm.board_id)} "
+                        f"(Floor {_esc(sm.floor)}) — {_esc(sm.breaker_in_a)}A"
+                        f"{' + 100mA Type S' if sm.rcd_selective_type_s else ''}</text>"
+                    ),
+                    (
+                        f'  <text x="{scx}" y="{sub_y + 8}" text-anchor="middle" class="sm">'
+                        f"{sm.cable_mm2:g}/{sm.cpc_mm2:g}mm² Cu, {sm.length_m:.1f}m | "
+                        f"Sub ΔV {sm.voltage_drop_pct:.2f}% | "
+                        f"Cumul L/P: {sm.cumulative_lighting_vd_pct:.2f}%/"
+                        f"{sm.cumulative_power_vd_pct:.2f}%</text>"
+                    ),
+                    (
+                        f'  <line x1="{scx}" y1="{sub_y + 18}" x2="{scx}" y2="{sub_y + 34}" '
+                        'stroke="#1b365d" stroke-width="2.2" />'
+                    ),
+                    (
+                        f'  <line x1="{sx0}" y1="{sub_y + 34}" x2="{sx1}" y2="{sub_y + 34}" '
+                        'stroke="#1b365d" stroke-width="3.2" />'
+                    ),
+                ]
+            )
+
+    # ------------------------------------------------------------------
     # 3. Final Circuit Feeders (MCB/RCBO, Cable Spec, Length, Ib, ΔV, PASS/FAIL)
     # ------------------------------------------------------------------
     span = bus_x1 - bus_x0
     step_x = span / max(1, n)
-    dev_y = 435
-    cable_y = 540
-    load_y = 660
+    dev_y = 435 + sub_offset_y
+    cable_y = 540 + sub_offset_y
+    load_y = 660 + sub_offset_y
 
     for idx, circ in enumerate(circuits):
         s = circ.spec
         cx = int(bus_x0 + step_x * (idx + 0.5))
         p_color = _PHASE_HEX.get(circ.phase, "#1b365d")
-        bus_tap_y = (
-            bus_y - 12
-            if circ.phase == PhaseAssignment.L1
-            else (
-                bus_y - 4
-                if circ.phase == PhaseAssignment.L2
-                else (bus_y + 4 if circ.phase == PhaseAssignment.L3 else bus_y)
+        if result.sub_mains:
+            bus_tap_y = bus_y + 106
+        else:
+            bus_tap_y = (
+                bus_y - 12
+                if circ.phase == PhaseAssignment.L1
+                else (
+                    bus_y - 4
+                    if circ.phase == PhaseAssignment.L2
+                    else (bus_y + 4 if circ.phase == PhaseAssignment.L3 else bus_y)
+                )
             )
-        )
-        if eac.supply_phases == 1:
-            bus_tap_y = bus_y - 6
+            if eac.supply_phases == 1:
+                bus_tap_y = bus_y - 6
 
         topo_tag = "RING" if s.topology == CircuitTopology.RING_FINAL else "RAD"
         rcd_tag = f"{s.rcd_idn_ma}mA" if (s.rcd_protected and s.rcd_idn_ma) else "NO RCD"

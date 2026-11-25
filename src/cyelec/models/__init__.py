@@ -11,6 +11,7 @@ from cyelec.models.building import (
     Point2D,
     Room,
     RoomType,
+    SubBoardSpec,
     WallSegment,
     WindowOpening,
 )
@@ -31,6 +32,7 @@ from cyelec.models.electrical import (
     ReviewSeverity,
     RunProvenance,
     SolvedCircuit,
+    SolvedSubMain,
 )
 from cyelec.models.spatial import (
     ConduitSegment,
@@ -75,7 +77,9 @@ __all__ = [
     "RoutedCircuit",
     "RunProvenance",
     "SolvedCircuit",
+    "SolvedSubMain",
     "SpatialLayoutResult",
+    "SubBoardSpec",
     "WallSegment",
     "WindowOpening",
 ]

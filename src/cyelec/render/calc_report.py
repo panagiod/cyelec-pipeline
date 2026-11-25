@@ -101,6 +101,29 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
             ]
         )
 
+    if result.sub_mains:
+        lines.extend(
+            [
+                "## 3b. Multi-Floor Sub-Distribution Boards & Sub-Mains (BS 7671 Cumulative ΔV)",
+                "",
+                "| Board | Parent | Floor | Div. kVA | Ib (A) | Upstream Device | "
+                "Cable/CPC (mm²) | L (m) | Sub ΔV (%) | Cumul. Light ΔV (%) | "
+                "Cumul. Power ΔV (%) | Status |",
+                "| --- | --- | :---: | ---: | ---: | --- | :---: | ---: | ---: | "
+                "---: | ---: | :---: |",
+            ]
+        )
+        for sm in result.sub_mains:
+            st = "PASS" if sm.overall_pass else "FAIL"
+            lines.append(
+                f"| `{sm.board_id}` | `{sm.parent_board_id}` | {sm.floor} | "
+                f"{sm.diversified_kva:.2f} | {sm.design_current_ib_a:.2f} | "
+                f"{sm.device_label} | `{sm.cable_mm2:g}/{sm.cpc_mm2:g}` | {sm.length_m:.1f} | "
+                f"{sm.voltage_drop_pct:.2f}% | {sm.cumulative_lighting_vd_pct:.2f}% | "
+                f"{sm.cumulative_power_vd_pct:.2f}% | **{st}** |"
+            )
+        lines.append("")
+
     circuit_hdr = (
         "| ID | Description | Ph | Topo | Ib (A) | Device | Cable/CPC (mm²) | "
         "L (m) | Ca·Cg·Ci | Iz / Req (A) | ΔV (%) | EF Check | CPC Min (mm²) | Status |"
@@ -280,6 +303,47 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         </section>
         """
 
+    submains_section = ""
+    if result.sub_mains:
+        sm_rows = []
+        for sm in result.sub_mains:
+            s_cls = "badge-pass" if sm.overall_pass else "badge-fail"
+            s_lbl = "PASS" if sm.overall_pass else "FAIL"
+            sm_rows.append(
+                "<tr>"
+                f"<td><strong>{esc(sm.board_id)}</strong></td>"
+                f"<td>{esc(sm.parent_board_id)}</td>"
+                f'<td class="c">{esc(sm.floor)}</td>'
+                f'<td class="r">{sm.diversified_kva:.2f}</td>'
+                f'<td class="r">{sm.design_current_ib_a:.2f}</td>'
+                f"<td>{esc(sm.device_label)}</td>"
+                f'<td class="c">{sm.cable_mm2:g}/{sm.cpc_mm2:g}</td>'
+                f'<td class="r">{sm.length_m:.1f}</td>'
+                f'<td class="r">{sm.voltage_drop_pct:.2f}%</td>'
+                f'<td class="r">{sm.cumulative_lighting_vd_pct:.2f}%</td>'
+                f'<td class="r">{sm.cumulative_power_vd_pct:.2f}%</td>'
+                f'<td class="c"><span class="badge {s_cls}">{s_lbl}</span></td>'
+                "</tr>"
+            )
+        submains_section = f"""
+        <section>
+          <h2>3b. Multi-Floor Sub-Distribution Boards &amp; Sub-Mains (BS 7671 Cumulative ΔV)</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Board</th><th>Parent</th><th class="c">Floor</th>
+                <th class="r">Div. kVA</th><th class="r">Ib (A)</th>
+                <th>Upstream Device</th><th class="c">Cable/CPC (mm²)</th>
+                <th class="r">L (m)</th><th class="r">Sub ΔV (%)</th>
+                <th class="r">Cumul. Light ΔV</th><th class="r">Cumul. Power ΔV</th>
+                <th class="c">Status</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(sm_rows)}</tbody>
+          </table>
+        </section>
+        """
+
     standards_list = " | ".join(
         f"{esc(k)}: <code>{esc(v)}</code>"
         for k, v in sorted(prov.standards_versions.items())
@@ -402,6 +466,7 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
   </div>
 
   {balance_section}
+  {submains_section}
 
   <section>
     <h2>4. BS 7671 Final Circuit Calculations</h2>

@@ -23,6 +23,7 @@ from cyelec.models.electrical import (
     ReviewSeverity,
     RunProvenance,
     SolvedCircuit,
+    SolvedSubMain,
 )
 from cyelec.models.spatial import Phase2DesignResult, SpatialLayoutResult
 from cyelec.render.calc_report import export_calc_reports
@@ -32,6 +33,7 @@ from cyelec.solver.balancer import balance_three_phase_loads
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits
+from cyelec.solver.submain import finalize_submain_cumulative_vd, solve_submain
 from cyelec.spatial.placement import place_electrical_devices
 from cyelec.spatial.router import route_circuits
 from cyelec.spatial.wet_zones import compute_building_wet_zones
@@ -134,6 +136,21 @@ def run_phase1_pipeline(
             imbalance_target_pct=eac_rules.supply_rules.phase_imbalance_target_pct,
         )
 
+    # 2b. Solve sub-mains (if multi-floor sub-distribution boards are defined)
+    prelim_sub_mains: dict[str, SolvedSubMain] = {}
+    if effective_building.sub_boards:
+        for sb in effective_building.sub_boards:
+            b_specs = [s for s in effective_specs if s.board_id == sb.board_id]
+            if not b_specs:
+                continue
+            prelim_sub_mains[sb.board_id] = solve_submain(
+                sb,
+                b_specs,
+                standards,
+                earthing_system=earthing_system,
+                ze_or_ra_ohm=ze_or_ra_ohm,
+            )
+
     # 3. BS 7671 deterministic sizing & compliance verification for each circuit
     solved_circuits: list[SolvedCircuit] = []
     for raw_spec in raw_specs:
@@ -145,15 +162,36 @@ def run_phase1_pipeline(
                 PhaseAssignment.THREE_PHASE if raw_spec.is_three_phase else PhaseAssignment.L1
             )
 
+        circuit_spec_for_solve = raw_spec
+        board_ze_ra = ze_or_ra_ohm
+        sub_m = prelim_sub_mains.get(raw_spec.board_id)
+        if sub_m is not None:
+            # Enforce BS 7671 cumulative ΔV: ΔV_submain + ΔV_final <= 3% (lighting) / 5% (power)
+            remaining_vd = max(0.5, round(raw_spec.vd_limit_pct - sub_m.voltage_drop_pct, 2))
+            circuit_spec_for_solve = raw_spec.model_copy(update={"vd_limit_pct": remaining_vd})
+            if earthing_system != EarthingSystem.TT:
+                board_ze_ra = round(ze_or_ra_ohm + sub_m.r1_plus_r2_ohm, 4)
+
         solved = solve_circuit(
-            raw_spec,
+            circuit_spec_for_solve,
             standards,
             earthing_system=earthing_system,
-            ze_or_ra_ohm=ze_or_ra_ohm,
+            ze_or_ra_ohm=board_ze_ra,
             phase=assigned_phase,
             override=ov,
         )
         solved_circuits.append(solved)
+
+    # Finalize cumulative ΔV check per sub-board
+    solved_sub_mains: list[SolvedSubMain] = []
+    for sb in effective_building.sub_boards:
+        prelim = prelim_sub_mains.get(sb.board_id)
+        if prelim is None:
+            continue
+        board_solved = [c for c in solved_circuits if c.spec.board_id == sb.board_id]
+        solved_sub_mains.append(
+            finalize_submain_cumulative_vd(prelim, board_solved, standards)
+        )
 
     # 4. Cyprus EAC supply & escalation checks
     eac_compliance = evaluate_eac_compliance(
@@ -184,6 +222,8 @@ def run_phase1_pipeline(
     review_flags.extend(eac_compliance.flags)
     if phase_balance is not None:
         review_flags.extend(phase_balance.flags)
+    for sm in solved_sub_mains:
+        review_flags.extend(sm.flags)
     for circ in solved_circuits:
         review_flags.extend(circ.flags)
 
@@ -205,6 +245,7 @@ def run_phase1_pipeline(
         earthing_system=earthing_system,
         ze_or_ra_ohm=ze_or_ra_ohm,
         circuits=solved_circuits,
+        sub_mains=solved_sub_mains,
         phase_balance=phase_balance,
         eac_compliance=eac_compliance,
         review_flags=review_flags,
