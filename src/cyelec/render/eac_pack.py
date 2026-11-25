@@ -55,8 +55,9 @@ def render_eac_submission_pack_html(
     *,
     sld_svg: str,
     deliverables: dict[str, Path],
+    floorplan_svg: str | None = None,
 ) -> str:
-    """Render print-ready A4-landscape EAC Submission Pack Cover & Index HTML with inline SLD."""
+    """Render print-ready A4-landscape EAC Submission Pack Cover & Index HTML with inline SVGs."""
     design = result.design
     eac = design.eac_compliance
     prov = design.provenance
@@ -90,6 +91,19 @@ def render_eac_submission_pack_html(
         f"(Imbalance {design.phase_balance.imbalance_pct:.2f}%)"
         if design.phase_balance is not None
         else f"Single-Phase ({eac.max_phase_demand_a:.2f} A)"
+    )
+
+    floorplan_section = (
+        f"""
+  <section>
+    <h2>1. Electrical Floorplan Overlay (Section 701 Wet Zones, Devices &amp; Conduits)</h2>
+    <div class="sld-frame">
+      {floorplan_svg}
+    </div>
+  </section>
+"""
+        if floorplan_svg
+        else ""
     )
 
     return f"""<!DOCTYPE html>
@@ -202,15 +216,17 @@ def render_eac_submission_pack_html(
     <strong>Input SHA-256:</strong> <code>{esc(prov.input_sha256[:16])}</code>
   </p>
 
+  {floorplan_section}
+
   <section>
-    <h2>1. Single-Line Diagram (SLD) — {esc(design.building.db_anchor.id)}</h2>
+    <h2>2. Single-Line Diagram (SLD) — {esc(design.building.db_anchor.id)}</h2>
     <div class="sld-frame">
       {sld_svg}
     </div>
   </section>
 
   <section>
-    <h2>2. Submission Deliverable Manifest (SHA-256 Verified)</h2>
+    <h2>3. Submission Deliverable Manifest (SHA-256 Verified)</h2>
     <table>
       <thead>
         <tr><th>Artifact Key</th><th>Filename</th><th class="r">Size</th><th>SHA-256</th></tr>
@@ -222,7 +238,7 @@ def render_eac_submission_pack_html(
   </section>
 
   <section class="signoff">
-    <strong>3. Statutory ETEK Electrical Engineer Declaration &amp; EAC Submission Stamp</strong>
+    <strong>4. Statutory ETEK Electrical Engineer Declaration &amp; EAC Submission Stamp</strong>
     <div class="signoff-grid">
       <div class="sig-line">ETEK Electrical Engineer Name</div>
       <div class="sig-line">ETEK Registration Number</div>

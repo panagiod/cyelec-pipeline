@@ -147,5 +147,7 @@ class BuildingModel(BaseModel):
     windows: list[WindowOpening] = Field(default_factory=list)
     db_anchor: DistributionBoardAnchor
     pv_capacity_kva: float = Field(default=0.0, ge=0.0)
+    ev_charger_kw: float = Field(default=0.0, ge=0.0)
+    extra_three_phase_load_kva: float = Field(default=0.0, ge=0.0)
     source_file: str | None = None
     source_sha256: str | None = None

@@ -137,3 +137,33 @@ def test_stateless_multitenant_saas_api_endpoints(tmp_path: Path) -> None:
         files={"file": ("bad.pdf", b"%PDF-1.4", "application/pdf")},
     )
     assert resp_bad.status_code == 400
+
+    # 6. Interactive ETEK Review Workbench UI & observability middleware headers
+    ui_resp = client.get("/")
+    assert ui_resp.status_code == 200
+    assert "ETEK Engineer Review" in ui_resp.text
+    assert "X-Request-ID" in ui_resp.headers
+    assert "X-Process-Time-Ms" in ui_resp.headers
+    assert ui_resp.headers["X-Content-Type-Options"] == "nosniff"
+
+    # 7. Benchmark preview endpoint returns both Floorplan SVG and SLD SVG
+    bench_prev = client.post(
+        "/v1/solve/benchmark/villa_pv_ev",
+        headers={"X-Tenant-ID": "cy-tenant-004"},
+        json={"eac_profile": "cyprus_eac_18th_a2", "earthing_system": "TT"},
+    )
+    assert bench_prev.status_code == 200
+    bp_json = bench_prev.json()
+    assert bp_json["tenant_id"] == "cy-tenant-004"
+    assert "<svg " in bp_json["floorplan_svg"]
+    assert "<svg " in bp_json["sld_svg"]
+
+    # 8. DXF preview endpoint returns inline Floorplan SVG + SLD SVG
+    dxf_prev = client.post(
+        "/v1/solve/dxf/preview",
+        headers={"X-Tenant-ID": "cy-tenant-005"},
+        files={"file": ("cyprus_3bed.dxf", dxf_bytes, "application/dxf")},
+    )
+    assert dxf_prev.status_code == 200
+    assert "<svg " in dxf_prev.json()["floorplan_svg"]
+    assert "<svg " in dxf_prev.json()["sld_svg"]

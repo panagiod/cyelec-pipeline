@@ -406,4 +406,89 @@ def generate_circuits(
             )
         )
 
+    # ------------------------------------------------------------------
+    # 5. Optional Dedicated EV Charger (BS 7671 Section 722, Mode 3)
+    # ------------------------------------------------------------------
+    if building.ev_charger_kw > 0.0:
+        ev_w = round(building.ev_charger_kw * 1000.0, 1)
+        is_3p_ev = building.ev_charger_kw > 7.4
+        ev_v = eac_std.system_nominal.ul_v if is_3p_ev else u0
+        ev_ib = round(
+            ev_w / (math.sqrt(3.0) * ev_v) if is_3p_ev else ev_w / ev_v,
+            2,
+        )
+        ev_ambient = (
+            overrides.ambient_temp_c
+            if (overrides is not None and overrides.ambient_temp_c is not None)
+            else eac_std.ambient_defaults_c.roof_outdoor_c
+        )
+        circuits.append(
+            CircuitSpec(
+                circuit_id=_next_id(),
+                description=f"EV Charger Mode 3 ({building.ev_charger_kw:g} kW)",
+                category=CircuitCategory.EV_CHARGER,
+                topology=CircuitTopology.RADIAL,
+                room_ids=[building.rooms[0].id],
+                connected_load_w=ev_w,
+                diversity_factor=1.0,
+                diversified_load_w=ev_w,
+                power_factor=1.0,
+                design_current_ib_a=ev_ib,
+                nominal_voltage_v=ev_v,
+                is_three_phase=is_3p_ev,
+                length_m=18.0,
+                installation_method=method,
+                ambient_temp_c=ev_ambient,
+                grouping_count=1,
+                preferred_curve=BreakerCurve.B,
+                min_breaker_in_a=32 if not is_3p_ev else 16,
+                min_cable_mm2=6.0 if not is_3p_ev else 4.0,
+                rcd_protected=True,
+                rcd_idn_ma=rcd_idn,
+                vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 6. Optional Commercial 3-Phase Central HVAC / Process Feeder(s)
+    # ------------------------------------------------------------------
+    if building.extra_three_phase_load_kva > 0.0:
+        # Split into standard <= 35 kVA 3-phase sub-feeders (<= 63 A MCB per feeder)
+        remaining_kva = building.extra_three_phase_load_kva
+        feeder_idx = 1
+        ul = eac_std.system_nominal.ul_v
+        while remaining_kva > 1e-6:
+            chunk_kva = min(30.0, remaining_kva)
+            remaining_kva = round(remaining_kva - chunk_kva, 3)
+            pf = 0.90
+            watts = round(chunk_kva * 1000.0 * pf, 1)
+            ib_3p = round((chunk_kva * 1000.0) / (math.sqrt(3.0) * ul), 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    description=f"3-Phase Commercial HVAC / Process Feeder #{feeder_idx}",
+                    category=CircuitCategory.OTHER,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[building.rooms[0].id],
+                    connected_load_w=watts,
+                    diversity_factor=1.0,
+                    diversified_load_w=watts,
+                    power_factor=pf,
+                    design_current_ib_a=ib_3p,
+                    nominal_voltage_v=ul,
+                    is_three_phase=True,
+                    length_m=22.0,
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c(building.rooms[:1], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=50,
+                    min_cable_mm2=16.0,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+            feeder_idx += 1
+
     return circuits

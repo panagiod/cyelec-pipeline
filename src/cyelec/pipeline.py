@@ -345,10 +345,16 @@ def export_phase3_deliverables(
         render_eac_submission_pack_html,
         write_deliverables_manifest,
     )
+    from cyelec.render.floorplan_svg import render_floorplan_svg
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
     from cyelec.render.sld import export_sld_deliverables
 
     outputs = export_phase2_deliverables(result, out_dir)
+
+    floorplan_svg_path = out_dir / "floorplan_overlay.svg"
+    floorplan_svg_text = render_floorplan_svg(result)
+    floorplan_svg_path.write_text(floorplan_svg_text, encoding="utf-8")
+    outputs["floorplan_svg"] = floorplan_svg_path
 
     sld_svg_path = out_dir / "single_line_diagram.svg"
     sld_dxf_path = out_dir / "single_line_diagram.dxf"
@@ -371,6 +377,7 @@ def export_phase3_deliverables(
         render_eac_submission_pack_html(
             result,
             sld_svg=sld_svg_path.read_text(encoding="utf-8"),
+            floorplan_svg=floorplan_svg_text,
             deliverables=outputs,
         ),
         encoding="utf-8",

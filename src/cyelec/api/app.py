@@ -1,22 +1,30 @@
-"""Stateless Multi-Tenant EU B2B SaaS FastAPI service for cyelec-pipeline."""
+"""Stateless Multi-Tenant EU B2B SaaS FastAPI service with ETEK Review Workbench & observability."""
 
 from __future__ import annotations
 
 import tempfile
+import time
+import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cyelec import __version__
+from cyelec.api.ui import render_etek_workbench_html
 from cyelec.models.building import BuildingModel, BuildingType
 from cyelec.models.electrical import DesignOverrides
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
 from cyelec.render.eac_pack import build_submission_zip
+from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.qet_bridge import is_qelectrotech_available
+from cyelec.render.sld import render_sld_svg
 from cyelec.standards_loader import load_standards
+from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB safety cap per DXF/IFC upload
 
@@ -50,13 +58,26 @@ class SolveResponseEnvelope(BaseModel):
     result: Phase2DesignResult
 
 
+class SolvePreviewEnvelope(BaseModel):
+    """Preview response returning full design JSON plus inline Floorplan & SLD vector SVGs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    result: Phase2DesignResult
+    floorplan_svg: str
+    sld_svg: str
+
+
 def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
     if raw is None or not raw.strip():
         return None
     try:
         return DesignOverrides.model_validate_json(raw)
     except ValidationError as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid DesignOverrides JSON: {exc}") from exc
+        raise HTTPException(
+            status_code=422, detail=f"Invalid DesignOverrides JSON: {exc}"
+        ) from exc
 
 
 def create_app() -> FastAPI:
@@ -69,6 +90,24 @@ def create_app() -> FastAPI:
             "service. All runs are isolated in ephemeral storage with zero cross-tenant state."
         ),
     )
+
+    @api.middleware("http")
+    async def observability_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        t0 = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        response.headers["X-Request-ID"] = req_id
+        response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @api.get("/", response_class=HTMLResponse)
+    def workbench_ui() -> HTMLResponse:
+        return HTMLResponse(content=render_etek_workbench_html())
 
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -101,6 +140,46 @@ def create_app() -> FastAPI:
         p2 = run_phase2_pipeline(payload.building, overrides=payload.overrides)
         return SolveResponseEnvelope(tenant_id=x_tenant_id, result=p2)
 
+    @api.post("/v1/solve/benchmark/{template}", response_model=SolvePreviewEnvelope)
+    def solve_benchmark_preview(
+        template: BenchmarkTemplate,
+        overrides: Annotated[DesignOverrides | None, Body()] = None,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> SolvePreviewEnvelope:
+        building = generate_benchmark_dxf(template)
+        p2 = run_phase2_pipeline(building, overrides=overrides)
+        return SolvePreviewEnvelope(
+            tenant_id=x_tenant_id,
+            result=p2,
+            floorplan_svg=render_floorplan_svg(p2),
+            sld_svg=render_sld_svg(p2.design),
+        )
+
+    @api.post("/v1/solve/benchmark/{template}/bundle")
+    def solve_benchmark_bundle(
+        template: BenchmarkTemplate,
+        overrides: Annotated[DesignOverrides | None, Body()] = None,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> Response:
+        with tempfile.TemporaryDirectory(prefix="cyelec_bench_") as tmp_dir:
+            tmp = Path(tmp_dir)
+            building = generate_benchmark_dxf(template, out_dxf=tmp / f"{template.value}.dxf")
+            p2 = run_phase2_pipeline(building, overrides=overrides)
+            outputs = export_phase3_deliverables(p2, tmp / "pack")
+            zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+            zip_bytes = zip_path.read_bytes()
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="eac_pack_{template.value}.zip"'
+                ),
+                "X-Tenant-ID": x_tenant_id,
+                "X-Input-SHA256": p2.design.provenance.input_sha256,
+            },
+        )
+
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
     async def solve_dxf_upload(
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
@@ -131,6 +210,26 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return SolveResponseEnvelope(tenant_id=x_tenant_id, result=p2)
+
+    @api.post("/v1/solve/dxf/preview", response_model=SolvePreviewEnvelope)
+    async def solve_dxf_preview(
+        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        overrides_json: Annotated[str | None, Form()] = None,
+        building_type: Annotated[BuildingType | None, Form()] = None,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> SolvePreviewEnvelope:
+        envelope = await solve_dxf_upload(
+            file=file,
+            overrides_json=overrides_json,
+            building_type=building_type,
+            x_tenant_id=x_tenant_id,
+        )
+        return SolvePreviewEnvelope(
+            tenant_id=envelope.tenant_id,
+            result=envelope.result,
+            floorplan_svg=render_floorplan_svg(envelope.result),
+            sld_svg=render_sld_svg(envelope.result.design),
+        )
 
     @api.post("/v1/solve/dxf/bundle")
     async def solve_dxf_bundle(

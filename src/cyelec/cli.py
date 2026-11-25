@@ -28,6 +28,7 @@ from cyelec.render.eac_pack import build_submission_zip
 from cyelec.render.qet_bridge import export_qet_project
 from cyelec.render.sld import export_sld_deliverables
 from cyelec.standards_loader import load_standards, resolve_standards_dir
+from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 from cyelec.synth.sample_plan import generate_cyprus_3bed_dxf
 
 app = typer.Typer(
@@ -70,26 +71,61 @@ def synth_plan(
         Path,
         typer.Option("--out", "-o", help="Output R2018 DXF path."),
     ] = Path("out/cyprus_3bed/sample_plan.dxf"),
+    template: Annotated[
+        BenchmarkTemplate,
+        typer.Option("--template", help="Cyprus architectural benchmark template."),
+    ] = BenchmarkTemplate.APARTMENT_3BED,
     json_out: Annotated[
         Path | None,
         typer.Option("--json", help="Optional output path for ground-truth BuildingModel JSON."),
     ] = None,
     pv_kva: Annotated[
-        float,
-        typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
-    ] = 0.0,
+        float | None,
+        typer.Option("--pv-kva", help="Optional rooftop PV capacity override in kVA."),
+    ] = None,
 ) -> None:
-    """Generate the synthetic 120 m² Cyprus 3-bedroom apartment R2018 DXF fixture."""
-    model = generate_cyprus_3bed_dxf(out_dxf=out, pv_capacity_kva=pv_kva)
+    """Generate a synthetic Cyprus architectural benchmark R2018 DXF fixture."""
+    model = generate_benchmark_dxf(template, out_dxf=out)
+    if pv_kva is not None:
+        model = model.model_copy(update={"pv_capacity_kva": pv_kva})
     if json_out is not None:
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(model.model_dump_json(indent=2), encoding="utf-8")
 
-    typer.echo(f"Generated R2018 DXF: {out}")
+    typer.echo(f"Generated R2018 DXF ({template.value}): {out}")
     typer.echo(
         f"Rooms: {len(model.rooms)} | Total Area: {model.total_floor_area_m2:.2f} m² | "
+        f"PV: {model.pv_capacity_kva:.1f} kVA | EV: {model.ev_charger_kw:.1f} kW | "
         f"SHA-256: {(model.source_sha256 or '')[:16]}"
     )
+
+
+@app.command("benchmark-suite")
+def benchmark_suite(
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output root directory for all Cyprus benchmarks."),
+    ] = Path("out/benchmarks"),
+) -> None:
+    """Run all 3 Cyprus benchmarks (Apartment, Villa PV+EV, Commercial Office) end-to-end."""
+    for tmpl in BenchmarkTemplate:
+        sub = out_dir / tmpl.value
+        sub.mkdir(parents=True, exist_ok=True)
+        dxf_path = sub / f"{tmpl.value}.dxf"
+        building = generate_benchmark_dxf(tmpl, out_dxf=dxf_path)
+        p2 = run_phase2_pipeline(building)
+        outputs = export_phase3_deliverables(p2, sub)
+        eac = p2.design.eac_compliance
+        pb = p2.design.phase_balance
+        imb = f"{pb.imbalance_pct:.2f}%" if pb is not None else "1P"
+        typer.echo(
+            f"[{tmpl.value:<17}] {building.total_floor_area_m2:>6.1f} m² | "
+            f"{len(p2.design.circuits):>2} ckts | {eac.total_diversified_kva:>6.1f} kVA | "
+            f"{eac.recommended_supply_tier:<34} | Imb {imb:<6} | "
+            f"CT={'YES' if eac.ct_metering_required else 'no':<3} | "
+            f"SubWarn={'YES' if eac.substation_warning else 'no':<3} | "
+            f"{len(outputs)} files"
+        )
 
 
 @app.command("solve-synth")

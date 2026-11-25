@@ -1,0 +1,20 @@
+# Hardened EU Reverse Proxy Configuration for cyelec-pipeline SaaS
+# Replace :80 with your EU domain (e.g. api.cyelec.eu) to enable automatic HTTPS via Let's Encrypt.
+
+:80 {
+    encode gzip zstd
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Frame-Options "DENY"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    request_body {
+        max_size 26MB
+    }
+
+    reverse_proxy cyelec-api:8000
+}

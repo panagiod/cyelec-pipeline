@@ -40,9 +40,15 @@ cyelec solve-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf --out-dir out/cyprus_3bed
 # Phase 3: Complete Cyprus EAC plan-approval pack (SLD SVG/DXF/QET + layout DXF w/ titleblock + Excel + Reports + SHA-256 manifest + ZIP)
 cyelec solve-eac out/cyprus_3bed/cyprus_3bed_120m2.dxf --out-dir out/cyprus_3bed_eac
 
-# Phase 3: Stateless Multi-Tenant EU B2B SaaS REST API (requires [api] extra)
+# Phase 3: Stateless Multi-Tenant EU B2B SaaS REST API + ETEK Review Workbench UI (http://127.0.0.1:8000/)
 pip install -e ".[api]"
 cyelec serve --host 0.0.0.0 --port 8000
+
+# Phase 4: Run all 3 Cyprus benchmarks (3-Bed Apartment, Villa PV+EV, Commercial Office CT/Substation)
+cyelec benchmark-suite --out-dir out/benchmarks
+
+# Hardened EU SaaS deployment (read-only rootfs, ephemeral tmpfs, Caddy TLS reverse proxy)
+docker compose -f deploy/docker-compose.yml up --build
 ```
 
 ## Development Checks

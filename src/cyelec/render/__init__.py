@@ -11,6 +11,7 @@ from cyelec.render.eac_pack import (
     render_eac_submission_pack_html,
     write_deliverables_manifest,
 )
+from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.layout_dxf import (
     ELECTRICAL_LAYERS,
     export_electrical_layout_dxf,
@@ -54,6 +55,7 @@ __all__ = [
     "render_calc_report_md",
     "render_eac_submission_pack_html",
     "render_electrical_layout_dxf",
+    "render_floorplan_svg",
     "render_qet_via_subprocess",
     "render_sld_dxf",
     "render_sld_svg",

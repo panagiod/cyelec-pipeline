@@ -1,0 +1,49 @@
+# EU Multi-Tenant B2B SaaS Deployment Stack for cyelec-pipeline
+# Hardened stateless configuration:
+#   - Read-only container root filesystem
+#   - Ephemeral RAM-backed /tmp tmpfs (zero tenant DXF persistence on disk)
+#   - Non-root UID 10001, dropped Linux capabilities, no-new-privileges
+#   - TLS reverse proxy via Caddy (EU GDPR-compliant, zero external CDN dependencies)
+
+services:
+  cyelec-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: cyelec-pipeline:0.1.0
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      QT_QPA_PLATFORM: offscreen
+      CYELEC_STANDARDS_DIR: /app/standards
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      cyelec-api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
