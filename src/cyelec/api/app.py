@@ -8,6 +8,7 @@ import os
 import tempfile
 import time
 import uuid
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
@@ -352,6 +353,8 @@ def create_app(
             updates["boq_rate_overrides"] = profile.boq_rate_overrides
         return overrides.model_copy(update=updates) if updates else overrides
 
+    rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+
     @api.middleware("http")
     async def security_and_observability_middleware(
         request: Request,
@@ -393,6 +396,34 @@ def create_app(
                     content={"detail": "Invalid or missing X-API-Key."},
                     headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
                 )
+
+        # Layer-1 cost guardrail: sliding-window rate limit on compute-heavy POST solve routes
+        rpm_raw = os.environ.get("CYELEC_RATE_LIMIT_RPM", "0").strip()
+        rpm_limit = int(rpm_raw) if rpm_raw.isdigit() else 0
+        if rpm_limit > 0 and request.method == "POST" and (
+            request.url.path.startswith("/v1/solve/")
+            or "/revisions" in request.url.path
+        ):
+            fwd_for = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            client_host = request.client.host if request.client else "unknown"
+            bucket_key = auth_tenant or fwd_for or client_host
+            now_mono = time.monotonic()
+            q = rate_buckets[bucket_key]
+            while q and (now_mono - q[0]) > 60.0:
+                q.popleft()
+            if len(q) >= rpm_limit:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "detail": f"Rate limit exceeded ({rpm_limit} solves/min). Retry shortly."
+                    },
+                    headers={
+                        "X-Request-ID": req_id,
+                        "Retry-After": "60",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
+            q.append(now_mono)
 
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0

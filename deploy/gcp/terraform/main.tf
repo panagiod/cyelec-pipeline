@@ -1,9 +1,15 @@
+data "google_project" "current" {
+  project_id = var.project_id
+}
+
 locals {
-  service_name      = "cyelec-${var.environment}"
-  firestore_db_name = "cyelec-${var.environment}"
-  gcs_bucket_name   = "${var.project_id}-cyelec-${var.environment}-blobs"
-  is_prod           = var.environment == "prod"
-  admin_secret_id   = "cyelec-prod-admin-key"
+  service_name            = "cyelec-${var.environment}"
+  firestore_db_name       = "cyelec-${var.environment}"
+  gcs_bucket_name         = "${var.project_id}-cyelec-${var.environment}-blobs"
+  is_prod                 = var.environment == "prod"
+  admin_secret_id         = "cyelec-prod-admin-key"
+  effective_max_instances = var.max_instances != null ? var.max_instances : (local.is_prod ? 4 : 2)
+  effective_rate_limit    = var.rate_limit_rpm != null ? var.rate_limit_rpm : (local.is_prod ? 120 : 30)
 }
 
 # ----------------------------------------------------------------------
@@ -81,7 +87,7 @@ resource "google_secret_manager_secret_iam_member" "prod_admin_key_accessor" {
 }
 
 # ----------------------------------------------------------------------
-# 4. Cloud Run v2 Service (min_instances=0 -> €0.00/mo idle, elastic burst)
+# 4. Cloud Run v2 Service (min_instances=0 -> €0.00/mo idle, tight burst cap)
 # ----------------------------------------------------------------------
 resource "google_cloud_run_v2_service" "api" {
   project  = var.project_id
@@ -96,7 +102,7 @@ resource "google_cloud_run_v2_service" "api" {
 
     scaling {
       min_instance_count = 0
-      max_instance_count = var.max_instances
+      max_instance_count = local.effective_max_instances
     }
 
     containers {
@@ -134,6 +140,10 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "CYELEC_AUTH_REQUIRED"
         value = local.is_prod ? "1" : "0"
+      }
+      env {
+        name  = "CYELEC_RATE_LIMIT_RPM"
+        value = tostring(local.effective_rate_limit)
       }
 
       dynamic "env" {
@@ -186,4 +196,149 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   name     = google_cloud_run_v2_service.api.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# ----------------------------------------------------------------------
+# 5. Layer-2 Automated €10/mo Budget Hard Gate (prod-managed, project-wide)
+#    Billing Budget -> Pub/Sub -> cyelec-budget-gate Cloud Run (OIDC auth)
+#    Pauses cyelec-staging & cyelec-prod ingress at 90% (€9) safely!
+# ----------------------------------------------------------------------
+resource "google_pubsub_topic" "budget_gate" {
+  count   = local.is_prod ? 1 : 0
+  project = var.project_id
+  name    = "cyelec-budget-gate"
+}
+
+resource "google_service_account" "budget_gate" {
+  count        = local.is_prod ? 1 : 0
+  project      = var.project_id
+  account_id   = "cyelec-budget-gate-sa"
+  display_name = "cyelec-pipeline €10 Budget Hard-Gate SA"
+}
+
+resource "google_project_iam_member" "budget_gate_run_admin" {
+  count   = local.is_prod ? 1 : 0
+  project = var.project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.budget_gate[0].email}"
+}
+
+resource "google_project_iam_member" "budget_gate_sa_user" {
+  count   = local.is_prod ? 1 : 0
+  project = var.project_id
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.budget_gate[0].email}"
+}
+
+resource "google_service_account" "pubsub_invoker" {
+  count        = local.is_prod ? 1 : 0
+  project      = var.project_id
+  account_id   = "cyelec-pubsub-invoker"
+  display_name = "Pub/Sub OIDC Invoker for cyelec-budget-gate"
+}
+
+resource "google_service_account_iam_member" "pubsub_token_creator" {
+  count              = local.is_prod ? 1 : 0
+  service_account_id = google_service_account.pubsub_invoker[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_cloud_run_v2_service" "budget_gate" {
+  count    = local.is_prod ? 1 : 0
+  project  = var.project_id
+  name     = "cyelec-budget-gate"
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL"
+
+  template {
+    service_account                  = google_service_account.budget_gate[0].email
+    timeout                          = "60s"
+    max_instance_request_concurrency = 4
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+
+    containers {
+      image = var.image_uri
+      args  = ["budget-gate", "--host", "0.0.0.0"]
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+        cpu_idle = true
+      }
+
+      env {
+        name  = "CYELEC_GCP_PROJECT"
+        value = var.project_id
+      }
+      env {
+        name  = "CYELEC_GCP_REGION"
+        value = var.region
+      }
+      env {
+        name  = "CYELEC_GATE_TARGET_SERVICES"
+        value = "cyelec-staging,cyelec-prod"
+      }
+      env {
+        name  = "CYELEC_BUDGET_GATE_RATIO"
+        value = var.budget_gate_ratio
+      }
+
+      startup_probe {
+        http_get {
+          path = "/health"
+          port = 8080
+        }
+        initial_delay_seconds = 1
+        timeout_seconds       = 5
+        period_seconds        = 5
+        failure_threshold     = 10
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_iam_member.budget_gate_run_admin,
+    google_project_iam_member.budget_gate_sa_user,
+  ]
+}
+
+# Locked exclusively to Pub/Sub OIDC invoker SA (public internet gets HTTP 403)
+resource "google_cloud_run_v2_service_iam_member" "budget_gate_invoker" {
+  count    = local.is_prod ? 1 : 0
+  project  = var.project_id
+  location = google_cloud_run_v2_service.budget_gate[0].location
+  name     = google_cloud_run_v2_service.budget_gate[0].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.pubsub_invoker[0].email}"
+}
+
+resource "google_pubsub_subscription" "budget_gate_push" {
+  count                = local.is_prod ? 1 : 0
+  project              = var.project_id
+  name                 = "cyelec-budget-gate-push"
+  topic                = google_pubsub_topic.budget_gate[0].id
+  ack_deadline_seconds = 30
+
+  push_config {
+    push_endpoint = "${google_cloud_run_v2_service.budget_gate[0].uri}/pubsub/budget"
+    oidc_token {
+      service_account_email = google_service_account.pubsub_invoker[0].email
+    }
+  }
+
+  depends_on = [
+    google_cloud_run_v2_service_iam_member.budget_gate_invoker,
+    google_service_account_iam_member.pubsub_token_creator,
+  ]
 }

@@ -23,6 +23,7 @@ gcloud services enable \
   storage.googleapis.com \
   artifactregistry.googleapis.com \
   secretmanager.googleapis.com \
+  pubsub.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   cloudresourcemanager.googleapis.com
@@ -74,6 +75,8 @@ for ROLE in \
   roles/datastore.owner \
   roles/storage.admin \
   roles/artifactregistry.repoAdmin \
+  roles/pubsub.admin \
+  roles/serviceusage.serviceUsageAdmin \
   roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
   roles/resourcemanager.projectIamAdmin \

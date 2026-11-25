@@ -617,5 +617,27 @@ def serve(
     uvicorn.run("cyelec.api.app:app", host=host, port=resolved_port)
 
 
+@app.command("budget-gate")
+def budget_gate(
+    host: Annotated[str, typer.Option("--host", help="Bind host address.")] = "0.0.0.0",
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="Bind port (defaults to $PORT env var or 8080)."),
+    ] = None,
+) -> None:
+    """Start the GCP Pub/Sub budget hard-gate service (pauses Cloud Run ingress at cap)."""
+    import os
+
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise typer.BadParameter(
+            "Budget gate requires optional 'api' extra: pip install 'cyelec-pipeline[api]'"
+        ) from exc
+
+    resolved_port = port if port is not None else int(os.environ.get("PORT", "8080"))
+    uvicorn.run("cyelec.saas.budget_gate:app", host=host, port=resolved_port)
+
+
 if __name__ == "__main__":
     app()

@@ -26,9 +26,21 @@ variable "image_uri" {
 }
 
 variable "max_instances" {
-  description = "Maximum Cloud Run elastic burst replicas (min_instances is always 0 for €0 idle)."
+  description = "Optional Cloud Run max replicas override (defaults: staging=2, prod=4; min is always 0)."
   type        = number
-  default     = 10
+  default     = null
+}
+
+variable "rate_limit_rpm" {
+  description = "Optional per-client solves/min rate limit (defaults: staging=30, prod=120)."
+  type        = number
+  default     = null
+}
+
+variable "budget_gate_ratio" {
+  description = "Spend ratio (e.g. 0.90 = €9 on €10 budget) at which the hard gate pauses public ingress."
+  type        = string
+  default     = "0.90"
 }
 
 variable "cpu_limit" {
