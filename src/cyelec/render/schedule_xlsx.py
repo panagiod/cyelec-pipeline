@@ -448,7 +448,149 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
         ws2.cell(row=prov_start + offset, column=2, value=v).font = _BODY_FONT
 
     _autosize_columns(ws2, max_width=70)
+
+    # ==================================================================
+    # Sheet 3: Bill of Quantities (Indicative EUR + 19% Cyprus VAT)
+    # ==================================================================
+    if result.boq is not None and result.boq.items:
+        boq = result.boq
+        ws3 = wb.create_sheet(title="Bill of Quantities")
+        ws3.page_setup.orientation = ws3.ORIENTATION_LANDSCAPE
+        ws3.page_setup.paperSize = ws3.PAPERSIZE_A4
+
+        ws3["A1"] = f"BILL OF QUANTITIES (EUR) — {result.building.project_name}"
+        ws3["A1"].font = _TITLE_FONT
+        ws3["A2"] = f"Rates Table: {boq.rates_version} | Currency: {boq.currency}"
+        ws3["A2"].font = _BODY_FONT
+
+        boq_headers = [
+            "Item No.",
+            "Category",
+            "Description (EN)",
+            "Περιγραφή (EL)",
+            "Unit",
+            "Qty",
+            "Unit Rate (EUR)",
+            "Line Total (EUR)",
+        ]
+        hdr_row = 4
+        for col_idx, text in enumerate(boq_headers, start=1):
+            hc = ws3.cell(row=hdr_row, column=col_idx, value=text)
+            hc.font = _HEADER_FONT
+            hc.fill = _NAVY_FILL
+            hc.alignment = Alignment(horizontal="center")
+            hc.border = _CELL_BORDER
+
+        first_item_row = hdr_row + 1
+        for idx, item in enumerate(boq.items):
+            r = first_item_row + idx
+            row_vals: list[str | int | float] = [
+                item.item_no,
+                item.category,
+                item.description_en,
+                item.description_el,
+                item.unit,
+                item.quantity,
+                item.unit_rate_eur,
+                f"=ROUND(F{r}*G{r},2)",
+            ]
+            for col_idx, val in enumerate(row_vals, start=1):
+                bc = ws3.cell(row=r, column=col_idx, value=val)
+                bc.font = _BODY_FONT
+                bc.border = _CELL_BORDER
+                if col_idx in (6, 7, 8):
+                    bc.number_format = "#,##0.00"
+                    bc.alignment = Alignment(horizontal="right")
+
+        last_item_row = first_item_row + len(boq.items) - 1
+        sub_row = last_item_row + 2
+        vat_row = sub_row + 1
+        tot_row = vat_row + 1
+
+        ws3.cell(row=sub_row, column=7, value="Subtotal (excl. VAT)").font = _BOLD_FONT
+        sub_c = ws3.cell(row=sub_row, column=8, value=f"=SUM(H{first_item_row}:H{last_item_row})")
+        sub_c.font = _BOLD_FONT
+        sub_c.number_format = "#,##0.00"
+        sub_c.border = _CELL_BORDER
+
+        vat_pct_int = int(round(boq.vat_rate * 100))
+        ws3.cell(row=vat_row, column=7, value=f"Cyprus VAT ({vat_pct_int}%)").font = _BOLD_FONT
+        vat_c = ws3.cell(row=vat_row, column=8, value=f"=ROUND(H{sub_row}*{boq.vat_rate},2)")
+        vat_c.font = _BOLD_FONT
+        vat_c.number_format = "#,##0.00"
+        vat_c.border = _CELL_BORDER
+
+        ws3.cell(row=tot_row, column=7, value="GRAND TOTAL (EUR incl. VAT)").font = _BOLD_FONT
+        tot_c = ws3.cell(row=tot_row, column=8, value=f"=H{sub_row}+H{vat_row}")
+        tot_c.font = _BOLD_FONT
+        tot_c.fill = _PASS_FILL
+        tot_c.number_format = "#,##0.00"
+        tot_c.border = _CELL_BORDER
+
+        _autosize_columns(ws3, max_width=52)
+
     wb.save(str(out_path))
+    return out_path
+
+
+def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
+    """Export flat evaluated Bill of Quantities CSV (EUR + 19% VAT)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "Item No.",
+                "Category",
+                "Description (EN)",
+                "Description (EL)",
+                "Unit",
+                "Quantity",
+                "Unit Rate (EUR)",
+                "Total (EUR)",
+            ]
+        )
+        if result.boq is not None:
+            for item in result.boq.items:
+                writer.writerow(
+                    [
+                        item.item_no,
+                        item.category,
+                        item.description_en,
+                        item.description_el,
+                        item.unit,
+                        f"{item.quantity:.2f}",
+                        f"{item.unit_rate_eur:.2f}",
+                        f"{item.total_eur:.2f}",
+                    ]
+                )
+            writer.writerow(
+                ["", "", "Subtotal (excl. VAT)", "", "", "", "", f"{result.boq.subtotal_eur:.2f}"]
+            )
+            writer.writerow(
+                [
+                    "",
+                    "",
+                    f"Cyprus VAT ({int(round(result.boq.vat_rate * 100))}%)",
+                    "",
+                    "",
+                    "",
+                    "",
+                    f"{result.boq.vat_eur:.2f}",
+                ]
+            )
+            writer.writerow(
+                [
+                    "",
+                    "",
+                    "GRAND TOTAL (EUR incl. VAT)",
+                    "",
+                    "",
+                    "",
+                    "",
+                    f"{result.boq.grand_total_eur:.2f}",
+                ]
+            )
     return out_path
 
 

@@ -14,6 +14,7 @@ from cyelec.models.electrical import (
     ElectricalDesignResult,
     PhaseAssignment,
 )
+from cyelec.render.i18n import format_branding_line, t
 
 SLD_DXF_LAYERS: dict[str, int] = {
     "E-SLD-BUS": 1,     # Red main busbars
@@ -60,6 +61,8 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     """Render deterministic IEC 60617 / BS 7671 A3-landscape vector SVG Single-Line Diagram."""
     eac = result.eac_compliance
     prov = result.provenance
+    lang = result.report_language
+    branding_line = format_branding_line(result.branding)
     circuits = result.circuits
     n = max(1, len(circuits))
 
@@ -99,7 +102,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         ),
         (
             f'  <text x="34" y="44" class="title">'
-            f"SINGLE-LINE DIAGRAM (SLD) — {_esc(result.building.project_name)}</text>"
+            f"{_esc(t('sld_title', lang))} — {_esc(result.building.project_name)}</text>"
         ),
         (
             f'  <text x="34" y="62" class="sub">'
@@ -107,7 +110,8 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             f"Supply: {_esc(eac.recommended_supply_tier)} | "
             f"Earthing: {_esc(result.earthing_system.value)} "
             f"(Ze/Ra={result.ze_or_ra_ohm:.1f} Ω) | "
-            f"DB: {_esc(result.building.db_anchor.id)}</text>"
+            f"DB: {_esc(result.building.db_anchor.id)}"
+            f"{' | ' + _esc(branding_line) if branding_line else ''}</text>"
         ),
     ]
 
@@ -483,6 +487,16 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     blocker_txt = "BLOCKERS PRESENT" if result.has_blockers else "0 BLOCKERS"
     std_summary = ", ".join(f"{k}={v}" for k, v in sorted(prov.standards_versions.items()))
 
+    eng_val = (
+        result.branding.engineer_name
+        if (result.branding and result.branding.engineer_name)
+        else "__________________________________"
+    )
+    etek_val = (
+        result.branding.etek_reg_no
+        if (result.branding and result.branding.etek_reg_no)
+        else "__________________"
+    )
     parts.extend(
         [
             (
@@ -527,15 +541,15 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             # Right pane: Statutory ETEK Stamp & Sign-Off Box
             (
                 f'  <text x="{width - 404}" y="{tb_y + 24}" class="hdr">'
-                "STATUTORY ETEK ELECTRICAL ENGINEER SIGN-OFF</text>"
+                f"{_esc(t('etek_signoff', lang).upper())}</text>"
             ),
             (
                 f'  <text x="{width - 404}" y="{tb_y + 52}" class="sm">'
-                "Licensed Engineer: __________________________________</text>"
+                f"Licensed Engineer: {_esc(eng_val)}</text>"
             ),
             (
                 f'  <text x="{width - 404}" y="{tb_y + 80}" class="sm">'
-                "ETEK Reg. No.: __________________  Date: ____________</text>"
+                f"ETEK Reg. No.: {_esc(etek_val)}  Date: ____________</text>"
             ),
             (
                 f'  <text x="{width - 404}" y="{tb_y + 114}" class="sm">'

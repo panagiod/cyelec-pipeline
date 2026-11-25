@@ -10,6 +10,7 @@ from pathlib import Path
 
 from cyelec.models.electrical import ReviewSeverity
 from cyelec.models.spatial import Phase2DesignResult
+from cyelec.render.i18n import format_branding_line, t
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -62,6 +63,15 @@ def render_eac_submission_pack_html(
     eac = design.eac_compliance
     prov = design.provenance
     sp = result.spatial
+    lang = design.report_language
+    branding_line = format_branding_line(design.branding)
+    eng_name = (design.branding.engineer_name or "") if design.branding else ""
+    etek_no = (design.branding.etek_reg_no or "") if design.branding else ""
+    boq_txt = (
+        f"€{design.boq.grand_total_eur:,.2f} (incl. VAT)"
+        if design.boq is not None
+        else "N/A"
+    )
 
     def esc(val: object) -> str:
         return html.escape(str(val))
@@ -106,11 +116,15 @@ def render_eac_submission_pack_html(
         else ""
     )
 
+    branding_banner = (
+        f'<div class="brand-bar">{esc(branding_line)}</div>' if branding_line else ""
+    )
+
     return f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="{esc(lang.value if lang.value != 'bilingual' else 'en')}">
 <head>
   <meta charset="utf-8" />
-  <title>EAC Submission Pack — {esc(design.building.project_name)}</title>
+  <title>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</title>
   <style>
     @page {{ size: A4 landscape; margin: 12mm; }}
     body {{
@@ -137,9 +151,18 @@ def render_eac_submission_pack_html(
       border-bottom: 1px solid #cbd5e0;
       padding-bottom: 2px;
     }}
+    .brand-bar {{
+      background: #edf2f7;
+      border-left: 4px solid #1b365d;
+      padding: 5px 10px;
+      margin-bottom: 10px;
+      font-size: 8.8pt;
+      font-weight: 600;
+      color: #1b365d;
+    }}
     .cards {{
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 10px;
       margin-bottom: 12px;
     }}
@@ -151,7 +174,7 @@ def render_eac_submission_pack_html(
       border-radius: 4px;
     }}
     .card-k {{ font-size: 7.8pt; color: #4a5568; text-transform: uppercase; }}
-    .card-v {{ font-size: 11pt; font-weight: 700; color: #1b365d; margin-top: 2px; }}
+    .card-v {{ font-size: 10.5pt; font-weight: 700; color: #1b365d; margin-top: 2px; }}
     .sld-frame {{
       border: 1px solid #cbd5e0;
       padding: 6px;
@@ -182,11 +205,13 @@ def render_eac_submission_pack_html(
 </head>
 <body>
   <header>
-    <h1>CYPRUS EAC PLAN-APPROVAL SUBMISSION PACK — {esc(design.building.project_name)}</h1>
+    <h1>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</h1>
     <div>
       <code>cyelec-pipeline v{esc(prov.pipeline_version)}</code> | {esc(prov.timestamp_utc)}
     </div>
   </header>
+
+  {branding_banner}
 
   <div class="cards">
     <div class="card">
@@ -200,6 +225,10 @@ def render_eac_submission_pack_html(
     <div class="card">
       <div class="card-k">Spatial Layout</div>
       <div class="card-v">{len(sp.devices)} Devices | {sp.total_conduit_m:.1f} m Conduit</div>
+    </div>
+    <div class="card">
+      <div class="card-k">Indicative BOQ Total</div>
+      <div class="card-v">{esc(boq_txt)}</div>
     </div>
     <div class="card">
       <div class="card-k">Review Gate Status</div>
@@ -219,7 +248,7 @@ def render_eac_submission_pack_html(
   {floorplan_section}
 
   <section>
-    <h2>2. Single-Line Diagram (SLD) — {esc(design.building.db_anchor.id)}</h2>
+    <h2>2. {esc(t('sld_title', lang))} — {esc(design.building.db_anchor.id)}</h2>
     <div class="sld-frame">
       {sld_svg}
     </div>
@@ -238,10 +267,10 @@ def render_eac_submission_pack_html(
   </section>
 
   <section class="signoff">
-    <strong>4. Statutory ETEK Electrical Engineer Declaration &amp; EAC Submission Stamp</strong>
+    <strong>4. {esc(t('etek_signoff', lang))}</strong>
     <div class="signoff-grid">
-      <div class="sig-line">ETEK Electrical Engineer Name</div>
-      <div class="sig-line">ETEK Registration Number</div>
+      <div class="sig-line">{esc(eng_name or 'ETEK Electrical Engineer Name')}</div>
+      <div class="sig-line">{esc(etek_no or 'ETEK Registration Number')}</div>
       <div class="sig-line">Signature &amp; Official Stamp</div>
       <div class="sig-line">Date</div>
     </div>

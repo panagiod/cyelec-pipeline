@@ -53,7 +53,7 @@ def test_phase1_end_to_end_deliverables(tmp_path: Path) -> None:
 
     # 3. Formula-backed Excel workbook verification
     wb = load_workbook(str(outputs["xlsx"]), data_only=False)
-    assert wb.sheetnames == ["Load Schedule", "EAC & Review Flags"]
+    assert wb.sheetnames == ["Load Schedule", "EAC & Review Flags", "Bill of Quantities"]
 
     ws = wb["Load Schedule"]
     # Check live Excel formulas on first circuit row (row 9)

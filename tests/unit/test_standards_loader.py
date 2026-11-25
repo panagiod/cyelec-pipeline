@@ -17,6 +17,7 @@ def test_load_standards_bundle_complete() -> None:
         "bs7671_devices",
         "eac_cyprus_rules",
         "room_templates",
+        "cyprus_boq_rates",
     }
     assert all(versions.values())
 

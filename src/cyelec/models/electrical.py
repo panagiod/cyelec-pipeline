@@ -105,6 +105,56 @@ class CircuitOverride(BaseModel):
     diversity_factor: float | None = Field(default=None, gt=0.0, le=1.0)
 
 
+class ReportLanguage(StrEnum):
+    """Deliverable report & titleblock language mode for Cyprus EAC submissions."""
+
+    EN = "en"
+    EL = "el"
+    BILINGUAL = "bilingual"
+
+
+class TenantBranding(BaseModel):
+    """Consulting firm & licensed ETEK engineer branding for branded deliverables."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    firm_name: str = ""
+    engineer_name: str = ""
+    etek_reg_no: str = ""
+    phone: str = ""
+    email: str = ""
+    logo_data_uri: str | None = None
+
+
+class BoqItem(BaseModel):
+    """Single itemized Bill of Quantities line item in EUR."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_no: str
+    category: str
+    description_en: str
+    description_el: str
+    unit: str
+    quantity: float = Field(ge=0.0)
+    unit_rate_eur: float = Field(ge=0.0)
+    total_eur: float = Field(ge=0.0)
+
+
+class BoqSummary(BaseModel):
+    """Deterministic Cyprus electrical Bill of Quantities with 19% VAT."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    currency: str = "EUR"
+    vat_rate: float = 0.19
+    rates_version: str
+    items: list[BoqItem] = Field(default_factory=list)
+    subtotal_eur: float = Field(ge=0.0)
+    vat_eur: float = Field(ge=0.0)
+    grand_total_eur: float = Field(ge=0.0)
+
+
 class DesignOverrides(BaseModel):
     """Structured stateless engineer overrides accepted by every pipeline run."""
 
@@ -116,6 +166,8 @@ class DesignOverrides(BaseModel):
     ambient_temp_c: int | None = Field(default=None, ge=10, le=70)
     pv_capacity_kva: float | None = Field(default=None, ge=0.0)
     circuit_overrides: dict[str, CircuitOverride] = Field(default_factory=dict)
+    report_language: ReportLanguage = ReportLanguage.EN
+    branding: TenantBranding | None = None
     notes: str | None = None
 
 
@@ -299,6 +351,9 @@ class ElectricalDesignResult(BaseModel):
     sub_mains: list[SolvedSubMain] = Field(default_factory=list)
     phase_balance: PhaseBalanceResult | None = None
     eac_compliance: EacComplianceResult
+    boq: BoqSummary | None = None
+    report_language: ReportLanguage = ReportLanguage.EN
+    branding: TenantBranding | None = None
     review_flags: list[ReviewFlag] = Field(default_factory=list)
     has_blockers: bool
     etek_signoff_required: bool = True

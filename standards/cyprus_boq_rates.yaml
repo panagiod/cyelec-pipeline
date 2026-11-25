@@ -1,0 +1,48 @@
+schema_version: "1.0"
+standards_version: "Cyprus-BOQ-2026-v1"
+source_reference: "Cyprus Electrical Contracting Market Indicative Supply & Install Rates (EUR, excl. VAT)"
+currency: "EUR"
+vat_rate: 0.19
+wastage_factor: 1.10
+three_phase_cable_multiplier: 1.55
+
+cable_eur_per_m:
+  "1.5": 2.40
+  "2.5": 3.40
+  "4.0": 4.90
+  "6.0": 6.80
+  "10.0": 10.50
+  "16.0": 15.80
+  "25.0": 23.50
+  "35.0": 32.00
+
+conduit_eur_per_m:
+  "20mm": 2.80
+  "25mm": 3.60
+
+switchgear_eur:
+  main_board_1p: 190.00
+  main_board_3p: 360.00
+  sub_board_3p: 280.00
+  main_isolator_4p: 75.00
+  main_isolator_2p: 45.00
+  spd_type2_3p: 145.00
+  spd_type2_1p: 95.00
+  rcbo_30ma_1p: 38.00
+  rcbo_30ma_3p: 115.00
+  rcbo_ev_type_a_dc: 165.00
+  mcb_1p: 14.00
+  mcb_3p: 42.00
+  rcd_type_s_100ma_4p: 135.00
+  rcd_type_s_100ma_2p: 85.00
+  ct_metering_enclosure: 650.00
+
+accessories_eur:
+  luminaire_point: 35.00
+  light_switch: 22.00
+  twin_13a_socket: 28.00
+  ac_isolator_20a: 34.00
+  appliance_outlet_45a: 42.00
+  tt_earth_rod_kit: 160.00
+  ev_charger_7kw: 890.00
+  ev_charger_22kw: 1290.00

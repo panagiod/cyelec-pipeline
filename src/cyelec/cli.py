@@ -15,7 +15,9 @@ from cyelec.models.electrical import (
     EacProfile,
     EarthingSystem,
     ElectricalDesignResult,
+    ReportLanguage,
     ReviewSeverity,
+    TenantBranding,
 )
 from cyelec.pipeline import (
     export_phase1_deliverables,
@@ -370,6 +372,26 @@ def solve_eac(
         Path | None,
         typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
     ] = None,
+    language: Annotated[
+        ReportLanguage,
+        typer.Option("--language", help="Deliverable language: en, el, or bilingual."),
+    ] = ReportLanguage.EN,
+    firm_name: Annotated[
+        str,
+        typer.Option("--firm-name", help="Consulting engineering firm name for branding."),
+    ] = "",
+    engineer: Annotated[
+        str,
+        typer.Option("--engineer", help="Licensed ETEK electrical engineer name."),
+    ] = "",
+    etek_reg: Annotated[
+        str,
+        typer.Option("--etek-reg", help="ETEK registration number (e.g., ETEK-E-1234)."),
+    ] = "",
+    export_pdf: Annotated[
+        bool,
+        typer.Option("--pdf/--no-pdf", help="Export native A4 PDFs via optional WeasyPrint."),
+    ] = False,
     zip_bundle: Annotated[
         bool,
         typer.Option("--zip/--no-zip", help="Also write eac_submission_pack.zip archive."),
@@ -383,11 +405,18 @@ def solve_eac(
     ] = False,
 ) -> None:
     """Run full Phase 0-3 pipeline and generate complete Cyprus EAC plan-approval pack."""
+    branding = (
+        TenantBranding(firm_name=firm_name, engineer_name=engineer, etek_reg_no=etek_reg)
+        if (firm_name or engineer or etek_reg)
+        else None
+    )
     overrides = DesignOverrides(
         eac_profile=profile,
         earthing_system=earthing,
         ambient_temp_c=ambient_c,
         pv_capacity_kva=pv_kva,
+        report_language=language,
+        branding=branding,
     )
     mapping = _load_layer_mapping(layer_mapping)
     p2 = run_phase2_pipeline(
@@ -396,7 +425,12 @@ def solve_eac(
         building_type=building_type,
         layer_mapping=mapping,
     )
-    outputs = export_phase3_deliverables(p2, out_dir, run_qet_subprocess=qet_subprocess)
+    outputs = export_phase3_deliverables(
+        p2,
+        out_dir,
+        run_qet_subprocess=qet_subprocess,
+        export_pdf=export_pdf,
+    )
     if zip_bundle:
         outputs["zip_bundle"] = build_submission_zip(
             outputs, out_dir / "eac_submission_pack.zip"
@@ -404,10 +438,11 @@ def solve_eac(
 
     res = p2.design
     sp = p2.spatial
+    boq_msg = f" | BOQ: €{res.boq.grand_total_eur:,.2f}" if res.boq is not None else ""
     typer.echo(
         f"EAC Pack Complete: {res.building.project_name} | "
         f"Supply: {res.eac_compliance.recommended_supply_tier} | "
-        f"Conduit: {sp.total_conduit_m:.1f} m | Artifacts: {len(outputs)}"
+        f"Conduit: {sp.total_conduit_m:.1f} m{boq_msg} | Artifacts: {len(outputs)}"
     )
     for key, path in sorted(outputs.items()):
         typer.echo(f"  {key.upper():<16}: {path}")

@@ -147,6 +147,25 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
         ("  E-COND : ROUTED PVC CONDUIT", 110.0),
         (f"  E-WETZONE-EXCL : {eac.bathroom_socket_exclusion_m:.1f}m EXCL", 110.0),
         ("ETEK SIGN-OFF REQUIRED", 140.0),
+        *(
+            [
+                (f"FIRM: {result.design.branding.firm_name[:32]}", 110.0),
+            ]
+            if result.design.branding and result.design.branding.firm_name
+            else []
+        ),
+        *(
+            [
+                (
+                    f"ENG: {result.design.branding.engineer_name[:20]} "
+                    f"({result.design.branding.etek_reg_no[:12]})",
+                    105.0,
+                ),
+            ]
+            if result.design.branding
+            and (result.design.branding.engineer_name or result.design.branding.etek_reg_no)
+            else []
+        ),
         (f"SHA256: {result.design.provenance.input_sha256[:16]}", 105.0),
     ]
     cur_y = maxy - 450.0

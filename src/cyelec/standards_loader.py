@@ -341,8 +341,36 @@ class RoomTemplatesStandards(BaseModel):
         return lookup
 
 
+class CyprusBoqRates(BaseModel):
+    """Validated Cyprus electrical contracting EUR unit rates table."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str
+    standards_version: str
+    source_reference: str
+    currency: str = "EUR"
+    vat_rate: float = Field(ge=0.0, le=0.5)
+    wastage_factor: float = Field(ge=1.0, le=1.5)
+    three_phase_cable_multiplier: float = Field(ge=1.0, le=3.0)
+    cable_eur_per_m: dict[str, float]
+    conduit_eur_per_m: dict[str, float]
+    switchgear_eur: dict[str, float]
+    accessories_eur: dict[str, float]
+
+    def get_cable_rate(self, size_mm2: float) -> float:
+        """Return EUR/m rate for the closest standard cable size key."""
+        key = f"{size_mm2:.1f}"
+        if key in self.cable_eur_per_m:
+            return self.cable_eur_per_m[key]
+        # Fallback to nearest tabulated cable size
+        numeric = {float(k): v for k, v in self.cable_eur_per_m.items()}
+        nearest = min(numeric.keys(), key=lambda s: abs(s - size_mm2))
+        return numeric[nearest]
+
+
 class StandardsBundle(BaseModel):
-    """All versioned BS 7671 & EAC standards loaded and validated together."""
+    """All versioned BS 7671, EAC & Cyprus BOQ standards loaded and validated together."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -350,6 +378,7 @@ class StandardsBundle(BaseModel):
     devices: DeviceStandards
     eac_rules: EacCyprusRules
     room_templates: RoomTemplatesStandards
+    boq_rates: CyprusBoqRates
 
     def versions_map(self) -> dict[str, str]:
         """Return provenance map of standards table names to versions."""
@@ -358,6 +387,7 @@ class StandardsBundle(BaseModel):
             "bs7671_devices": self.devices.standards_version,
             "eac_cyprus_rules": self.eac_rules.standards_version,
             "room_templates": self.room_templates.standards_version,
+            "cyprus_boq_rates": self.boq_rates.standards_version,
         }
 
 
@@ -402,7 +432,7 @@ def _read_yaml(path: Path) -> object:
 
 
 def load_standards(standards_dir: Path | None = None) -> StandardsBundle:
-    """Load and strictly validate all BS 7671 and Cyprus EAC YAML tables."""
+    """Load and strictly validate all BS 7671, Cyprus EAC & BOQ YAML tables."""
     root = resolve_standards_dir(standards_dir)
     cables = CableStandards.model_validate(_read_yaml(root / "bs7671_cables.yaml"))
     devices = DeviceStandards.model_validate(_read_yaml(root / "bs7671_devices.yaml"))
@@ -410,9 +440,11 @@ def load_standards(standards_dir: Path | None = None) -> StandardsBundle:
     room_templates = RoomTemplatesStandards.model_validate(
         _read_yaml(root / "room_templates.yaml")
     )
+    boq_rates = CyprusBoqRates.model_validate(_read_yaml(root / "cyprus_boq_rates.yaml"))
     return StandardsBundle(
         cables=cables,
         devices=devices,
         eac_rules=eac_rules,
         room_templates=room_templates,
+        boq_rates=boq_rates,
     )

@@ -19,6 +19,7 @@ from cyelec.models.electrical import (
     ElectricalDesignResult,
     PhaseAssignment,
     PhaseBalanceResult,
+    ReportLanguage,
     ReviewFlag,
     ReviewSeverity,
     RunProvenance,
@@ -28,8 +29,13 @@ from cyelec.models.electrical import (
 from cyelec.models.spatial import Phase2DesignResult, SpatialLayoutResult
 from cyelec.render.calc_report import export_calc_reports
 from cyelec.render.layout_dxf import export_electrical_layout_dxf
-from cyelec.render.schedule_xlsx import export_load_schedule_csv, export_load_schedule_xlsx
+from cyelec.render.schedule_xlsx import (
+    export_boq_csv,
+    export_load_schedule_csv,
+    export_load_schedule_xlsx,
+)
 from cyelec.solver.balancer import balance_three_phase_loads
+from cyelec.solver.boq import generate_boq
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits
@@ -239,7 +245,10 @@ def run_phase1_pipeline(
         overrides_applied=overrides is not None,
     )
 
-    return ElectricalDesignResult(
+    report_language = overrides.report_language if overrides is not None else ReportLanguage.EN
+    branding = overrides.branding if overrides is not None else None
+
+    result = ElectricalDesignResult(
         provenance=provenance,
         building=effective_building,
         earthing_system=earthing_system,
@@ -248,10 +257,14 @@ def run_phase1_pipeline(
         sub_mains=solved_sub_mains,
         phase_balance=phase_balance,
         eac_compliance=eac_compliance,
+        report_language=report_language,
+        branding=branding,
         review_flags=review_flags,
         has_blockers=has_blockers,
         etek_signoff_required=True,
     )
+    boq = generate_boq(result, standards)
+    return result.model_copy(update={"boq": boq})
 
 
 def run_phase2_pipeline(
@@ -337,6 +350,9 @@ def run_phase2_pipeline(
         flags=spatial_flags,
     )
 
+    # Refresh BOQ with exact placed spatial accessory counts
+    design = design.model_copy(update={"boq": generate_boq(design, standards, spatial=spatial)})
+
     return Phase2DesignResult(design=design, spatial=spatial)
 
 
@@ -344,24 +360,27 @@ def export_phase1_deliverables(
     result: ElectricalDesignResult,
     out_dir: Path,
 ) -> dict[str, Path]:
-    """Write JSON snapshot, formula-backed Excel, CSV, Markdown, and A4-landscape HTML outputs."""
+    """Write JSON snapshot, formula-backed Excel, CSVs, Markdown, and A4-landscape HTML outputs."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
     json_path = out_dir / "design_result.json"
     xlsx_path = out_dir / "load_schedule.xlsx"
     csv_path = out_dir / "load_schedule.csv"
+    boq_csv_path = out_dir / "boq.csv"
     md_path = out_dir / "calc_report.md"
     html_path = out_dir / "calc_report.html"
 
     json_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
     export_load_schedule_xlsx(result, xlsx_path)
     export_load_schedule_csv(result, csv_path)
+    export_boq_csv(result, boq_csv_path)
     export_calc_reports(result, md_path, html_path)
 
     return {
         "json": json_path,
         "xlsx": xlsx_path,
         "csv": csv_path,
+        "boq_csv": boq_csv_path,
         "md": md_path,
         "html": html_path,
     }
@@ -389,6 +408,7 @@ def export_phase3_deliverables(
     out_dir: Path,
     *,
     run_qet_subprocess: bool = False,
+    export_pdf: bool = False,
 ) -> dict[str, Path]:
     """Write complete EAC pack: Phase 1/2 outputs + SLD SVG/DXF/QET + cover HTML + manifest."""
     from cyelec.render.eac_pack import (
@@ -396,6 +416,7 @@ def export_phase3_deliverables(
         write_deliverables_manifest,
     )
     from cyelec.render.floorplan_svg import render_floorplan_svg
+    from cyelec.render.pdf_export import export_html_to_pdf
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
     from cyelec.render.sld import export_sld_deliverables
 
@@ -433,6 +454,14 @@ def export_phase3_deliverables(
         encoding="utf-8",
     )
     outputs["eac_pack_html"] = pack_html_path
+
+    if export_pdf:
+        calc_pdf, _ = export_html_to_pdf(outputs["html"], out_dir / "calc_report.pdf")
+        if calc_pdf is not None:
+            outputs["calc_report_pdf"] = calc_pdf
+        pack_pdf, _ = export_html_to_pdf(pack_html_path, out_dir / "eac_submission_pack.pdf")
+        if pack_pdf is not None:
+            outputs["eac_pack_pdf"] = pack_pdf
 
     manifest_path = out_dir / "manifest.json"
     write_deliverables_manifest(result, outputs, manifest_path)
