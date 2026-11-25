@@ -5,14 +5,37 @@ from __future__ import annotations
 from cyelec import __version__
 
 
-def render_etek_workbench_html() -> str:
+def render_etek_workbench_html(base_url: str = "") -> str:
     """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard served at GET /."""
+    prefix = base_url.rstrip("/")
+    og_img = f"{prefix}/og-thumbnail.jpg"
+    logo_url = f"{prefix}/logo.png"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>cyelec-pipeline — ETEK Engineer Review &amp; Pass-2 Workbench</title>
+  <meta name="theme-color" content="#1b365d" />
+  <meta
+    name="description"
+    content="Deterministic BS 7671, IEC 60364 &amp; Cyprus EAC electrical engineering workbench."
+  />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="CyElec — ETEK Electrical Engineering &amp; EAC Workbench" />
+  <meta
+    property="og:description"
+    content="Deterministic BS 7671 / IEC 60364 / Cyprus EAC DXF layout, SLD, BOQ &amp; balancing."
+  />
+  <meta property="og:image" content="{og_img}" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="CyElec — ETEK Electrical Engineering &amp; EAC Workbench" />
+  <meta name="twitter:image" content="{og_img}" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" href="{logo_url}" />
+  <title>CyElec — ETEK Engineer Review &amp; Pass-2 Workbench</title>
   <style>
     :root {{
       --navy: #1b365d;
@@ -38,11 +61,23 @@ def render_etek_workbench_html() -> str:
     header {{
       background: var(--navy);
       color: #ffffff;
-      padding: 12px 20px;
+      padding: 10px 20px;
       display: flex;
       justify-content: space-between;
       align-items: center;
       border-bottom: 3px solid #0f2342;
+    }}
+    .brand-lockup {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .brand-logo {{
+      width: 34px;
+      height: 34px;
+      border-radius: 7px;
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      display: block;
     }}
     header h1 {{ margin: 0; font-size: 16px; letter-spacing: 0.2px; }}
     header .meta {{ font-size: 11px; opacity: 0.85; }}
@@ -209,7 +244,10 @@ def render_etek_workbench_html() -> str:
 </head>
 <body>
   <header>
-    <h1>cyelec-pipeline — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
+    <div class="brand-lockup">
+      <img src="/logo.png" alt="CyElec" class="brand-logo" width="34" height="34" />
+      <h1>CyElec — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
+    </div>
     <div class="meta">v{__version__} | BS 7671 / IEC 60364 / Cyprus EAC | EU B2B SaaS</div>
   </header>
 

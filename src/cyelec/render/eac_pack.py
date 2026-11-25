@@ -8,6 +8,7 @@ import json
 import zipfile
 from pathlib import Path
 
+from cyelec.assets import get_logo_svg_data_uri
 from cyelec.models.electrical import ReviewSeverity
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.render.i18n import format_branding_line, t
@@ -119,11 +120,18 @@ def render_eac_submission_pack_html(
     branding_banner = (
         f'<div class="brand-bar">{esc(branding_line)}</div>' if branding_line else ""
     )
+    default_logo_uri = get_logo_svg_data_uri()
+    header_logo_uri = (
+        design.branding.logo_data_uri
+        if (design.branding is not None and design.branding.logo_data_uri)
+        else default_logo_uri
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="{esc(lang.value if lang.value != 'bilingual' else 'en')}">
 <head>
   <meta charset="utf-8" />
+  <link rel="icon" type="image/svg+xml" href="{default_logo_uri}" />
   <title>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</title>
   <style>
     @page {{ size: A4 landscape; margin: 12mm; }}
@@ -141,7 +149,18 @@ def render_eac_submission_pack_html(
       margin-bottom: 12px;
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
+    }}
+    .hdr-brand {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .hdr-logo {{
+      width: 30px;
+      height: 30px;
+      border-radius: 5px;
+      object-fit: contain;
     }}
     h1 {{ font-size: 14pt; color: #1b365d; margin: 0; }}
     h2 {{
@@ -205,7 +224,10 @@ def render_eac_submission_pack_html(
 </head>
 <body>
   <header>
-    <h1>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</h1>
+    <div class="hdr-brand">
+      <img src="{esc(header_logo_uri)}" alt="CyElec Logo" class="hdr-logo" />
+      <h1>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</h1>
+    </div>
     <div>
       <code>cyelec-pipeline v{esc(prov.pipeline_version)}</code> | {esc(prov.timestamp_utc)}
     </div>

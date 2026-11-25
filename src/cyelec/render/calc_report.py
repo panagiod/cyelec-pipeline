@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
+from cyelec.assets import get_logo_svg_data_uri
 from cyelec.models.electrical import ElectricalDesignResult, ReviewSeverity
 from cyelec.render.i18n import format_branding_line, t
 
@@ -458,11 +459,18 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
     )
     earthing_txt = f"{esc(result.earthing_system.value)} (Ze/Ra={result.ze_or_ra_ohm:.2f} Ω)"
     demand_txt = f"{eac.total_diversified_kva:.2f} / {eac.total_connected_kva:.2f} kVA"
+    default_logo_uri = get_logo_svg_data_uri()
+    header_logo_uri = (
+        result.branding.logo_data_uri
+        if (result.branding is not None and result.branding.logo_data_uri)
+        else default_logo_uri
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="{esc(lang.value if lang.value != 'bilingual' else 'en')}">
 <head>
   <meta charset="utf-8" />
+  <link rel="icon" type="image/svg+xml" href="{default_logo_uri}" />
   <title>{esc(t('report_title', lang))} — {esc(result.building.project_name)}</title>
   <style>
     @page {{ size: A4 landscape; margin: 12mm; }}
@@ -480,7 +488,18 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
       margin-bottom: 14px;
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
+    }}
+    .hdr-brand {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .hdr-logo {{
+      width: 30px;
+      height: 30px;
+      border-radius: 5px;
+      object-fit: contain;
     }}
     h1 {{ font-size: 14pt; color: #1b365d; margin: 0; }}
     h2 {{
@@ -550,7 +569,10 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
 </head>
 <body>
   <header>
-    <h1>{esc(t('report_title', lang))} — {esc(result.building.project_name)}</h1>
+    <div class="hdr-brand">
+      <img src="{esc(header_logo_uri)}" alt="CyElec Logo" class="hdr-logo" />
+      <h1>{esc(t('report_title', lang))} — {esc(result.building.project_name)}</h1>
+    </div>
     <div>
       <code>cyelec-pipeline v{esc(prov.pipeline_version)}</code> | {esc(prov.timestamp_utc)}
     </div>

@@ -1,5 +1,7 @@
 # cyelec-pipeline
 
+![CyElec — BS 7671 • IEC 60364 • Cyprus EAC Electrical Pipeline](src/cyelec/assets/og_thumbnail.jpg)
+
 Deterministic-first, zero-commercial-CAD-license Python 3.12 electrical engineering pipeline & EU **Multi-Tenant B2B SaaS** platform targeting **BS 7671**, **IEC 60364**, and **Electricity Authority of Cyprus (EAC)** plan-approval deliverables.
 
 ## Architecture Principles

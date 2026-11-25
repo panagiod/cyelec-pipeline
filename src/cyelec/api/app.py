@@ -433,8 +433,51 @@ def create_app(
         return response
 
     @api.get("/", response_class=HTMLResponse)
-    def workbench_ui() -> HTMLResponse:
-        return HTMLResponse(content=render_etek_workbench_html())
+    def workbench_ui(request: Request) -> HTMLResponse:
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "")).strip()
+        base_url = f"{proto}://{host}" if host else ""
+        return HTMLResponse(content=render_etek_workbench_html(base_url=base_url))
+
+    @api.get("/favicon.ico", include_in_schema=False)
+    def favicon_ico() -> Response:
+        from cyelec.assets import get_asset_bytes, get_asset_media_type
+
+        return Response(
+            content=get_asset_bytes("favicon.ico"),
+            media_type=get_asset_media_type("favicon.ico"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @api.get("/favicon.svg", include_in_schema=False)
+    def favicon_svg() -> Response:
+        from cyelec.assets import get_asset_bytes, get_asset_media_type
+
+        return Response(
+            content=get_asset_bytes("cyelec_logo.svg"),
+            media_type=get_asset_media_type("cyelec_logo.svg"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @api.get("/logo.png", include_in_schema=False)
+    def brand_logo_png() -> Response:
+        from cyelec.assets import get_asset_bytes, get_asset_media_type
+
+        return Response(
+            content=get_asset_bytes("cyelec_logo.png"),
+            media_type=get_asset_media_type("cyelec_logo.png"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @api.get("/og-thumbnail.jpg", include_in_schema=False)
+    def og_thumbnail_jpg() -> Response:
+        from cyelec.assets import get_asset_bytes, get_asset_media_type
+
+        return Response(
+            content=get_asset_bytes("og_thumbnail.jpg"),
+            media_type=get_asset_media_type("og_thumbnail.jpg"),
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
