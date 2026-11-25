@@ -17,12 +17,12 @@ from cyelec.models.electrical import (
 from cyelec.standards_loader import StandardsBundle, SupplyTier
 
 
-def _select_supply_tier(tiers: list[SupplyTier], demand_a: float) -> SupplyTier:
+def _select_supply_tier(tiers: list[SupplyTier], demand_a: float) -> tuple[SupplyTier, bool]:
     ordered = sorted(tiers, key=lambda t: t.amps)
     for tier in ordered:
         if float(tier.amps) >= demand_a - 1e-9:
-            return tier
-    return ordered[-1]
+            return tier, False
+    return ordered[-1], True
 
 
 def evaluate_eac_compliance(
@@ -83,10 +83,14 @@ def evaluate_eac_compliance(
                 (total_diversified_kva * 1000.0)
                 / (math.sqrt(3.0) * eac_rules.system_nominal.ul_v)
             )
-        selected_tier = _select_supply_tier(eac_rules.supply_tiers.three_phase, max_phase_demand_a)
+        selected_tier, exceeded_max_tier = _select_supply_tier(
+            eac_rules.supply_tiers.three_phase, max_phase_demand_a
+        )
     else:
         max_phase_demand_a = sum(c.spec.design_current_ib_a for c in circuits)
-        selected_tier = _select_supply_tier(eac_rules.supply_tiers.single_phase, max_phase_demand_a)
+        selected_tier, exceeded_max_tier = _select_supply_tier(
+            eac_rules.supply_tiers.single_phase, max_phase_demand_a
+        )
 
     ct_metering_required = max_phase_demand_a > supply_rules.ct_metering_threshold_a_per_phase
     substation_warning = total_diversified_kva >= supply_rules.substation_warning_kva
@@ -106,6 +110,20 @@ def evaluate_eac_compliance(
             requires_etek_signoff=False,
         )
     ]
+
+    if exceeded_max_tier:
+        flags.append(
+            ReviewFlag(
+                code="EAC_EXCEEDS_MAX_LV_TIER",
+                severity=ReviewSeverity.BLOCKER,
+                category="eac",
+                regulation_ref="EAC Standard LV Supply Tiers",
+                message=(
+                    f"Peak phase demand {max_phase_demand_a:.1f} A exceeds largest tabulated "
+                    f"EAC LV tier ({selected_tier.label}); dedicated MV supply design required."
+                ),
+            )
+        )
 
     if pv_kva > supply_rules.pv_three_phase_threshold_kva:
         flags.append(

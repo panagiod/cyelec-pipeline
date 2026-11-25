@@ -69,6 +69,7 @@ def run_phase1_pipeline(
     standards_dir: Path | None = None,
     routed_lengths_m: dict[str, float] | None = None,
     extra_flags: list[ReviewFlag] | None = None,
+    precomputed_specs: list[CircuitSpec] | None = None,
 ) -> ElectricalDesignResult:
     """Execute stateless Phase 1 pipeline: grouping, MILP balancing, BS 7671 & EAC checks."""
     standards = load_standards(standards_dir)
@@ -101,8 +102,12 @@ def run_phase1_pipeline(
         else building
     )
 
-    # 1. Deterministic circuit grouping (injecting true NetworkX routed lengths when provided)
-    raw_specs = generate_circuits(effective_building, standards, overrides=overrides)
+    # 1. Deterministic circuit grouping (reusing Phase 2 specs when precomputed)
+    raw_specs = (
+        precomputed_specs
+        if precomputed_specs is not None
+        else generate_circuits(effective_building, standards, overrides=overrides)
+    )
     if routed_lengths_m:
         raw_specs = [
             spec.model_copy(update={"length_m": routed_lengths_m[spec.circuit_id]})
@@ -260,7 +265,7 @@ def run_phase2_pipeline(
     placed_devices, placement_flags = place_electrical_devices(building, wet_zones, standards)
     spatial_flags.extend(placement_flags)
 
-    # 4. Generate circuit list and route every circuit on NetworkX conduit graph
+    # 4. Generate circuit list once and route every circuit on NetworkX conduit graph
     specs = generate_circuits(building, standards, overrides=overrides)
     bound_devices, routed_circuits, routing_flags = route_circuits(
         building, specs, placed_devices
@@ -268,23 +273,25 @@ def run_phase2_pipeline(
     spatial_flags.extend(routing_flags)
 
     routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
-    total_conduit_m = round(sum(rc.total_routed_length_m for rc in routed_circuits), 2)
 
-    spatial = SpatialLayoutResult(
-        wet_zones=wet_zones,
-        devices=bound_devices,
-        routed_circuits=routed_circuits,
-        total_conduit_m=total_conduit_m,
-        flags=spatial_flags,
-    )
-
-    # 5. Feed true NetworkX routed lengths and spatial review flags into Phase 1 solvers
+    # 5. Feed true NetworkX routed lengths and precomputed specs into Phase 1 solvers
     design = run_phase1_pipeline(
         building,
         overrides=overrides,
         standards_dir=standards_dir,
         routed_lengths_m=routed_lengths_m,
         extra_flags=spatial_flags,
+        precomputed_specs=specs,
+    )
+
+    # Keep spatial total conduit length synced with final effective circuit lengths
+    total_conduit_m = round(sum(c.spec.length_m for c in design.circuits), 2)
+    spatial = SpatialLayoutResult(
+        wet_zones=wet_zones,
+        devices=bound_devices,
+        routed_circuits=routed_circuits,
+        total_conduit_m=total_conduit_m,
+        flags=spatial_flags,
     )
 
     return Phase2DesignResult(design=design, spatial=spatial)

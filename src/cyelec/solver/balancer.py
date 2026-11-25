@@ -147,6 +147,7 @@ def balance_three_phase_loads(
         integrality=integrality,
         bounds=bounds,
         constraints=constraints,
+        options={"time_limit": 10.0},
     )
 
     if not res.success or res.x is None:

@@ -10,7 +10,9 @@ source_reference: "BS 7671:2018+A2:2022 Appendix 4 (Tables 4D1A, 4D1B, 4D2A, 4D2
 constants:
   reference_ambient_c: 30
   temp_resistance_multiplier_70c: 1.20
+  temp_resistance_multiplier_90c: 1.28
   adiabatic_k_pvc_copper: 115.0
+  adiabatic_k_xlpe_copper: 143.0
   ring_final_min_iz_a: 20.0
   ring_final_min_cable_mm2: 2.5
 

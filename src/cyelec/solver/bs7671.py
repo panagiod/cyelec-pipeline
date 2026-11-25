@@ -8,6 +8,7 @@ from typing import Literal
 
 from cyelec.models.electrical import (
     BreakerCurve,
+    CircuitCategory,
     CircuitOverride,
     CircuitSpec,
     CircuitTopology,
@@ -91,7 +92,12 @@ def _evaluate_cable(
     vd_pct = (vd_v / spec.nominal_voltage_v) * 100.0
     vd_pass = vd_pct <= spec.vd_limit_pct + 1e-9
 
-    temp_mult = cables_std.constants.temp_resistance_multiplier_70c
+    is_xlpe = spec.insulation_type == "xlpe_90c"
+    temp_mult = (
+        cables_std.constants.temp_resistance_multiplier_90c
+        if is_xlpe
+        else cables_std.constants.temp_resistance_multiplier_70c
+    )
     r1_mohm_m = entry.r20_mohm_per_m
     r2_mohm_m = cables_std.get_r20_mohm_per_m(cpc_mm2)
     r1_plus_r2_ohm = ((r1_mohm_m + r2_mohm_m) * effective_length_m / 1000.0) * temp_mult
@@ -109,7 +115,11 @@ def _evaluate_cable(
     else:
         earth_fault_pass = zs_ohm <= zs_max_ohm + 1e-9
 
-    k_val = cables_std.constants.adiabatic_k_pvc_copper
+    k_val = (
+        cables_std.constants.adiabatic_k_xlpe_copper
+        if is_xlpe
+        else cables_std.constants.adiabatic_k_pvc_copper
+    )
     cpc_min_mm2 = math.sqrt(i2t_a2s) / k_val
     cpc_adiabatic_pass = cpc_mm2 >= cpc_min_mm2 - 1e-9
 
@@ -232,9 +242,59 @@ def solve_circuit(
     i2t_a2s = device_spec.i2t_a2s
 
     if eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None:
-        device_label = f"{breaker_in_a}A Type {curve.value} RCBO {eff_spec.rcd_idn_ma}mA"
+        if eff_spec.category == CircuitCategory.EV_CHARGER:
+            device_label = (
+                f"{breaker_in_a}A Type {curve.value} RCBO {eff_spec.rcd_idn_ma}mA "
+                "(Type A + 6mA DC)"
+            )
+        else:
+            device_label = f"{breaker_in_a}A Type {curve.value} RCBO {eff_spec.rcd_idn_ma}mA"
     else:
         device_label = f"{breaker_in_a}A Type {curve.value} MCB"
+
+    if eff_spec.insulation_type == "xlpe_90c":
+        flags.append(
+            ReviewFlag(
+                code="XLPE_CONSERVATIVE_70C_BASE_IT",
+                severity=ReviewSeverity.INFO,
+                category="bs7671",
+                circuit_id=eff_spec.circuit_id,
+                regulation_ref="BS 7671 Reg 512.1.5 / Table 4B1",
+                message=(
+                    f"Circuit {eff_spec.circuit_id} uses 90°C XLPE Ca/k factors against "
+                    "conservative 70°C accessory-limited base It ratings."
+                ),
+            )
+        )
+
+    if eff_spec.category == CircuitCategory.EV_CHARGER:
+        flags.append(
+            ReviewFlag(
+                code="EV_RCD_TYPE_A_DC_REQUIRED",
+                severity=ReviewSeverity.INFO,
+                category="bs7671",
+                circuit_id=eff_spec.circuit_id,
+                regulation_ref="BS 7671 Reg 722.531.3.101",
+                message=(
+                    f"EV circuit {eff_spec.circuit_id} requires Type A 30 mA RCD plus "
+                    "6 mA DC RDC-DD (or Type B RCD) dedicated to the charge point."
+                ),
+            )
+        )
+        if earthing_system == EarthingSystem.TN_C_S:
+            flags.append(
+                ReviewFlag(
+                    code="EV_PME_PEN_PROTECTION_REQUIRED",
+                    severity=ReviewSeverity.BLOCKER,
+                    category="bs7671",
+                    circuit_id=eff_spec.circuit_id,
+                    regulation_ref="BS 7671 Reg 722.411.4.1",
+                    message=(
+                        f"EV circuit {eff_spec.circuit_id} on TN-C-S (PME) earthing requires "
+                        "certified open-PEN fault detection or an isolated TT earth electrode."
+                    ),
+                )
+            )
 
     # Required Iz: BS 7671 Reg 433.1.204 (20 A leg rule for 32 A ring final) vs Reg 433.1.1 (In)
     if eff_spec.topology == CircuitTopology.RING_FINAL:

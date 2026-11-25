@@ -1,7 +1,9 @@
-"""Stateless Multi-Tenant EU B2B SaaS FastAPI service with ETEK Review Workbench & observability."""
+"""Stateless Multi-Tenant EU B2B SaaS FastAPI service with ETEK Review Workbench & hardening."""
 
 from __future__ import annotations
 
+import hmac
+import os
 import tempfile
 import time
 import uuid
@@ -9,8 +11,10 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
+import anyio
+from ezdxf.lldxf.const import DXFError
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cyelec import __version__
@@ -26,7 +30,8 @@ from cyelec.render.sld import render_sld_svg
 from cyelec.standards_loader import load_standards
 from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 
-_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB safety cap per DXF/IFC upload
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB hard cap per DXF/IFC upload
+_CHUNK_BYTES = 256 * 1024
 
 
 class HealthResponse(BaseModel):
@@ -80,6 +85,63 @@ def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
         ) from exc
 
 
+async def _read_upload_bounded(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTES) -> bytes:
+    """Stream-read an uploaded file with a hard RAM cap, returning HTTP 413 if exceeded."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload exceeds maximum allowed size ({max_bytes // (1024 * 1024)} MB).",
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    return data
+
+
+def _solve_dxf_bytes_sync(
+    data: bytes,
+    suffix: str,
+    overrides: DesignOverrides | None,
+    building_type: BuildingType | None,
+) -> Phase2DesignResult:
+    with tempfile.TemporaryDirectory(prefix="cyelec_req_") as tmp_dir:
+        in_path = Path(tmp_dir) / f"plan{suffix}"
+        in_path.write_bytes(data)
+        return run_phase2_pipeline(
+            in_path,
+            overrides=overrides,
+            building_type=building_type,
+        )
+
+
+def _solve_dxf_bundle_sync(
+    data: bytes,
+    suffix: str,
+    overrides: DesignOverrides | None,
+    building_type: BuildingType | None,
+) -> tuple[Phase2DesignResult, bytes]:
+    with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
+        tmp = Path(tmp_dir)
+        in_path = tmp / f"plan{suffix}"
+        in_path.write_bytes(data)
+        p2 = run_phase2_pipeline(
+            in_path,
+            overrides=overrides,
+            building_type=building_type,
+        )
+        outputs = export_phase3_deliverables(p2, tmp / "pack")
+        zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+        return p2, zip_path.read_bytes()
+
+
 def create_app() -> FastAPI:
     """Create a strictly stateless Multi-Tenant EU B2B SaaS FastAPI application."""
     api = FastAPI(
@@ -92,12 +154,24 @@ def create_app() -> FastAPI:
     )
 
     @api.middleware("http")
-    async def observability_middleware(
+    async def security_and_observability_middleware(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         t0 = time.perf_counter()
+
+        # Optional API-key enforcement when CYELEC_API_KEY is configured in production
+        expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
+        if expected_key and request.url.path.startswith("/v1/"):
+            supplied = request.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(supplied, expected_key):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing X-API-Key."},
+                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                )
+
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         response.headers["X-Request-ID"] = req_id
@@ -172,9 +246,7 @@ def create_app() -> FastAPI:
             content=zip_bytes,
             media_type="application/zip",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="eac_pack_{template.value}.zip"'
-                ),
+                "Content-Disposition": f'attachment; filename="eac_pack_{template.value}.zip"',
                 "X-Tenant-ID": x_tenant_id,
                 "X-Input-SHA256": p2.design.provenance.input_sha256,
             },
@@ -192,22 +264,14 @@ def create_app() -> FastAPI:
         if suffix not in (".dxf", ".ifc"):
             raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
 
-        data = await file.read()
-        if not data or len(data) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=400, detail="Upload empty or exceeds 25 MB limit.")
-
+        data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
-        with tempfile.TemporaryDirectory(prefix="cyelec_req_") as tmp_dir:
-            in_path = Path(tmp_dir) / f"plan{suffix}"
-            in_path.write_bytes(data)
-            try:
-                p2 = run_phase2_pipeline(
-                    in_path,
-                    overrides=overrides,
-                    building_type=building_type,
-                )
-            except (ValueError, ImportError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            p2 = await anyio.to_thread.run_sync(
+                _solve_dxf_bytes_sync, data, suffix, overrides, building_type
+            )
+        except (ValueError, ImportError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return SolveResponseEnvelope(tenant_id=x_tenant_id, result=p2)
 
@@ -224,11 +288,13 @@ def create_app() -> FastAPI:
             building_type=building_type,
             x_tenant_id=x_tenant_id,
         )
+        fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, envelope.result)
+        sld_svg = await anyio.to_thread.run_sync(render_sld_svg, envelope.result.design)
         return SolvePreviewEnvelope(
             tenant_id=envelope.tenant_id,
             result=envelope.result,
-            floorplan_svg=render_floorplan_svg(envelope.result),
-            sld_svg=render_sld_svg(envelope.result.design),
+            floorplan_svg=fp_svg,
+            sld_svg=sld_svg,
         )
 
     @api.post("/v1/solve/dxf/bundle")
@@ -244,27 +310,14 @@ def create_app() -> FastAPI:
         if suffix not in (".dxf", ".ifc"):
             raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
 
-        data = await file.read()
-        if not data or len(data) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=400, detail="Upload empty or exceeds 25 MB limit.")
-
+        data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
-        with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
-            tmp = Path(tmp_dir)
-            in_path = tmp / f"plan{suffix}"
-            in_path.write_bytes(data)
-            out_dir = tmp / "pack"
-            try:
-                p2 = run_phase2_pipeline(
-                    in_path,
-                    overrides=overrides,
-                    building_type=building_type,
-                )
-                outputs = export_phase3_deliverables(p2, out_dir)
-                zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
-                zip_bytes = zip_path.read_bytes()
-            except (ValueError, ImportError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            p2, zip_bytes = await anyio.to_thread.run_sync(
+                _solve_dxf_bundle_sync, data, suffix, overrides, building_type
+            )
+        except (ValueError, ImportError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         return Response(
             content=zip_bytes,

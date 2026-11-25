@@ -477,16 +477,10 @@ def ingest_dxf(
         if ftype in ("bathtub", "shower_tray") and not room_obj.is_wet_room:
             room_obj.is_wet_room = True
 
-    # Build WallSegments (tag perimeter edges as exterior)
-    union_bounds = Polygon(
-        [
-            (min(p.bounds[0] for p in room_raw_polys), min(p.bounds[1] for p in room_raw_polys)),
-            (max(p.bounds[2] for p in room_raw_polys), min(p.bounds[1] for p in room_raw_polys)),
-            (max(p.bounds[2] for p in room_raw_polys), max(p.bounds[3] for p in room_raw_polys)),
-            (min(p.bounds[0] for p in room_raw_polys), max(p.bounds[3] for p in room_raw_polys)),
-        ]
-    )
-    outer_ring = union_bounds.exterior
+    # Build WallSegments (tag true exterior perimeter edges via exact room-union boundary)
+    from shapely.ops import unary_union
+
+    outer_ring = unary_union(room_raw_polys).boundary
 
     walls: list[WallSegment] = []
     for w_idx, (p0, p1) in enumerate(wall_lines, start=1):

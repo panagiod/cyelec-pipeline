@@ -40,6 +40,22 @@ def _truncate(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else f"{text[: max_len - 1]}…"
 
 
+def _split_sld_label(description: str, max_line: int = 16) -> tuple[str, str]:
+    """Split verbose circuit descriptions into two readable SLD lines preserving room identity."""
+    if " - " in description:
+        left, right = description.split(" - ", 1)
+        if "/" in right:
+            right = right.split("/")[-1].strip()
+        return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
+    if "(" in description and description.endswith(")"):
+        left, right = description.rsplit("(", 1)
+        right = right.rstrip(")")
+        if "/" in right:
+            right = right.split("/")[-1].strip()
+        return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
+    return _truncate(description, max_line), ""
+
+
 def render_sld_svg(result: ElectricalDesignResult) -> str:
     """Render deterministic IEC 60617 / BS 7671 A3-landscape vector SVG Single-Line Diagram."""
     eac = result.eac_compliance
@@ -291,7 +307,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         status_cls = "pass" if circ.overall_pass else "fail"
         status_txt = "PASS" if circ.overall_pass else "FAIL"
         badge_bg = "#d4edda" if circ.overall_pass else "#f8d7da"
-        short_desc = _truncate(s.description, 17)
+        desc_l1, desc_l2 = _split_sld_label(s.description, 17)
 
         parts.extend(
             [
@@ -370,23 +386,27 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 ),
                 # Load terminal block + PASS/FAIL badge
                 (
-                    f'  <rect x="{cx - 48}" y="{load_y - 16}" width="96" height="62" '
+                    f'  <rect x="{cx - 48}" y="{load_y - 16}" width="96" height="72" '
                     'rx="4" fill="#edf2f7" stroke="#4a5568" stroke-width="1.2" />'
                 ),
                 (
-                    f'  <text x="{cx}" y="{load_y}" text-anchor="middle" class="xs">'
-                    f"{_esc(short_desc)}</text>"
+                    f'  <text x="{cx}" y="{load_y - 2}" text-anchor="middle" class="xs">'
+                    f"{_esc(desc_l1)}</text>"
                 ),
                 (
-                    f'  <text x="{cx}" y="{load_y + 15}" text-anchor="middle" class="xs">'
+                    f'  <text x="{cx}" y="{load_y + 10}" text-anchor="middle" class="xs">'
+                    f"{_esc(desc_l2 or f'{s.diversified_load_w / 1000.0:.2f} kW (div)')}</text>"
+                ),
+                (
+                    f'  <text x="{cx}" y="{load_y + 23}" text-anchor="middle" class="xs">'
                     f"{s.diversified_load_w / 1000.0:.2f} kW (div)</text>"
                 ),
                 (
-                    f'  <rect x="{cx - 24}" y="{load_y + 23}" width="48" height="16" '
+                    f'  <rect x="{cx - 24}" y="{load_y + 31}" width="48" height="16" '
                     f'rx="3" fill="{badge_bg}" />'
                 ),
                 (
-                    f'  <text x="{cx}" y="{load_y + 34}" text-anchor="middle" '
+                    f'  <text x="{cx}" y="{load_y + 42}" text-anchor="middle" '
                     f'class="{status_cls}">{status_txt}</text>'
                 ),
             ]

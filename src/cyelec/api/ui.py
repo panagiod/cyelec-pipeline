@@ -300,6 +300,15 @@ def render_etek_workbench_html() -> str:
   <script>
     const circuitOverrides = {{}};
 
+    function escapeHtml(value) {{
+      return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }}
+
     function openTab(id, btn) {{
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
@@ -369,28 +378,30 @@ def render_etek_workbench_html() -> str:
 
       document.getElementById('circuitsBody').innerHTML = d.circuits.map(c => {{
         const s = c.spec;
+        const cid = escapeHtml(s.circuit_id);
+        const desc = escapeHtml(s.description);
+        const devLbl = escapeHtml(c.device_label);
+        const phVal = escapeHtml(c.phase);
         const ov = circuitOverrides[s.circuit_id] || {{}};
         const curPhase = ov.phase || 'AUTO';
-        const curCg = ov.grouping_count || s.grouping_count;
-        const onPh = `setCircuitOverride('${{s.circuit_id}}','phase',this.value)`;
+        const curCg = Number(ov.grouping_count || s.grouping_count);
         const phSelect = s.is_three_phase ? '3P' : `
-          <select class="mini-input" onchange="${{onPh}}">
-            <option value="AUTO" ${{curPhase==='AUTO'?'selected':''}}>Auto (${{c.phase}})</option>
+          <select class="mini-input" data-cid="${{cid}}" data-field="phase">
+            <option value="AUTO" ${{curPhase==='AUTO'?'selected':''}}>Auto (${{phVal}})</option>
             <option value="L1" ${{curPhase==='L1'?'selected':''}}>L1</option>
             <option value="L2" ${{curPhase==='L2'?'selected':''}}>L2</option>
             <option value="L3" ${{curPhase==='L3'?'selected':''}}>L3</option>
           </select>`;
-        const onCg = `setCircuitOverride('${{s.circuit_id}}','grouping_count',this.value)`;
         const cgInput = `<input class="mini-input" type="number" min="1" max="20"
-          value="${{curCg}}" onchange="${{onCg}}" />`;
+          data-cid="${{cid}}" data-field="grouping_count" value="${{curCg}}" />`;
         const bCls = c.overall_pass ? 'b-pass' : 'b-fail';
         return `<tr>
-          <td><strong>${{s.circuit_id}}</strong></td>
-          <td>${{s.description}}</td>
+          <td><strong>${{cid}}</strong></td>
+          <td>${{desc}}</td>
           <td>${{phSelect}}</td>
           <td>${{cgInput}}</td>
           <td class="r">${{s.design_current_ib_a.toFixed(2)}}</td>
-          <td>${{c.device_label}}</td>
+          <td>${{devLbl}}</td>
           <td class="c">${{c.cable_mm2}}/${{c.cpc_mm2}}</td>
           <td class="r">${{s.length_m.toFixed(1)}}</td>
           <td class="r">${{c.iz_derated_a.toFixed(1)}}/${{c.required_iz_a.toFixed(1)}}</td>
@@ -408,16 +419,24 @@ def render_etek_workbench_html() -> str:
         const cls = f.severity === 'blocker'
           ? 'b-fail'
           : (f.severity === 'warning' ? 'b-warn' : 'b-info');
+        const sev = escapeHtml(f.severity).toUpperCase();
         return `<tr>
-          <td class="c"><span class="badge ${{cls}}">${{f.severity.toUpperCase()}}</span></td>
-          <td><code>${{f.code}}</code></td>
-          <td>${{f.category}}</td>
-          <td class="c">${{f.circuit_id || '-'}}</td>
-          <td>${{f.regulation_ref || '-'}}</td>
-          <td>${{f.message}}</td>
+          <td class="c"><span class="badge ${{cls}}">${{sev}}</span></td>
+          <td><code>${{escapeHtml(f.code)}}</code></td>
+          <td>${{escapeHtml(f.category)}}</td>
+          <td class="c">${{escapeHtml(f.circuit_id || '-')}}</td>
+          <td>${{escapeHtml(f.regulation_ref || '-')}}</td>
+          <td>${{escapeHtml(f.message)}}</td>
         </tr>`;
       }}).join('');
     }}
+
+    document.getElementById('circuitsBody').addEventListener('change', (ev) => {{
+      const el = ev.target;
+      if (el && el.dataset && el.dataset.cid && el.dataset.field) {{
+        setCircuitOverride(el.dataset.cid, el.dataset.field, el.value);
+      }}
+    }});
 
     async function runSolve() {{
       const status = document.getElementById('statusLine');

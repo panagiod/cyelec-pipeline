@@ -173,7 +173,7 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
             circ.zs_max_ohm,
             (
                 f'=IF($B$4="TT",'
-                f'IF(AND(ISNUMBER(N{r}),N{r}>0,($B$5*N{r}/1000)<=50),"PASS","FAIL"),'
+                f'IF(AND(ISNUMBER(N{r}),N{r}>0,(AE{r}*N{r}/1000)<=50),"PASS","FAIL"),'
                 f'IF(AE{r}<=AF{r},"PASS","FAIL"))'
             ),
             circ.cpc_min_mm2,
@@ -220,10 +220,14 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
         _BOLD_FONT
     )
     ws.cell(row=totals_row, column=8).number_format = "#,##0.0"
-    ws.cell(row=totals_row, column=10, value=f"=SUM(J{first_data_row}:J{last_data_row})").font = (
-        _BOLD_FONT
-    )
-    ws.cell(row=totals_row, column=10).number_format = "0.00"
+    if result.eac_compliance.supply_phases == 1:
+        ws.cell(
+            row=totals_row, column=10, value=f"=SUM(J{first_data_row}:J{last_data_row})"
+        ).font = _BOLD_FONT
+        ws.cell(row=totals_row, column=10).number_format = "0.00"
+    else:
+        ws.cell(row=totals_row, column=10, value="See 3P Balance").font = _BOLD_FONT
+        ws.cell(row=totals_row, column=10).alignment = Alignment(horizontal="center")
     for col_idx in range(1, len(SCHEDULE_HEADERS) + 1):
         ws.cell(row=totals_row, column=col_idx).fill = _SUBHEADER_FILL
         ws.cell(row=totals_row, column=col_idx).border = _CELL_BORDER

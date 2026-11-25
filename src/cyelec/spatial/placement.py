@@ -77,7 +77,7 @@ def compute_valid_wall_segments(
     doors: list[DoorOpening],
     windows: list[WindowOpening],
     wet_zone: RoomWetZones | None,
-    building_outer_ring: LineString,
+    building_outer_ring: BaseGeometry,
     exclude_wet_zones: bool = True,
 ) -> list[_WallSegmentCandidate]:
     """Compute valid interior wall segments for placing wall-mounted accessories in a room."""
@@ -202,6 +202,9 @@ def _place_room_switch(
     wet_zone: RoomWetZones | None,
 ) -> tuple[Point2D, float]:
     """Place light switch on latch side of entry door (outside wet rooms per Section 701)."""
+    poly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
+    boundary = poly.exterior
+
     if room_doors:
         door = room_doors[0]
         hx, hy = door.hinge.x_mm, door.hinge.y_mm
@@ -213,7 +216,6 @@ def _place_room_switch(
 
         # For wet rooms, offset 120 mm outward across the door wall (corridor side)
         if room.is_wet_room:
-            poly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
             nx, ny = -math.sin(rad), math.cos(rad)
             cand_a = Point(sx + 120.0 * nx, sy + 120.0 * ny)
             cand_b = Point(sx - 120.0 * nx, sy - 120.0 * ny)
@@ -223,8 +225,13 @@ def _place_room_switch(
                 round(door.angle_deg % 360.0, 1),
             )
 
+        # Guard against corner overshoot: latch-side switch must remain on the room boundary
+        cand_shapely = Point(sx, sy)
         cand_pt = Point2D(x_mm=round(sx, 1), y_mm=round(sy, 1))
-        if classify_point_wet_zone(cand_pt, wet_zone) == "outside":
+        if (
+            float(boundary.distance(cand_shapely)) <= 120.0
+            and classify_point_wet_zone(cand_pt, wet_zone) == "outside"
+        ):
             return cand_pt, round(door.angle_deg % 360.0, 1)
 
     if valid_walls:
@@ -247,13 +254,9 @@ def place_electrical_devices(
     tmpl_std = standards.room_templates
     wz_by_room = {w.room_id: w for w in wet_zones}
 
-    # Building outer boundary for exterior-wall detection (used for A/C wall preference)
+    # Exact building outer boundary via unary_union (accurate on L- and U-shaped floorplans)
     all_room_polys = [Polygon([(p.x_mm, p.y_mm) for p in r.polygon_mm]) for r in building.rooms]
-    minx = min(p.bounds[0] for p in all_room_polys)
-    miny = min(p.bounds[1] for p in all_room_polys)
-    maxx = max(p.bounds[2] for p in all_room_polys)
-    maxy = max(p.bounds[3] for p in all_room_polys)
-    outer_ring = LineString([(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)])
+    outer_ring: BaseGeometry = unary_union(all_room_polys).boundary
 
     devices: list[PlacedDevice] = []
     flags: list[ReviewFlag] = []
@@ -274,7 +277,14 @@ def place_electrical_devices(
     for room in building.rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         room_wz = wz_by_room.get(room.id)
-        room_doors = [d for d in building.doors if d.room_id == room.id]
+        rpoly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
+        # Match both doors owned by this room AND outward-swinging doors touching its perimeter
+        room_doors = [
+            d
+            for d in building.doors
+            if d.room_id == room.id
+            or float(rpoly.exterior.distance(Point(d.hinge.x_mm, d.hinge.y_mm))) <= 120.0
+        ]
         room_windows = [w for w in building.windows if w.room_id == room.id]
 
         # Valid walls strictly excluding doors, swings, windows, and Section 701 exclusion zones

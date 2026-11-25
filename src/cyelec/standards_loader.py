@@ -21,7 +21,9 @@ class CableConstants(BaseModel):
 
     reference_ambient_c: int
     temp_resistance_multiplier_70c: float
+    temp_resistance_multiplier_90c: float = 1.28
     adiabatic_k_pvc_copper: float
+    adiabatic_k_xlpe_copper: float = 143.0
     ring_final_min_iz_a: float
     ring_final_min_cable_mm2: float
 
