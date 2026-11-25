@@ -20,6 +20,7 @@ services:
     cap_drop:
       - ALL
     environment:
+      PORT: "8000"
       QT_QPA_PLATFORM: offscreen
       CYELEC_STANDARDS_DIR: /app/standards
       CYELEC_DB_PATH: /var/lib/cyelec/workspace.db

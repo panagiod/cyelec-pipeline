@@ -598,9 +598,14 @@ def export_sld(
 @app.command("serve")
 def serve(
     host: Annotated[str, typer.Option("--host", help="Bind host address.")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", help="Bind port.")] = 8000,
+    port: Annotated[
+        int | None,
+        typer.Option("--port", help="Bind port (defaults to $PORT env var or 8000)."),
+    ] = None,
 ) -> None:
     """Start the stateless Multi-Tenant EU B2B SaaS FastAPI service."""
+    import os
+
     try:
         import uvicorn
     except ImportError as exc:
@@ -608,7 +613,8 @@ def serve(
             "API server requires optional 'api' extra: pip install 'cyelec-pipeline[api]'"
         ) from exc
 
-    uvicorn.run("cyelec.api.app:app", host=host, port=port)
+    resolved_port = port if port is not None else int(os.environ.get("PORT", "8000"))
+    uvicorn.run("cyelec.api.app:app", host=host, port=resolved_port)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,10 @@ from cyelec.render.eac_pack import build_submission_zip
 from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.qet_bridge import is_qelectrotech_available
 from cyelec.render.sld import render_sld_svg
+from cyelec.saas.firestore_store import (
+    FirestoreWorkspaceStore,
+    build_workspace_store_from_env,
+)
 from cyelec.saas.revisions import RevisionDiff, carry_forward_overrides, compute_revision_diff
 from cyelec.saas.store import (
     ProjectSummary,
@@ -61,6 +65,7 @@ class HealthResponse(BaseModel):
     pipeline_version: str
     standards_versions: dict[str, str]
     qelectrotech_available: bool
+    store_backend: str = "sqlite"
 
 
 class SolveBuildingRequest(BaseModel):
@@ -285,9 +290,19 @@ def create_app(
     store: WorkspaceStoreProtocol | None = None,
 ) -> FastAPI:
     """Create the Multi-Tenant EU B2B SaaS FastAPI application with strict tenant isolation."""
-    active_store: WorkspaceStoreProtocol = (
-        store if store is not None else WorkspaceStore(db_path=db_path)
-    )
+    active_store: WorkspaceStoreProtocol
+    if store is not None:
+        active_store = store
+        store_backend = (
+            "firestore"
+            if isinstance(store, FirestoreWorkspaceStore)
+            else ("sqlite" if isinstance(store, WorkspaceStore) else type(store).__name__)
+        )
+    elif db_path is not None:
+        active_store = WorkspaceStore(db_path=db_path)
+        store_backend = "sqlite"
+    else:
+        active_store, store_backend = build_workspace_store_from_env()
     store = active_store
     api = FastAPI(
         title="cyelec-pipeline SaaS API",
@@ -299,6 +314,7 @@ def create_app(
         ),
     )
     api.state.store = store
+    api.state.store_backend = store_backend
 
     def _effective_tenant(request: Request, header_tenant: str) -> str:
         auth_tid = getattr(request.state, "auth_tenant_id", None)
@@ -397,6 +413,7 @@ def create_app(
             pipeline_version=__version__,
             standards_versions=std.versions_map(),
             qelectrotech_available=is_qelectrotech_available(),
+            store_backend=store_backend,
         )
 
     @api.get("/v1/standards")

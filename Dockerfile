@@ -3,7 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     QT_QPA_PLATFORM=offscreen \
-    CYELEC_STANDARDS_DIR=/app/standards
+    CYELEC_STANDARDS_DIR=/app/standards \
+    PORT=8080
 
 # Install Latin + Greek TTF fonts for deterministic CAD/SVG/report rendering
 RUN apt-get update \
@@ -22,16 +23,17 @@ COPY pyproject.toml README.md ./
 COPY standards ./standards
 COPY src ./src
 
+# Install FastAPI server + Apache-2.0 GCP Firestore/GCS adapters (zero AGPLv3)
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir ".[api]" \
+    && pip install --no-cache-dir ".[api,gcp]" \
     && chown -R cyelec:cyelec /app
 
 USER cyelec
 
-EXPOSE 8000
+EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" || exit 1
+    CMD python3 -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", \"8080\")}/health', timeout=3)" || exit 1
 
 ENTRYPOINT ["cyelec"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["serve", "--host", "0.0.0.0"]

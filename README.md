@@ -50,8 +50,15 @@ cyelec benchmark-suite --out-dir out/benchmarks
 # Launch Multi-Tenant EU B2B SaaS API & Interactive ETEK Review Workbench (http://127.0.0.1:8000/)
 cyelec serve --host 0.0.0.0 --port 8000
 
-# Hardened EU SaaS deployment (read-only rootfs, ephemeral tmpfs, persistent tenant DB volume, Caddy TLS)
+# Hardened local EU Docker deployment (read-only rootfs, persistent SQLite volume, Caddy TLS)
 docker compose -f deploy/docker-compose.yml up --build
+
+# 100% Google Cloud €0-idle deployment (Cloud Run + Firestore Native + GCS in europe-west1)
+# 1) Run once in Google Cloud Shell to configure Artifact Registry, Secret Manager & keyless WIF:
+bash deploy/gcp/bootstrap_wif.sh <GCP_PROJECT_ID> panagiod/cyelec-pipeline
+# 2) Trigger staging or prod deploy via GitHub Actions (zero JSON keys):
+gh workflow run deploy-gcp.yml -f environment=staging
+gh workflow run deploy-gcp.yml -f environment=prod
 ```
 
 ## Development Checks

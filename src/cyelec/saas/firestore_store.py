@@ -1,0 +1,584 @@
+"""Google Cloud Firestore Native + GCS gzipped-blob WorkspaceStoreProtocol implementation.
+
+Designed for 100% GCP EU (europe-west1) scale-to-zero Cloud Run deployments:
+- €0.00/month idle cost (no always-on Cloud SQL or VPC Serverless Connector)
+- Native GCP IAM / Workload Identity authentication (zero DB passwords)
+- Strict hierarchical tenant isolation:
+    tenants/{tenant_id}
+    tenants/{tenant_id}/projects/{project_id}
+    tenants/{tenant_id}/projects/{project_id}/revisions/{revision_number:06d}
+    tenants/{tenant_id}/usage_events/{event_id}
+- Large Phase2DesignResult payloads gzipped in EU Google Cloud Storage (avoids Firestore's
+  1 MiB document size cap) and cascade-deleted on project delete & GDPR Art. 17 erasure.
+"""
+
+from __future__ import annotations
+
+import gzip
+import os
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+from cyelec.models.electrical import (
+    BoqRateOverrides,
+    DesignOverrides,
+    ReportLanguage,
+    TenantBranding,
+)
+from cyelec.models.spatial import Phase2DesignResult
+from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
+from cyelec.saas.store import (
+    ProjectSummary,
+    RevisionRecord,
+    RevisionSummary,
+    TenantExportBundle,
+    TenantProfile,
+    UsageSummary,
+    WorkspaceStore,
+    WorkspaceStoreProtocol,
+)
+
+
+def _utc_now() -> str:
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@runtime_checkable
+class BlobStoreProtocol(Protocol):
+    """Minimal object storage contract for gzipped revision JSON snapshots."""
+
+    def put_gzip_json(self, path: str, json_text: str) -> None: ...
+    def get_gzip_json(self, path: str) -> str | None: ...
+    def delete_blob(self, path: str) -> None: ...
+    def delete_prefix(self, prefix: str) -> int: ...
+
+
+class GcsBlobStore:
+    """Google Cloud Storage implementation of BlobStoreProtocol (Apache-2.0 SDK)."""
+
+    def __init__(self, bucket_name: str, *, project_id: str | None = None) -> None:
+        try:
+            from google.cloud import storage
+        except ImportError as exc:
+            raise ImportError(
+                "GCS blob store requires optional 'gcp' extra: pip install 'cyelec-pipeline[gcp]'"
+            ) from exc
+        self._client = storage.Client(project=project_id) if project_id else storage.Client()
+        self._bucket = self._client.bucket(bucket_name)
+
+    def put_gzip_json(self, path: str, json_text: str) -> None:
+        blob = self._bucket.blob(path)
+        payload = gzip.compress(json_text.encode("utf-8"), compresslevel=6)
+        blob.content_encoding = "gzip"
+        blob.upload_from_string(payload, content_type="application/json")
+
+    def get_gzip_json(self, path: str) -> str | None:
+        blob = self._bucket.blob(path)
+        if not blob.exists():
+            return None
+        raw: bytes = blob.download_as_bytes()
+        # GCS may transparently decompress gzip if content_encoding=gzip; handle both safely
+        if raw[:2] == b"\x1f\x8b":
+            return gzip.decompress(raw).decode("utf-8")
+        return raw.decode("utf-8")
+
+    def delete_blob(self, path: str) -> None:
+        blob = self._bucket.blob(path)
+        if blob.exists():
+            blob.delete()
+
+    def delete_prefix(self, prefix: str) -> int:
+        deleted = 0
+        for blob in self._client.list_blobs(self._bucket, prefix=prefix):
+            blob.delete()
+            deleted += 1
+        return deleted
+
+
+class FirestoreWorkspaceStore:
+    """Strictly tenant-isolated GCP Firestore Native + GCS implementation of WorkspaceStoreProtocol.
+
+    Supports both live GCP ADC credentials and dependency-injected clients for deterministic
+    offline testing without live GCP credentials.
+    """
+
+    def __init__(
+        self,
+        *,
+        gcs_bucket: str | None = None,
+        project_id: str | None = None,
+        database: str = "(default)",
+        firestore_client: Any | None = None,
+        blob_store: BlobStoreProtocol | None = None,
+    ) -> None:
+        if firestore_client is not None:
+            self._db: Any = firestore_client
+        else:
+            try:
+                from google.cloud import firestore
+            except ImportError as exc:
+                raise ImportError(
+                    "FirestoreWorkspaceStore requires optional 'gcp' extra: "
+                    "pip install 'cyelec-pipeline[gcp]'"
+                ) from exc
+            kwargs: dict[str, Any] = {"database": database}
+            if project_id:
+                kwargs["project"] = project_id
+            self._db = firestore.Client(**kwargs)
+
+        if blob_store is not None:
+            self._blobs: BlobStoreProtocol = blob_store
+        else:
+            if not gcs_bucket:
+                raise ValueError(
+                    "CYELEC_GCS_BUCKET (gcs_bucket) is required when using FirestoreWorkspaceStore."
+                )
+            self._blobs = GcsBlobStore(gcs_bucket, project_id=project_id)
+
+        self.database = database
+
+    def close(self) -> None:
+        close_fn = getattr(self._db, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+    # ------------------------------------------------------------------
+    # Internal Document Reference Helpers
+    # ------------------------------------------------------------------
+    def _tenant_ref(self, tenant_id: str) -> Any:
+        return self._db.collection("tenants").document(tenant_id)
+
+    def _projects_col(self, tenant_id: str) -> Any:
+        return self._tenant_ref(tenant_id).collection("projects")
+
+    def _project_ref(self, tenant_id: str, project_id: str) -> Any:
+        return self._projects_col(tenant_id).document(project_id)
+
+    def _revisions_col(self, tenant_id: str, project_id: str) -> Any:
+        return self._project_ref(tenant_id, project_id).collection("revisions")
+
+    def _usage_col(self, tenant_id: str) -> Any:
+        return self._tenant_ref(tenant_id).collection("usage_events")
+
+    def _doc_to_tenant(self, data: dict[str, Any]) -> TenantProfile:
+        branding = (
+            TenantBranding.model_validate_json(str(data["branding_json"]))
+            if data.get("branding_json")
+            else None
+        )
+        boq_rates = (
+            BoqRateOverrides.model_validate_json(str(data["boq_rate_overrides_json"]))
+            if data.get("boq_rate_overrides_json")
+            else None
+        )
+        return TenantProfile(
+            tenant_id=str(data["tenant_id"]),
+            display_name=str(data["display_name"]),
+            plan=str(data.get("plan", "pro_cyprus")),
+            report_language=ReportLanguage(str(data.get("report_language", "en"))),
+            branding=branding,
+            boq_rate_overrides=boq_rates,
+            has_api_key=bool(data.get("api_key_hash")),
+            created_at=str(data["created_at"]),
+            updated_at=str(data["updated_at"]),
+        )
+
+    def _doc_to_project(self, data: dict[str, Any]) -> ProjectSummary:
+        return ProjectSummary(
+            project_id=str(data["project_id"]),
+            tenant_id=str(data["tenant_id"]),
+            name=str(data["name"]),
+            description=str(data.get("description", "")),
+            revision_count=int(data.get("revision_count", 0)),
+            latest_supply_tier=(
+                str(data["latest_supply_tier"])
+                if data.get("latest_supply_tier") is not None
+                else None
+            ),
+            latest_boq_eur=(
+                float(data["latest_boq_eur"])
+                if data.get("latest_boq_eur") is not None
+                else None
+            ),
+            created_at=str(data["created_at"]),
+            updated_at=str(data["updated_at"]),
+        )
+
+    def _doc_to_rev_summary(self, data: dict[str, Any]) -> RevisionSummary:
+        return RevisionSummary(
+            revision_id=str(data["revision_id"]),
+            project_id=str(data["project_id"]),
+            tenant_id=str(data["tenant_id"]),
+            revision_number=int(data["revision_number"]),
+            notes=str(data.get("notes", "")),
+            input_sha256=str(data["input_sha256"]),
+            supply_tier=str(data["supply_tier"]),
+            diversified_kva=float(data["diversified_kva"]),
+            boq_grand_total_eur=float(data["boq_grand_total_eur"]),
+            has_blockers=bool(data.get("has_blockers", False)),
+            created_at=str(data["created_at"]),
+        )
+
+    # ------------------------------------------------------------------
+    # Tenant Profile, Branding, Custom BOQ Rates & O(1) Prefix API Keys
+    # ------------------------------------------------------------------
+    def get_or_create_tenant(self, tenant_id: str) -> TenantProfile:
+        ref = self._tenant_ref(tenant_id)
+        snap = ref.get()
+        if snap.exists:
+            return self._doc_to_tenant(snap.to_dict() or {})
+        now = _utc_now()
+        doc: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "display_name": tenant_id,
+            "plan": "pro_cyprus",
+            "report_language": ReportLanguage.EN.value,
+            "branding_json": None,
+            "boq_rate_overrides_json": None,
+            "api_key_prefix": None,
+            "api_key_hash": None,
+            "api_key_salt": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        ref.set(doc)
+        return self._doc_to_tenant(doc)
+
+    def update_tenant_profile(
+        self,
+        tenant_id: str,
+        *,
+        display_name: str | None = None,
+        report_language: ReportLanguage | None = None,
+        branding: TenantBranding | None = None,
+        boq_rate_overrides: BoqRateOverrides | None = None,
+    ) -> TenantProfile:
+        current = self.get_or_create_tenant(tenant_id)
+        new_name = display_name if display_name is not None else current.display_name
+        new_lang = report_language if report_language is not None else current.report_language
+        new_branding = branding if branding is not None else current.branding
+        new_boq = (
+            boq_rate_overrides if boq_rate_overrides is not None else current.boq_rate_overrides
+        )
+        now = _utc_now()
+        self._tenant_ref(tenant_id).set(
+            {
+                "display_name": new_name,
+                "report_language": new_lang.value,
+                "branding_json": new_branding.model_dump_json() if new_branding else None,
+                "boq_rate_overrides_json": new_boq.model_dump_json() if new_boq else None,
+                "updated_at": now,
+            },
+            merge=True,
+        )
+        return self.get_or_create_tenant(tenant_id)
+
+    def issue_tenant_api_key(self, tenant_id: str) -> str:
+        """Issue or rotate a prefix-indexed per-tenant API key (salted PBKDF2 stored)."""
+        self.get_or_create_tenant(tenant_id)
+        raw_key = generate_api_key()
+        prefix = extract_key_prefix(raw_key)
+        digest, salt = hash_api_key(raw_key)
+        now = _utc_now()
+        self._tenant_ref(tenant_id).set(
+            {
+                "api_key_prefix": prefix,
+                "api_key_hash": digest,
+                "api_key_salt": salt,
+                "updated_at": now,
+            },
+            merge=True,
+        )
+        return raw_key
+
+    def resolve_tenant_by_api_key(self, api_key: str) -> str | None:
+        """O(1) single-field Firestore indexed lookup on api_key_prefix + PBKDF2 verification."""
+        if not api_key:
+            return None
+        prefix = extract_key_prefix(api_key)
+        if prefix is None:
+            return None
+        query = self._db.collection("tenants").where("api_key_prefix", "==", prefix)
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            digest = data.get("api_key_hash")
+            salt = data.get("api_key_salt")
+            if digest and salt and verify_api_key(api_key, str(digest), str(salt)):
+                return str(data["tenant_id"])
+        return None
+
+    # ------------------------------------------------------------------
+    # Projects (Strictly Scoped under tenants/{tenant_id}/projects)
+    # ------------------------------------------------------------------
+    def create_project(
+        self,
+        tenant_id: str,
+        name: str,
+        description: str = "",
+    ) -> ProjectSummary:
+        self.get_or_create_tenant(tenant_id)
+        project_id = f"prj_{uuid.uuid4().hex[:12]}"
+        now = _utc_now()
+        doc: dict[str, Any] = {
+            "project_id": project_id,
+            "tenant_id": tenant_id,
+            "name": name.strip() or "Untitled Project",
+            "description": description,
+            "revision_count": 0,
+            "latest_supply_tier": None,
+            "latest_boq_eur": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._project_ref(tenant_id, project_id).set(doc)
+        return self._doc_to_project(doc)
+
+    def get_project(self, tenant_id: str, project_id: str) -> ProjectSummary | None:
+        snap = self._project_ref(tenant_id, project_id).get()
+        if not snap.exists:
+            return None
+        return self._doc_to_project(snap.to_dict() or {})
+
+    def list_projects(self, tenant_id: str) -> list[ProjectSummary]:
+        items = [
+            self._doc_to_project(snap.to_dict() or {})
+            for snap in self._projects_col(tenant_id).stream()
+        ]
+        items.sort(key=lambda p: p.updated_at, reverse=True)
+        return items
+
+    def delete_project(self, tenant_id: str, project_id: str) -> bool:
+        """Delete a tenant-owned project, all Firestore revision docs, and GCS gzip blobs."""
+        proj_ref = self._project_ref(tenant_id, project_id)
+        if not proj_ref.get().exists:
+            return False
+        for rev_snap in self._revisions_col(tenant_id, project_id).stream():
+            rev_data = rev_snap.to_dict() or {}
+            blob_path = rev_data.get("result_blob_path")
+            if blob_path:
+                self._blobs.delete_blob(str(blob_path))
+            rev_snap.reference.delete()
+        self._blobs.delete_prefix(f"tenants/{tenant_id}/projects/{project_id}/")
+        proj_ref.delete()
+        return True
+
+    # ------------------------------------------------------------------
+    # Revisions (Metadata in Firestore, Gzipped Phase2DesignResult in GCS)
+    # ------------------------------------------------------------------
+    def save_revision(
+        self,
+        tenant_id: str,
+        project_id: str,
+        result: Phase2DesignResult,
+        *,
+        overrides: DesignOverrides | None = None,
+        notes: str = "",
+    ) -> RevisionRecord:
+        proj_ref = self._project_ref(tenant_id, project_id)
+        proj_snap = proj_ref.get()
+        if not proj_snap.exists:
+            raise KeyError(f"Project '{project_id}' not found for tenant '{tenant_id}'.")
+
+        proj_data = proj_snap.to_dict() or {}
+        rev_num = int(proj_data.get("revision_count", 0)) + 1
+        rev_id = f"rev_{uuid.uuid4().hex[:12]}"
+        now = _utc_now()
+
+        d = result.design
+        boq_total = d.boq.grand_total_eur if d.boq is not None else 0.0
+        blob_path = (
+            f"tenants/{tenant_id}/projects/{project_id}/"
+            f"revisions/rev_{rev_num:06d}_{rev_id}.json.gz"
+        )
+        # Upload gzipped JSON snapshot to GCS first so metadata never points to a missing blob
+        self._blobs.put_gzip_json(blob_path, result.model_dump_json())
+
+        rev_doc: dict[str, Any] = {
+            "revision_id": rev_id,
+            "project_id": project_id,
+            "tenant_id": tenant_id,
+            "revision_number": rev_num,
+            "notes": notes,
+            "input_sha256": d.provenance.input_sha256,
+            "overrides_json": overrides.model_dump_json() if overrides is not None else None,
+            "result_blob_path": blob_path,
+            "supply_tier": d.eac_compliance.recommended_supply_tier,
+            "diversified_kva": d.eac_compliance.total_diversified_kva,
+            "boq_grand_total_eur": boq_total,
+            "has_blockers": d.has_blockers,
+            "created_at": now,
+        }
+        rev_ref = self._revisions_col(tenant_id, project_id).document(f"{rev_num:06d}")
+
+        # Atomic batch commit updating revision doc + project counters together
+        batch = self._db.batch()
+        batch.set(rev_ref, rev_doc)
+        batch.set(
+            proj_ref,
+            {
+                "revision_count": rev_num,
+                "latest_supply_tier": d.eac_compliance.recommended_supply_tier,
+                "latest_boq_eur": boq_total,
+                "updated_at": now,
+            },
+            merge=True,
+        )
+        batch.commit()
+
+        return RevisionRecord(
+            summary=self._doc_to_rev_summary(rev_doc),
+            overrides=overrides,
+            result=result,
+        )
+
+    def list_revisions(self, tenant_id: str, project_id: str) -> list[RevisionSummary]:
+        items = [
+            self._doc_to_rev_summary(snap.to_dict() or {})
+            for snap in self._revisions_col(tenant_id, project_id).stream()
+        ]
+        items.sort(key=lambda r: r.revision_number)
+        return items
+
+    def get_revision(
+        self,
+        tenant_id: str,
+        project_id: str,
+        revision_number: int,
+    ) -> RevisionRecord | None:
+        snap = self._revisions_col(tenant_id, project_id).document(f"{revision_number:06d}").get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        blob_path = str(data["result_blob_path"])
+        raw_json = self._blobs.get_gzip_json(blob_path)
+        if raw_json is None:
+            raise RuntimeError(
+                f"Missing GCS revision snapshot '{blob_path}' for tenant '{tenant_id}'."
+            )
+        summary = self._doc_to_rev_summary(data)
+        overrides = (
+            DesignOverrides.model_validate_json(str(data["overrides_json"]))
+            if data.get("overrides_json")
+            else None
+        )
+        result = Phase2DesignResult.model_validate_json(raw_json)
+        return RevisionRecord(summary=summary, overrides=overrides, result=result)
+
+    def get_latest_revision(self, tenant_id: str, project_id: str) -> RevisionRecord | None:
+        revs = self.list_revisions(tenant_id, project_id)
+        if not revs:
+            return None
+        return self.get_revision(tenant_id, project_id, revs[-1].revision_number)
+
+    # ------------------------------------------------------------------
+    # Usage Metering (Strictly Tenant-Scoped)
+    # ------------------------------------------------------------------
+    def record_usage(
+        self,
+        tenant_id: str,
+        event_type: str,
+        duration_ms: float,
+        payload_bytes: int,
+        *,
+        project_id: str | None = None,
+    ) -> None:
+        evt_id = f"evt_{uuid.uuid4().hex[:12]}"
+        self._usage_col(tenant_id).document(evt_id).set(
+            {
+                "event_id": evt_id,
+                "tenant_id": tenant_id,
+                "project_id": project_id,
+                "event_type": event_type,
+                "duration_ms": round(duration_ms, 2),
+                "payload_bytes": max(0, int(payload_bytes)),
+                "created_at": _utc_now(),
+            }
+        )
+
+    def get_usage_summary(self, tenant_id: str) -> UsageSummary:
+        counts: dict[str, int] = {}
+        total_events = 0
+        total_ms = 0.0
+        total_bytes = 0
+        for snap in self._usage_col(tenant_id).stream():
+            data = snap.to_dict() or {}
+            et = str(data.get("event_type", "unknown"))
+            counts[et] = counts.get(et, 0) + 1
+            total_events += 1
+            total_ms += float(data.get("duration_ms", 0.0))
+            total_bytes += int(data.get("payload_bytes", 0))
+        return UsageSummary(
+            tenant_id=tenant_id,
+            total_events=total_events,
+            total_duration_ms=round(total_ms, 2),
+            total_payload_bytes=total_bytes,
+            counts_by_event_type=counts,
+        )
+
+    # ------------------------------------------------------------------
+    # EU GDPR Articles 17 & 20: Portability Export & Full Cascade Erasure
+    # ------------------------------------------------------------------
+    def export_tenant_data(self, tenant_id: str) -> TenantExportBundle:
+        """GDPR Article 20 portable JSON export for a tenant (excludes API key secrets)."""
+        tenant = self.get_or_create_tenant(tenant_id)
+        projects = self.list_projects(tenant_id)
+        revisions_by_project: dict[str, list[RevisionRecord]] = {}
+        for proj in projects:
+            recs: list[RevisionRecord] = []
+            for rs in self.list_revisions(tenant_id, proj.project_id):
+                rec = self.get_revision(tenant_id, proj.project_id, rs.revision_number)
+                if rec is not None:
+                    recs.append(rec)
+            revisions_by_project[proj.project_id] = recs
+        usage = self.get_usage_summary(tenant_id)
+        return TenantExportBundle(
+            exported_at_utc=_utc_now(),
+            tenant=tenant,
+            projects=projects,
+            revisions_by_project=revisions_by_project,
+            usage=usage,
+        )
+
+    def delete_tenant_cascade(self, tenant_id: str) -> bool:
+        """GDPR Article 17 right to erasure: delete Firestore docs + GCS blobs for tenant."""
+        t_ref = self._tenant_ref(tenant_id)
+        existed = bool(t_ref.get().exists)
+
+        for proj in self.list_projects(tenant_id):
+            self.delete_project(tenant_id, proj.project_id)
+
+        # Belt-and-suspenders sweep of any remaining GCS blobs under this tenant's prefix
+        self._blobs.delete_prefix(f"tenants/{tenant_id}/")
+
+        for evt_snap in self._usage_col(tenant_id).stream():
+            evt_snap.reference.delete()
+
+        if existed:
+            t_ref.delete()
+        return existed
+
+
+def build_workspace_store_from_env(
+    db_path: Path | None = None,
+) -> tuple[WorkspaceStoreProtocol, str]:
+    """Build SQLite (local/CLI default) or GCP Firestore+GCS store from environment variables."""
+    backend = os.environ.get("CYELEC_STORE_BACKEND", "sqlite").strip().lower() or "sqlite"
+    if backend == "firestore":
+        gcs_bucket = os.environ.get("CYELEC_GCS_BUCKET", "").strip()
+        gcp_project = os.environ.get("CYELEC_GCP_PROJECT", "").strip() or None
+        database = os.environ.get("CYELEC_FIRESTORE_DATABASE", "(default)").strip() or "(default)"
+        return (
+            FirestoreWorkspaceStore(
+                gcs_bucket=gcs_bucket,
+                project_id=gcp_project,
+                database=database,
+            ),
+            "firestore",
+        )
+    if backend != "sqlite":
+        raise ValueError(
+            f"Unsupported CYELEC_STORE_BACKEND '{backend}'. Expected 'sqlite' or 'firestore'."
+        )
+    return WorkspaceStore(db_path=db_path), "sqlite"

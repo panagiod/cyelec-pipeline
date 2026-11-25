@@ -1,0 +1,91 @@
+name: Deploy to Google Cloud Run (EU)
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target Cloud Run environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_REGION: europe-west1
+  AR_REPO: cyelec
+  IMAGE_NAME: cyelec-api
+
+jobs:
+  deploy:
+    # Skip automatic push deploys cleanly until GCP_PROJECT_ID repo variable is configured
+    if: ${{ vars.GCP_PROJECT_ID != '' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve target environment
+        id: target
+        run: |
+          ENV_NAME="${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}"
+          echo "env=${ENV_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tf_state_bucket=${{ vars.GCP_PROJECT_ID }}-cyelec-tfstate" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud via Keyless OIDC (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Configure Docker for EU Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push immutable SHA-pinned container image
+        run: |
+          docker build -t "${{ steps.target.outputs.image_uri }}" .
+          docker push "${{ steps.target.outputs.image_uri }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Terraform Init & Apply (Cloud Run + Firestore + GCS in europe-west1)
+        working-directory: deploy/gcp/terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ steps.target.outputs.tf_state_bucket }}" \
+            -backend-config="prefix=cyelec/${{ steps.target.outputs.env }}"
+          terraform apply -auto-approve \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="region=${GCP_REGION}" \
+            -var="environment=${{ steps.target.outputs.env }}" \
+            -var="image_uri=${{ steps.target.outputs.image_uri }}"
+          SERVICE_URL="$(terraform output -raw service_url)"
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+        id: tf
+
+      - name: Live Post-Deploy Health & Backend Verification
+        run: |
+          URL="${{ steps.tf.outputs.service_url }}"
+          echo "Verifying live Cloud Run endpoint: ${URL}/health"
+          RESP="$(curl -fsS --retry 5 --retry-delay 3 "${URL}/health")"
+          echo "${RESP}"
+          python3 -c '
+          import json, sys
+          data = json.loads(sys.argv[1])
+          assert data["status"] == "ok", f"Unhealthy: {data}"
+          assert data["store_backend"] == "firestore", f"Wrong store backend: {data}"
+          print("VERIFIED: status=ok, store_backend=firestore, version=" + data["pipeline_version"])
+          ' "${RESP}"
