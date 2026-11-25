@@ -1,0 +1,60 @@
+plan_name: "Cyprus Villa 216 m² with Rooftop PV & EV Charger"
+source_reference: >-
+  Licensed Cyprus ETEK engineer reference schedule for a 216 m² detached villa with
+  rooftop net-metering PV and EV wallbox under BS 7671 Section 712/722
+building_type: independent_house
+expected_area_m2: 216.0
+expected_room_count: 11
+expected_supply_phases: 3
+expected_supply_tier: "3x80A (55.4 kVA)"
+expected_main_breaker_a: 80
+expected_diversified_kva: 42.0
+expected_max_phase_a: 61.0
+expected_imbalance_pct: 10.0
+expected_total_circuits: 16
+expected_sockets_min: 22
+expected_luminaires_min: 16
+expected_split_ac_count: 5
+expected_conduit_m: 720.0
+expected_boq_eur: 11800.0
+reference_circuits:
+  - category: lighting
+    description: "Villa LED Lighting Zones"
+    count: 2
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: socket_ring
+    description: "BS 1363 32 A Socket Rings"
+    count: 3
+    breaker_in_a: 32
+    cable_mm2: 2.5
+  - category: split_ac
+    description: "Dedicated Split Inverter A/C Circuits"
+    count: 5
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: cooker
+    description: "Electric Hob / Cooker Radial"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0
+  - category: oven
+    description: "Built-in Electric Oven Radial"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: appliance
+    description: "Dishwasher & Washing Machine Radials"
+    count: 2
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: water_heater
+    description: "Solar Water Heater Immersion Booster"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: ev_charger
+    description: "EV Wallbox Dedicated Supply"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0

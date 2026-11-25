@@ -1,0 +1,55 @@
+plan_name: "Cyprus 3-Bedroom Apartment 120 m² (EAC Residential)"
+source_reference: >-
+  Licensed Cyprus ETEK engineer reference schedule for a 120 m² 3-bedroom apartment
+  under BS 7671:2018+A2 (Cyprus 40°C ambient, TT earthing)
+building_type: apartment_3bed_plus
+expected_area_m2: 120.0
+expected_room_count: 11
+expected_supply_phases: 3
+expected_supply_tier: "3x60A (41.6 kVA)"
+expected_main_breaker_a: 60
+expected_diversified_kva: 29.5
+expected_max_phase_a: 43.0
+expected_imbalance_pct: 10.0
+expected_total_circuits: 13
+expected_sockets_min: 18
+expected_luminaires_min: 14
+expected_split_ac_count: 4
+expected_conduit_m: 470.0
+expected_boq_eur: 7800.0
+reference_circuits:
+  - category: lighting
+    description: "Lighting Circuits (Day/Living + Night/Bedrooms)"
+    count: 2
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: socket_ring
+    description: "BS 1363 32 A Ring Finals (Kitchen + General Living/Bedrooms)"
+    count: 2
+    breaker_in_a: 32
+    cable_mm2: 2.5
+  - category: split_ac
+    description: "Dedicated Split A/C Circuits (Living/Kitchen + 3 Bedrooms)"
+    count: 4
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: cooker
+    description: "Electric Hob / Cooker Circuit"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0
+  - category: oven
+    description: "Built-in Electric Oven Circuit"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: appliance
+    description: "Dishwasher & Washing Machine Dedicated Radials"
+    count: 2
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: water_heater
+    description: "Solar Water Heater 3 kW Immersion Booster"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5

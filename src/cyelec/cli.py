@@ -8,6 +8,11 @@ from typing import Annotated
 import typer
 
 from cyelec import __version__
+from cyelec.eval import (
+    evaluate_against_reference,
+    export_evaluation_reports,
+    load_reference_plan,
+)
 from cyelec.ingest.dxf_ingest import ingest_dxf, ingest_multi_floor_dxf, inspect_dxf_layers
 from cyelec.models.building import BuildingType, DxfLayerMapping
 from cyelec.models.electrical import (
@@ -593,6 +598,89 @@ def export_sld(
     typer.echo(f"SLD SVG: {svg_path}")
     typer.echo(f"SLD DXF: {dxf_path}")
     typer.echo(f"SLD QET: {qet_path}")
+
+
+@app.command("eval-compare")
+def eval_compare(
+    arch_dxf: Annotated[
+        Path,
+        typer.Argument(help="Path to architectural .dxf floorplan."),
+    ],
+    reference_plan: Annotated[
+        Path,
+        typer.Argument(help="Path to licensed engineer reference electrical plan (.yaml/.json)."),
+    ],
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output directory for evaluation reports."),
+    ] = Path("out/eval"),
+    building_type: Annotated[
+        BuildingType | None,
+        typer.Option("--building-type", help="Optional building type override."),
+    ] = None,
+    profile: Annotated[
+        EacProfile,
+        typer.Option("--profile", help="Cyprus EAC BS 7671 edition profile."),
+    ] = EacProfile.EAC_18TH_A2,
+    earthing: Annotated[
+        EarthingSystem,
+        typer.Option("--earthing", help="Site earthing system (Cyprus default: TT)."),
+    ] = EarthingSystem.TT,
+    pv_kva: Annotated[
+        float,
+        typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
+    ] = 0.0,
+    layer_mapping: Annotated[
+        Path | None,
+        typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
+    ] = None,
+) -> None:
+    """Solve an architectural DXF and compare quantitatively against a reference electrical plan."""
+    ref = load_reference_plan(reference_plan)
+    mapping = _load_layer_mapping(layer_mapping)
+    model, ingest_flags = ingest_dxf(
+        arch_dxf,
+        building_type=building_type or ref.building_type,
+        pv_capacity_kva=pv_kva,
+        layer_mapping=mapping,
+    )
+    overrides = DesignOverrides(
+        eac_profile=profile,
+        earthing_system=earthing,
+        pv_capacity_kva=pv_kva,
+    )
+    p2 = run_phase2_pipeline(model, overrides=overrides, extra_flags=ingest_flags)
+    report = evaluate_against_reference(p2, ref)
+    outputs = export_evaluation_reports(report, out_dir)
+
+    typer.echo(f"Evaluation Plan : {report.plan_name}")
+    typer.echo(
+        f"Verdict         : {report.verdict} | "
+        f"Concordance: {report.concordance_score_pct:.1f}%"
+    )
+    typer.echo(
+        f"Area / Rooms    : {report.area_actual_m2:.1f} m² (ref {report.area_ref_m2:.1f} m², "
+        f"{report.area_variance_pct:+.1f}%) | "
+        f"{report.rooms_actual} rooms (ref {report.rooms_ref})"
+    )
+    typer.echo(
+        f"Supply / Load   : {report.supply_tier_actual} (ref {report.supply_tier_ref}) | "
+        f"{report.diversified_kva_actual:.2f} kVA (ref {report.diversified_kva_ref:.2f} kVA, "
+        f"{report.diversified_kva_variance_pct:+.1f}%)"
+    )
+    typer.echo(
+        f"Safety Audit    : BS7671_PASS={report.all_circuits_bs7671_pass} | "
+        f"DB_IN_WET_ROOM={report.db_in_wet_room} | "
+        f"SAFETY_FAILS={len(report.safety_failures)}"
+    )
+    for sf in report.safety_failures:
+        typer.echo(f"  [SAFETY FAIL] {sf}")
+    for obs in report.review_observations:
+        typer.echo(f"  [REVIEW OBS]  {obs}")
+    for key, path in sorted(outputs.items()):
+        typer.echo(f"  {key.upper():<5}: {path}")
+    if report.verdict == "FAIL_SAFETY":
+        raise typer.Exit(code=2)
 
 
 @app.command("serve")

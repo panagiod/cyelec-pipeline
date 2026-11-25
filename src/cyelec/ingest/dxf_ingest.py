@@ -52,10 +52,10 @@ _INSUNITS_TO_MM: dict[int, float] = {
 
 _ROOM_LAYER_TOKENS = ("A-ROOM", "ROOM", "SPACE", "AREA", "ZONE")
 _WALL_LAYER_TOKENS = ("A-WALL", "WALL", "ΤΟΙΧ")
-_DOOR_LAYER_TOKENS = ("A-DOOR", "DOOR", "ΠΟΡΤ")
+_DOOR_LAYER_TOKENS = ("A-DOOR", "DOOR", "OPENING", "ΠΟΡΤ")
 _WIND_LAYER_TOKENS = ("A-WIND", "WIND", "GLAZ", "ΠΑΡΑΘ")
 _FIXT_LAYER_TOKENS = ("A-FIXT", "FIXT", "SANIT", "PLUMB", "BATH", "ΕΙΔΗ")
-_TEXT_LAYER_TOKENS = ("A-TEXT", "TEXT", "LABEL", "ANNO", "ROOM-TXT")
+_TEXT_LAYER_TOKENS = ("A-TEXT", "TEXT", "LABEL", "ANNO", "NOTE", "ROOM-TXT")
 _DB_LAYER_TOKENS = ("A-DB", "E-DB", "DB", "PANEL", "ΠΙΝΑΚ")
 
 _LayerRole = Literal["rooms", "walls", "doors", "windows", "fixtures", "text", "db", "unknown"]
@@ -213,20 +213,51 @@ def _infer_unit_scale(
     insunits: int,
     raw_extents_max: float,
     flags: list[ReviewFlag],
+    *,
+    raw_door_arc_radii: list[float] | None = None,
 ) -> float:
+    radii = raw_door_arc_radii or []
+    median_arc = sorted(radii)[len(radii) // 2] if radii else 0.0
+
     if insunits in _INSUNITS_TO_MM:
-        return _INSUNITS_TO_MM[insunits]
+        declared_scale = _INSUNITS_TO_MM[insunits]
+        # Sanity check: real architectural buildings span >= 3000 mm (3.0 m).
+        # AutoCAD files often leave $INSUNITS=4 (mm) even when drawn in inches, cm, or metres.
+        if (
+            declared_scale == 1.0
+            and 0.0 < raw_extents_max < 2500.0
+        ):
+            if raw_extents_max < 100.0:
+                scale, guessed = 1000.0, "metres"
+            elif 18.0 <= median_arc <= 42.0:
+                scale, guessed = 25.4, "inches"
+            else:
+                scale, guessed = 10.0, "centimetres"
+            flags.append(
+                ReviewFlag(
+                    code="DXF_SCALE_AUTO_CORRECTED",
+                    severity=ReviewSeverity.WARNING,
+                    category="geometry",
+                    message=(
+                        f"DXF declared $INSUNITS={insunits} (mm) but building span is only "
+                        f"{raw_extents_max:.1f} units (median door arc {median_arc:.1f}); "
+                        f"auto-corrected to {guessed} ({scale:g} mm/unit). Verify drawing scale."
+                    ),
+                )
+            )
+            return scale
+        return declared_scale
+
     if raw_extents_max <= 0.0:
         return 1.0
     if raw_extents_max < 100.0:
-        scale = 1000.0
-        guessed = "metres"
-    elif raw_extents_max < 1000.0:
-        scale = 10.0
-        guessed = "centimetres"
+        scale, guessed = 1000.0, "metres"
+    elif 18.0 <= median_arc <= 42.0 and raw_extents_max < 2500.0:
+        scale, guessed = 25.4, "inches"
+    elif raw_extents_max < 2500.0:
+        scale, guessed = 10.0, "centimetres"
     else:
-        scale = 1.0
-        guessed = "millimetres"
+        scale, guessed = 1.0, "millimetres"
     flags.append(
         ReviewFlag(
             code="DXF_UNITLESS_INFERRED",
@@ -304,10 +335,37 @@ def _find_containing_room(
     return best_rid if best_dist <= max_fallback_dist_mm else None
 
 
+def _extract_wall_cavities(lines: list[LineString]) -> list[Polygon]:
+    """Morphological wall-cavity extractor for real double-line AutoCAD architectural walls."""
+    if not lines:
+        return []
+    wall_band = unary_union(lines).buffer(140.0, join_style="mitre")
+    geoms = (
+        list(wall_band.geoms)
+        if hasattr(wall_band, "geoms")
+        else [wall_band]
+    )
+    cavities: list[Polygon] = []
+    for geom in geoms:
+        if not isinstance(geom, Polygon):
+            continue
+        for interior in geom.interiors:
+            hole = Polygon(interior)
+            expanded = hole.buffer(120.0, join_style="mitre").simplify(25.0, preserve_topology=True)
+            if (
+                isinstance(expanded, Polygon)
+                and expanded.is_valid
+                and 1.2e6 <= expanded.area <= 5e8
+            ):
+                cavities.append(expanded)
+    return cavities
+
+
 def _polygonize_rooms_from_walls(
     wall_lines: list[tuple[Point2D, Point2D]],
     door_arcs: list[tuple[Point2D, float, float, float]],
     window_lines: list[tuple[Point2D, Point2D]],
+    door_leaves: list[tuple[Point2D, Point2D]] | None = None,
 ) -> list[Polygon]:
     """Derive closed room polygons from wall + doorway + window segments when A-ROOM is absent."""
     lines: list[LineString] = []
@@ -315,6 +373,9 @@ def _polygonize_rooms_from_walls(
         if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
             lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
     for p0, p1 in window_lines:
+        if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
+            lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
+    for p0, p1 in (door_leaves or []):
         if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
             lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
     # Seal doorway wall openings along both start and end rays of each swing arc
@@ -336,6 +397,11 @@ def _polygonize_rooms_from_walls(
     raw_polys = [
         p for p in polygonize(noded) if isinstance(p, Polygon) and 1_200_000.0 <= p.area <= 5e8
     ]
+    if len(raw_polys) < 2:
+        cavities = _extract_wall_cavities(lines)
+        if len(cavities) > len(raw_polys):
+            raw_polys = cavities
+
     if not raw_polys:
         return []
 
@@ -391,10 +457,11 @@ def ingest_dxf(
     msp = doc.modelspace()
     resolved_entities = list(_iter_resolved_entities(list(msp)))
 
-    # First pass: compute raw coordinate span in case $INSUNITS is unitless
+    # First pass: compute raw coordinate span & door arc radii for unit/scale sanity checks
     xs: list[float] = []
     ys: list[float] = []
-    for ent, _layer, _hint in resolved_entities:
+    raw_arc_radii: list[float] = []
+    for ent, layer_name, _hint in resolved_entities:
         t = ent.dxftype()
         if t == "LINE":
             xs.extend([float(ent.dxf.start.x), float(ent.dxf.end.x)])
@@ -403,9 +470,11 @@ def ingest_dxf(
             for px, py in ent.get_points("xy"):
                 xs.append(float(px))
                 ys.append(float(py))
+        elif t == "ARC" and _role_matches(layer_name, "doors", layer_mapping):
+            raw_arc_radii.append(float(ent.dxf.radius))
     span = max((max(xs) - min(xs)) if xs else 0.0, (max(ys) - min(ys)) if ys else 0.0)
     insunits = int(doc.header.get("$INSUNITS", 0))
-    scale = _infer_unit_scale(insunits, span, flags)
+    scale = _infer_unit_scale(insunits, span, flags, raw_door_arc_radii=raw_arc_radii)
 
     room_raw_polys: list[Polygon] = []
     text_labels: list[tuple[str, Point, str]] = []
@@ -546,7 +615,9 @@ def ingest_dxf(
 
     # Wall-to-room polygonization fallback when A-ROOM polylines are absent
     if not room_raw_polys and wall_lines:
-        room_raw_polys = _polygonize_rooms_from_walls(wall_lines, door_arcs, window_lines)
+        room_raw_polys = _polygonize_rooms_from_walls(
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves
+        )
         if room_raw_polys:
             flags.append(
                 ReviewFlag(
@@ -580,7 +651,97 @@ def ingest_dxf(
 
         inside_texts = [t for t, pt, _ in text_labels if poly.contains(pt) or poly.touches(pt)]
         if inside_texts:
-            raw_label = clean_room_label(inside_texts[0])
+            # Prefer texts matching Tier-1 room aliases over CAD door/window callouts (e.g. '3068')
+            best_label = clean_room_label(inside_texts[0])
+            best_cls = classify_room_label(
+                best_label, tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
+            )
+            if len(inside_texts) > 1:
+                candidates = [
+                    (
+                        clean_room_label(t),
+                        classify_room_label(
+                            clean_room_label(t),
+                            tmpl_std,
+                            room_id=rid,
+                            tier2_fallback=tier2_fallback,
+                        ),
+                    )
+                    for t in inside_texts
+                ]
+                joined_lbl = " ".join(c[0] for c in candidates if c[0] and not c[0][0].isdigit())
+                if joined_lbl:
+                    candidates.append(
+                        (
+                            joined_lbl,
+                            classify_room_label(
+                                joined_lbl,
+                                tmpl_std,
+                                room_id=rid,
+                                tier2_fallback=tier2_fallback,
+                            ),
+                        )
+                    )
+                matched_types = {
+                    c[1].normalized_type for c in candidates if c[1].confidence >= 0.90
+                }
+                area_m2_est = float(poly.area) / 1_000_000.0
+
+                if (
+                    RoomType.KITCHEN in matched_types
+                    and RoomType.LIVING_ROOM in matched_types
+                ):
+                    best_label = " / ".join(
+                        dict.fromkeys(
+                            c[0]
+                            for c in candidates
+                            if c[1].confidence >= 0.90 and c[0] != joined_lbl
+                        )
+                    )
+                    best_cls = classify_room_label(
+                        "kitchen/living", tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
+                    )
+                elif (
+                    RoomType.UTILITY in matched_types
+                    and RoomType.STORAGE in matched_types
+                    and RoomType.KITCHEN not in matched_types
+                ):
+                    best_label, best_cls = next(
+                        c for c in candidates if c[1].normalized_type == RoomType.UTILITY
+                    )
+                elif area_m2_est > 12.0 and (
+                    RoomType.MASTER_BEDROOM in matched_types or RoomType.BEDROOM in matched_types
+                ) and (
+                    RoomType.ENSUITE in matched_types or RoomType.BATHROOM in matched_types
+                ):
+                    pref = (
+                        RoomType.MASTER_BEDROOM
+                        if RoomType.MASTER_BEDROOM in matched_types
+                        else RoomType.BEDROOM
+                    )
+                    best_label, best_cls = next(
+                        c for c in candidates if c[1].normalized_type == pref
+                    )
+                    flags.append(
+                        ReviewFlag(
+                            code="OPEN_PLAN_MULTI_LABEL_ROOM",
+                            severity=ReviewSeverity.INFO,
+                            category="geometry",
+                            message=(
+                                f"Room {rid} ({area_m2_est:.1f} m²) contains multiple labels "
+                                f"({', '.join(t.value for t in sorted(matched_types))}); "
+                                f"classified as '{pref.value}'. Verify archway/partition."
+                            ),
+                        )
+                    )
+                else:
+                    candidates.sort(
+                        key=lambda item: (item[1].confidence, len(item[1].matched_alias or "")),
+                        reverse=True,
+                    )
+                    best_label, best_cls = candidates[0]
+            raw_label = best_label
+            cls_res = best_cls
         else:
             raw_label = f"Unnamed Room {idx}"
             flags.append(
@@ -594,13 +755,13 @@ def ingest_dxf(
                     ),
                 )
             )
+            cls_res = classify_room_label(
+                raw_label,
+                tmpl_std,
+                room_id=rid,
+                tier2_fallback=tier2_fallback,
+            )
 
-        cls_res = classify_room_label(
-            raw_label,
-            tmpl_std,
-            room_id=rid,
-            tier2_fallback=tier2_fallback,
-        )
         if cls_res.flag is not None and inside_texts:
             flags.append(cls_res.flag)
 
@@ -743,8 +904,23 @@ def ingest_dxf(
             ),
         )
     else:
-        corridor = next((r for r in rooms if r.normalized_type == RoomType.CORRIDOR), rooms[0])
-        c_pt = corridor.centroid_mm()
+        # BS 7671 Section 701: NEVER place an inferred DB1 inside a wet room or outdoors!
+        dry_indoor = [r for r in rooms if not r.is_wet_room and not r.is_outdoor]
+        pref_order = (
+            RoomType.CORRIDOR,
+            RoomType.UTILITY,
+            RoomType.STORAGE,
+            RoomType.LIVING_ROOM,
+            RoomType.KITCHEN_LIVING,
+        )
+        host_room: Room | None = None
+        for rtype in pref_order:
+            host_room = next((r for r in dry_indoor if r.normalized_type == rtype), None)
+            if host_room is not None:
+                break
+        if host_room is None:
+            host_room = dry_indoor[0] if dry_indoor else rooms[0]
+        c_pt = host_room.centroid_mm()
         db_anchor = DistributionBoardAnchor(id="DB1", location_mm=c_pt)
         flags.append(
             ReviewFlag(
@@ -752,8 +928,9 @@ def ingest_dxf(
                 severity=ReviewSeverity.WARNING,
                 category="geometry",
                 message=(
-                    f"No DB anchor found on layer A-DB; placed DB1 at {corridor.raw_label} "
-                    f"({c_pt.x_mm:.0f}, {c_pt.y_mm:.0f} mm). Confirm DB location on plan."
+                    f"No DB anchor found on layer A-DB; placed DB1 in dry indoor space "
+                    f"'{host_room.raw_label}' ({c_pt.x_mm:.0f}, {c_pt.y_mm:.0f} mm). "
+                    "Confirm DB location on plan."
                 ),
             )
         )

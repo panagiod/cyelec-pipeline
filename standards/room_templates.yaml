@@ -25,6 +25,8 @@ rooms:
       [
         "living room",
         "living",
+        "great room",
+        "dining room",
         "lounge",
         "sitting room",
         "salon",
@@ -244,6 +246,9 @@ rooms:
         "en-suite",
         "ensuite",
         "en suite",
+        "master bath",
+        "mstr. bath",
+        "mstr bath",
         "shower room",
         "shower",
         "wc/shower",
@@ -265,7 +270,7 @@ rooms:
     dedicated_appliances: []
 
   wc:
-    aliases_en: ["wc", "guest wc", "toilet", "cloakroom", "toualeta", "w.c.", "w.c"]
+    aliases_en: ["wc", "guest wc", "toilet", "toil.", "toil", "cloakroom", "toualeta", "w.c.", "w.c"]
     aliases_el: ["ΤΟΥΑΛΕΤΑ", "ΑΠΟΧΩΡΗΤΗΡΙΟ", "WC ΞΕΝΩΝ"]
     lighting_w_per_m2: 10.0
     min_lighting_points: 1
@@ -284,6 +289,7 @@ rooms:
         "corridor",
         "hallway",
         "hall",
+        "entry",
         "entrance",
         "foyer",
         "lobby",
@@ -308,6 +314,8 @@ rooms:
     aliases_en:
       [
         "utility",
+        "util.",
+        "util",
         "laundry",
         "utility room",
         "plystario",
@@ -351,6 +359,9 @@ rooms:
         "balcony",
         "terrace",
         "patio",
+        "deck",
+        "porch",
+        "covered porch",
         "veranta",
         "balkoni",
         "mpalkoni",
@@ -370,7 +381,20 @@ rooms:
     dedicated_appliances: []
 
   storage:
-    aliases_en: ["storage", "store", "store room", "apothiki", "apoth."]
+    aliases_en:
+      [
+        "storage",
+        "store",
+        "store room",
+        "pantry",
+        "closet",
+        "w.i.c.",
+        "w.i.c",
+        "walk-in closet",
+        "garage",
+        "apothiki",
+        "apoth.",
+      ]
     aliases_el: ["ΑΠΟΘΗΚΗ", "ΑΠΟΘ."]
     lighting_w_per_m2: 6.0
     min_lighting_points: 1

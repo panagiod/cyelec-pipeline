@@ -1,0 +1,60 @@
+plan_name: "Cyprus 2-Storey Villa 228 m² (MDB -> DB-GF/DB-1F + EV)"
+source_reference: >-
+  Licensed Cyprus ETEK engineer reference schedule for a 228 m² 2-storey detached villa
+  with sub-distribution boards (100 mA Type S upstream) and EV charger
+building_type: independent_house
+expected_area_m2: 228.0
+expected_room_count: 12
+expected_supply_phases: 3
+expected_supply_tier: "3x60A (41.6 kVA)"
+expected_main_breaker_a: 60
+expected_diversified_kva: 40.5
+expected_max_phase_a: 58.5
+expected_imbalance_pct: 10.0
+expected_total_circuits: 17
+expected_sockets_min: 24
+expected_luminaires_min: 18
+expected_split_ac_count: 4
+expected_conduit_m: 640.0
+expected_boq_eur: 12000.0
+reference_circuits:
+  - category: lighting
+    description: "Ground & First Floor Lighting Circuits"
+    count: 4
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: socket_ring
+    description: "BS 1363 32 A Socket Rings (Kitchen, GF General, 1F Bedrooms)"
+    count: 3
+    breaker_in_a: 32
+    cable_mm2: 2.5
+  - category: split_ac
+    description: "Dedicated Split A/C Circuits"
+    count: 4
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: cooker
+    description: "Electric Hob / Cooker Radial"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0
+  - category: oven
+    description: "Built-in Electric Oven Radial"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: appliance
+    description: "Dishwasher & Washing Machine Radials"
+    count: 2
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: water_heater
+    description: "Solar Water Heater Immersion Booster"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: ev_charger
+    description: "EV Wallbox Dedicated Supply (min 32 A / 6 mm²; 40 A / 10 mm² future-proof)"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0

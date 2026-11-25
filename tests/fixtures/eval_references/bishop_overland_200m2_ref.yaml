@@ -1,0 +1,55 @@
+plan_name: "Bishop-Overland 200 m² Detached House (Real AutoCAD DXF)"
+source_reference: >-
+  External real-world AutoCAD floorplan (jscad/sample-files/dxf/dxf-parser/floorplan.dxf)
+  benchmarked against licensed Cyprus ETEK / BS 7671:2018+A2 residential schedule
+building_type: independent_house
+expected_area_m2: 200.0
+expected_room_count: 15
+expected_supply_phases: 3
+expected_supply_tier: "3x60A (41.6 kVA)"
+expected_main_breaker_a: 60
+expected_diversified_kva: 31.0
+expected_max_phase_a: 45.0
+expected_imbalance_pct: 10.0
+expected_total_circuits: 15
+expected_sockets_min: 24
+expected_luminaires_min: 18
+expected_split_ac_count: 4
+expected_conduit_m: 550.0
+expected_boq_eur: 9000.0
+reference_circuits:
+  - category: lighting
+    description: "General LED Lighting Zones (Day, Night, Garage/Exterior)"
+    count: 3
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: socket_ring
+    description: "BS 1363 32 A Ring Finals (Kitchen/Util, Living/Garage, Bedrooms)"
+    count: 3
+    breaker_in_a: 32
+    cable_mm2: 2.5
+  - category: split_ac
+    description: "Dedicated Split Inverter A/C Radial Circuits (Living + 3 Bedrooms)"
+    count: 4
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: cooker
+    description: "Electric Induction Hob / Cooker Radial (45 A DP Switch)"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0
+  - category: oven
+    description: "Dedicated Built-in Electric Oven Radial"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: appliance
+    description: "Dedicated Wet Appliances (Dishwasher + Washing Machine)"
+    count: 2
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: water_heater
+    description: "Cyprus Solar Thermal 3 kW Immersion Heater Booster (20 A DP Switch)"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5

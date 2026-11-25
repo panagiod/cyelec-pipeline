@@ -1,0 +1,61 @@
+plan_name: "Cyprus Commercial Office 450 m² (EAC CT Metering)"
+source_reference: >-
+  Licensed Cyprus ETEK engineer reference schedule for a 450 m² commercial office
+  requiring EAC 3-phase CT metering (> 100 A/phase)
+building_type: office
+expected_area_m2: 450.0
+expected_room_count: 5
+expected_supply_phases: 3
+expected_supply_tier: "3x200A (138.6 kVA - CT Metering)"
+expected_main_breaker_a: 200
+expected_diversified_kva: 125.0
+expected_max_phase_a: 180.0
+expected_imbalance_pct: 10.0
+expected_total_circuits: 18
+expected_sockets_min: 20
+expected_luminaires_min: 20
+expected_split_ac_count: 2
+expected_conduit_m: 680.0
+expected_boq_eur: 11200.0
+reference_circuits:
+  - category: lighting
+    description: "Commercial Office LED Lighting Zones"
+    count: 4
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: socket_ring
+    description: "Workstation & Office 32 A Socket Rings"
+    count: 4
+    breaker_in_a: 32
+    cable_mm2: 2.5
+  - category: split_ac
+    description: "Dedicated Split A/C Circuits (Server/Meeting)"
+    count: 2
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: cooker
+    description: "Office Kitchenette Hob"
+    count: 1
+    breaker_in_a: 32
+    cable_mm2: 6.0
+  - category: oven
+    description: "Office Kitchenette Oven"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: appliance
+    description: "Office Kitchenette Dishwasher"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: water_heater
+    description: "Office Instant/Storage Water Heater"
+    count: 1
+    breaker_in_a: 16
+    cable_mm2: 2.5
+  - category: other
+    description: "3-Phase HVAC VRF / Server UPS / Commercial Sub-Feeders"
+    count: 4
+    breaker_in_a: 50
+    cable_mm2: 16.0
+    is_three_phase: true
