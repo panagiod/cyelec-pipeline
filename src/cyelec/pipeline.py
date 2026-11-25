@@ -332,3 +332,52 @@ def export_phase2_deliverables(
     outputs["spatial_json"] = spatial_json
     outputs["layout_dxf"] = layout_dxf
     return outputs
+
+
+def export_phase3_deliverables(
+    result: Phase2DesignResult,
+    out_dir: Path,
+    *,
+    run_qet_subprocess: bool = False,
+) -> dict[str, Path]:
+    """Write complete EAC pack: Phase 1/2 outputs + SLD SVG/DXF/QET + cover HTML + manifest."""
+    from cyelec.render.eac_pack import (
+        render_eac_submission_pack_html,
+        write_deliverables_manifest,
+    )
+    from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
+    from cyelec.render.sld import export_sld_deliverables
+
+    outputs = export_phase2_deliverables(result, out_dir)
+
+    sld_svg_path = out_dir / "single_line_diagram.svg"
+    sld_dxf_path = out_dir / "single_line_diagram.dxf"
+    qet_path = out_dir / "single_line_diagram.qet"
+
+    export_sld_deliverables(result.design, sld_svg_path, sld_dxf_path)
+    export_qet_project(result.design, qet_path)
+
+    outputs["sld_svg"] = sld_svg_path
+    outputs["sld_dxf"] = sld_dxf_path
+    outputs["sld_qet"] = qet_path
+
+    if run_qet_subprocess:
+        qet_status = render_qet_via_subprocess(qet_path, out_dir / "qet_render", fmt="svg")
+        if qet_status.rendered_output_path is not None:
+            outputs["qet_rendered_svg"] = qet_status.rendered_output_path
+
+    pack_html_path = out_dir / "eac_submission_pack.html"
+    pack_html_path.write_text(
+        render_eac_submission_pack_html(
+            result,
+            sld_svg=sld_svg_path.read_text(encoding="utf-8"),
+            deliverables=outputs,
+        ),
+        encoding="utf-8",
+    )
+    outputs["eac_pack_html"] = pack_html_path
+
+    manifest_path = out_dir / "manifest.json"
+    write_deliverables_manifest(result, outputs, manifest_path)
+    outputs["manifest_json"] = manifest_path
+    return outputs

@@ -36,6 +36,13 @@ cyelec inspect-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf
 
 # Phase 2: End-to-end DXF -> Section 701 wet zones -> valid-wall placement -> NetworkX routing -> BS 7671/EAC deliverables + electrical_layout.dxf
 cyelec solve-dxf out/cyprus_3bed/cyprus_3bed_120m2.dxf --out-dir out/cyprus_3bed_phase2
+
+# Phase 3: Complete Cyprus EAC plan-approval pack (SLD SVG/DXF/QET + layout DXF w/ titleblock + Excel + Reports + SHA-256 manifest + ZIP)
+cyelec solve-eac out/cyprus_3bed/cyprus_3bed_120m2.dxf --out-dir out/cyprus_3bed_eac
+
+# Phase 3: Stateless Multi-Tenant EU B2B SaaS REST API (requires [api] extra)
+pip install -e ".[api]"
+cyelec serve --host 0.0.0.0 --port 8000
 ```
 
 ## Development Checks

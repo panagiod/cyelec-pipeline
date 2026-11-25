@@ -19,11 +19,12 @@ ELECTRICAL_LAYERS: dict[str, int] = {
     "E-AC": 5,             # Blue: Split A/C isolators
     "E-APPL": 210,         # Purple: Dedicated appliances
     "E-COND": 9,           # Light grey: Routed conduit paths
+    "E-TITLE": 7,          # White/Black: EAC / ETEK CAD title block & legend
 }
 
 
 def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
-    """Render architectural floorplan plus Phase 2 electrical layers into an R2018 DXF Drawing."""
+    """Render architectural floorplan plus Phase 2/3 electrical layers and EAC/ETEK title block."""
     doc = render_building_to_dxf(result.design.building)
 
     for layer_name, color_idx in ELECTRICAL_LAYERS.items():
@@ -108,6 +109,52 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
 
         lbl = msp.add_text(tag, dxfattribs={"layer": layer, "height": 75.0})
         lbl.set_placement((x + 110.0, y + 40.0))
+
+    # 4. EAC / ETEK Plan-Approval Drawing Border, Title Block & Symbol Legend
+    all_pts = [p for r in result.design.building.rooms for p in r.polygon_mm]
+    minx = min(p.x_mm for p in all_pts) - 1000.0
+    maxx = max(p.x_mm for p in all_pts) + 3800.0
+    miny = min(p.y_mm for p in all_pts) - 1800.0
+    maxy = max(p.y_mm for p in all_pts) + 1000.0
+
+    msp.add_lwpolyline(
+        [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+    # Right-side legend & EAC/ETEK title panel
+    panel_x = maxx - 3200.0
+    msp.add_line((panel_x, miny), (panel_x, maxy), dxfattribs={"layer": "E-TITLE"})
+
+    eac = result.design.eac_compliance
+    legend_lines = [
+        ("EAC / ETEK ELECTRICAL LAYOUT", 200.0),
+        (f"PROJECT: {result.design.building.project_name[:28]}", 130.0),
+        (f"PROFILE: {eac.eac_profile.value}", 120.0),
+        (f"SUPPLY: {eac.recommended_supply_tier}", 120.0),
+        (
+            f"EARTHING: {result.design.earthing_system.value} "
+            f"({result.design.ze_or_ra_ohm:.1f} OHM)",
+            120.0,
+        ),
+        (f"CONDUIT: {spatial.total_conduit_m:.1f} m | DEV: {len(spatial.devices)}", 120.0),
+        ("LEGEND:", 150.0),
+        ("  E-LITE : CEILING LUMINAIRE", 110.0),
+        ("  E-SWIT : LIGHT SWITCH (1.2m)", 110.0),
+        ("  E-SOCK : TWIN 13A SOCKET", 110.0),
+        ("  E-AC   : SPLIT A/C ISOLATOR", 110.0),
+        ("  E-APPL : DEDICATED APPLIANCE", 110.0),
+        ("  E-COND : ROUTED PVC CONDUIT", 110.0),
+        (f"  E-WETZONE-EXCL : {eac.bathroom_socket_exclusion_m:.1f}m EXCL", 110.0),
+        ("ETEK SIGN-OFF REQUIRED", 140.0),
+        (f"SHA256: {result.design.provenance.input_sha256[:16]}", 105.0),
+    ]
+    cur_y = maxy - 450.0
+    for text, h in legend_lines:
+        msp.add_text(
+            text, dxfattribs={"layer": "E-TITLE", "height": h}
+        ).set_placement((panel_x + 150.0, cur_y))
+        cur_y -= max(320.0, h * 2.4)
 
     return doc
 

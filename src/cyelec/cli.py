@@ -10,13 +10,23 @@ import typer
 from cyelec import __version__
 from cyelec.ingest.dxf_ingest import ingest_dxf
 from cyelec.models.building import BuildingType
-from cyelec.models.electrical import DesignOverrides, EacProfile, EarthingSystem, ReviewSeverity
+from cyelec.models.electrical import (
+    DesignOverrides,
+    EacProfile,
+    EarthingSystem,
+    ElectricalDesignResult,
+    ReviewSeverity,
+)
 from cyelec.pipeline import (
     export_phase1_deliverables,
     export_phase2_deliverables,
+    export_phase3_deliverables,
     run_phase1_pipeline,
     run_phase2_pipeline,
 )
+from cyelec.render.eac_pack import build_submission_zip
+from cyelec.render.qet_bridge import export_qet_project
+from cyelec.render.sld import export_sld_deliverables
 from cyelec.standards_loader import load_standards, resolve_standards_dir
 from cyelec.synth.sample_plan import generate_cyprus_3bed_dxf
 
@@ -252,6 +262,113 @@ def solve_dxf(
     typer.echo(f"Review Flags: {blockers} blockers, {warnings} warnings, {infos} info")
     for key, path in outputs.items():
         typer.echo(f"{key.upper():<12}: {path}")
+
+
+@app.command("solve-eac")
+def solve_eac(
+    input_path: Annotated[
+        Path,
+        typer.Argument(help="Input architectural .dxf (or .ifc) floorplan."),
+    ],
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output directory for complete EAC submission pack."),
+    ] = Path("out/eac_pack"),
+    profile: Annotated[
+        EacProfile,
+        typer.Option("--profile", help="Cyprus EAC BS 7671 edition profile."),
+    ] = EacProfile.EAC_18TH_A2,
+    earthing: Annotated[
+        EarthingSystem,
+        typer.Option("--earthing", help="Site earthing system (Cyprus default: TT)."),
+    ] = EarthingSystem.TT,
+    building_type: Annotated[
+        BuildingType | None,
+        typer.Option("--building-type", help="Optional EAC building type override."),
+    ] = None,
+    ambient_c: Annotated[
+        int | None,
+        typer.Option("--ambient", help="Optional global ambient temperature override (°C)."),
+    ] = None,
+    pv_kva: Annotated[
+        float,
+        typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
+    ] = 0.0,
+    zip_bundle: Annotated[
+        bool,
+        typer.Option("--zip/--no-zip", help="Also write eac_submission_pack.zip archive."),
+    ] = True,
+    qet_subprocess: Annotated[
+        bool,
+        typer.Option(
+            "--qet-subprocess/--no-qet-subprocess",
+            help="Invoke optional isolated GPLv2+ QElectroTech CLI subprocess if installed.",
+        ),
+    ] = False,
+) -> None:
+    """Run full Phase 0-3 pipeline and generate complete Cyprus EAC plan-approval pack."""
+    overrides = DesignOverrides(
+        eac_profile=profile,
+        earthing_system=earthing,
+        ambient_temp_c=ambient_c,
+        pv_capacity_kva=pv_kva,
+    )
+    p2 = run_phase2_pipeline(input_path, overrides=overrides, building_type=building_type)
+    outputs = export_phase3_deliverables(p2, out_dir, run_qet_subprocess=qet_subprocess)
+    if zip_bundle:
+        outputs["zip_bundle"] = build_submission_zip(
+            outputs, out_dir / "eac_submission_pack.zip"
+        )
+
+    res = p2.design
+    sp = p2.spatial
+    typer.echo(
+        f"EAC Pack Complete: {res.building.project_name} | "
+        f"Supply: {res.eac_compliance.recommended_supply_tier} | "
+        f"Conduit: {sp.total_conduit_m:.1f} m | Artifacts: {len(outputs)}"
+    )
+    for key, path in sorted(outputs.items()):
+        typer.echo(f"  {key.upper():<16}: {path}")
+
+
+@app.command("export-sld")
+def export_sld(
+    design_json: Annotated[
+        Path,
+        typer.Argument(help="Path to a saved design_result.json snapshot."),
+    ],
+    out_dir: Annotated[
+        Path,
+        typer.Option("--out-dir", "-o", help="Output directory for SLD SVG, DXF, and QET files."),
+    ] = Path("out/sld"),
+) -> None:
+    """Export Single-Line Diagram (.svg, .dxf, .qet) from any saved design_result.json."""
+    design = ElectricalDesignResult.model_validate_json(design_json.read_text(encoding="utf-8"))
+    svg_path, dxf_path = export_sld_deliverables(
+        design,
+        out_dir / "single_line_diagram.svg",
+        out_dir / "single_line_diagram.dxf",
+    )
+    qet_path = export_qet_project(design, out_dir / "single_line_diagram.qet")
+    typer.echo(f"SLD SVG: {svg_path}")
+    typer.echo(f"SLD DXF: {dxf_path}")
+    typer.echo(f"SLD QET: {qet_path}")
+
+
+@app.command("serve")
+def serve(
+    host: Annotated[str, typer.Option("--host", help="Bind host address.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Bind port.")] = 8000,
+) -> None:
+    """Start the stateless Multi-Tenant EU B2B SaaS FastAPI service."""
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise typer.BadParameter(
+            "API server requires optional 'api' extra: pip install 'cyelec-pipeline[api]'"
+        ) from exc
+
+    uvicorn.run("cyelec.api.app:app", host=host, port=port)
 
 
 if __name__ == "__main__":

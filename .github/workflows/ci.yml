@@ -22,7 +22,7 @@ jobs:
       - name: Install package and dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[api,dev]"
 
       - name: Lint with ruff
         run: ruff check src tests
@@ -40,3 +40,5 @@ jobs:
           cyelec solve-synth --out-dir /tmp/cyelec_ci_out
           cyelec inspect-dxf /tmp/cyelec_ci_out/cyprus_3bed_120m2.dxf
           cyelec solve-dxf /tmp/cyelec_ci_out/cyprus_3bed_120m2.dxf --out-dir /tmp/cyelec_ci_p2
+          cyelec solve-eac /tmp/cyelec_ci_out/cyprus_3bed_120m2.dxf --out-dir /tmp/cyelec_ci_p3
+          cyelec export-sld /tmp/cyelec_ci_p3/design_result.json --out-dir /tmp/cyelec_ci_sld
