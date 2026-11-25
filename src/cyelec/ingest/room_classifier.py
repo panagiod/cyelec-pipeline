@@ -13,6 +13,11 @@ from cyelec.standards_loader import RoomTemplatesStandards, normalize_label
 _MTEXT_CODE_RE = re.compile(r"\\P|\\[A-Za-z][^;]*;|[{}]")
 _AUTOCAD_CTRL_RE = re.compile(r"%%[A-Za-z0-9]")
 _AREA_PAREN_RE = re.compile(r"\([^)]*m[²2][^)]*\)", flags=re.IGNORECASE)
+_INLINE_DIM_RE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:m[²2]|mp|sq\.?\s*ft|sf)\b|"
+    r"\b\d+['′]-?\d*(?:\.\d+)?[\"″]?\s*[x×]\s*\d+['′]-?\d*(?:\.\d+)?[\"″]?",
+    flags=re.IGNORECASE,
+)
 _SEP_SPLIT_RE = re.compile(r"[/|\n]+")
 
 
@@ -42,10 +47,11 @@ class RoomClassificationResult:
 
 
 def clean_room_label(raw_label: str) -> str:
-    """Strip DXF MTEXT/AutoCAD %%u codes and area annotations while preserving EN/EL text."""
+    """Strip DXF MTEXT/AutoCAD %%u codes and area/dimension annotations while keeping EN/EL text."""
     text = _MTEXT_CODE_RE.sub(" ", raw_label)
     text = _AUTOCAD_CTRL_RE.sub("", text)
     text = _AREA_PAREN_RE.sub(" ", text)
+    text = _INLINE_DIM_RE.sub(" ", text)
     return " ".join(text.split()).strip(" -–—:/|")
 
 

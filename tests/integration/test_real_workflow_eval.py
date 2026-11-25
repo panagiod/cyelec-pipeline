@@ -203,3 +203,91 @@ def test_cli_eval_compare_end_to_end(tmp_path: Path) -> None:
     assert (out_dir / "evaluation_report.html").exists()
     assert (out_dir / "evaluation_report.md").exists()
     assert (out_dir / "evaluation_report.json").exists()
+
+
+def test_dimension_stripping_and_hall_precedence() -> None:
+    """Trailing area/dimension suffixes and 'BEDROOM HALL' must classify accurately."""
+    bundle = load_standards()
+    assert (
+        classify_room_label("MAIN OFFICE 44.9 mp", bundle.room_templates).normalized_type
+        == RoomType.LIVING_ROOM
+    )
+    assert (
+        classify_room_label("BEDROOM HALL", bundle.room_templates).normalized_type
+        == RoomType.CORRIDOR
+    )
+    assert (
+        classify_room_label("KITCHEN + LIVING", bundle.room_templates).normalized_type
+        == RoomType.KITCHEN_LIVING
+    )
+    assert (
+        classify_room_label("PRIMARY BEDROOM 13'-11\" x 12'-1\"", bundle.room_templates)
+        .normalized_type
+        == RoomType.MASTER_BEDROOM
+    )
+
+
+def test_hybrid_partial_aroom_and_insert_room_tag(tmp_path: Path) -> None:
+    """Partial A-ROOM drawings must merge wall-enclosed rooms and read RM-TAG INSERT attributes."""
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+
+    # Room 1 (left, 0..4000 x 0..4000) has an explicit A-ROOM outline;
+    # Room 2 (right, 4000..8000 x 0..4000) only exists via A-WALL lines + RM-TAG INSERT block.
+    msp.add_lwpolyline(
+        [(0, 0), (4000, 0), (4000, 4000), (0, 4000)],
+        close=True,
+        dxfattribs={"layer": "A-ROOM"},
+    )
+    msp.add_text("MAJLIS", dxfattribs={"layer": "A-ROOM-NAME", "insert": (2000, 2000)})
+
+    # Full perimeter + interior partition walls enclosing both rooms
+    for a, b in [
+        ((0, 0), (8000, 0)),
+        ((8000, 0), (8000, 4000)),
+        ((8000, 4000), (0, 4000)),
+        ((0, 4000), (0, 0)),
+        ((4000, 0), (4000, 4000)),
+    ]:
+        msp.add_line(a, b, dxfattribs={"layer": "A-WALL"})
+
+    blk = doc.blocks.new("RM-TAG")
+    blk.add_attdef("NAME", insert=(0, 0))
+    ins = msp.add_blockref("RM-TAG", insert=(6000, 2000), dxfattribs={"layer": "A-ROOM-NAME"})
+    ins.add_attrib("NAME", "Guest bedroom", insert=(6000, 2000))
+
+    dxf_path = tmp_path / "hybrid_villa.dxf"
+    doc.saveas(dxf_path)
+
+    model, flags = ingest_dxf(dxf_path, building_type=BuildingType.INDEPENDENT_HOUSE)
+    codes = {f.code for f in flags}
+    assert "ROOMS_HYBRID_AUGMENTED_FROM_WALLS" in codes
+    assert len(model.rooms) == 2
+    assert {r.normalized_type for r in model.rooms} == {RoomType.LIVING_ROOM, RoomType.BEDROOM}
+
+
+def test_layer0_wall_fallback(tmp_path: Path) -> None:
+    """Homeowner/legacy DXFs drawing walls purely on layer '0' must ingest via fallback."""
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+
+    for a, b in [
+        ((0, 0), (6000, 0)),
+        ((6000, 0), (6000, 4000)),
+        ((6000, 4000), (0, 4000)),
+        ((0, 4000), (0, 0)),
+    ]:
+        msp.add_line(a, b, dxfattribs={"layer": "0"})
+    msp.add_text("LIVING ROOM", dxfattribs={"layer": "room_names", "insert": (3000, 2000)})
+
+    dxf_path = tmp_path / "layer0_home.dxf"
+    doc.saveas(dxf_path)
+
+    model, flags = ingest_dxf(dxf_path, building_type=BuildingType.INDEPENDENT_HOUSE)
+    assert "WALLS_INFERRED_FROM_LAYER_0" in {f.code for f in flags}
+    assert len(model.rooms) == 1
+    assert model.rooms[0].normalized_type == RoomType.LIVING_ROOM
+    assert 23.0 <= model.total_floor_area_m2 <= 25.0
+

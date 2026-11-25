@@ -55,8 +55,8 @@ _WALL_LAYER_TOKENS = ("A-WALL", "WALL", "ΤΟΙΧ")
 _DOOR_LAYER_TOKENS = ("A-DOOR", "DOOR", "OPENING", "ΠΟΡΤ")
 _WIND_LAYER_TOKENS = ("A-WIND", "WIND", "GLAZ", "ΠΑΡΑΘ")
 _FIXT_LAYER_TOKENS = ("A-FIXT", "FIXT", "SANIT", "PLUMB", "BATH", "ΕΙΔΗ")
-_TEXT_LAYER_TOKENS = ("A-TEXT", "TEXT", "LABEL", "ANNO", "NOTE", "ROOM-TXT")
-_DB_LAYER_TOKENS = ("A-DB", "E-DB", "DB", "PANEL", "ΠΙΝΑΚ")
+_TEXT_LAYER_TOKENS = ("A-TEXT", "TEXT", "LABEL", "ANNO", "NOTE", "ROOM-TXT", "NAME", "IDEN")
+_DB_LAYER_TOKENS = ("A-DB", "E-DB", "E-BOARD", "BOARD", "DB", "PANEL", "ΠΙΝΑΚ")
 
 _LayerRole = Literal["rooms", "walls", "doors", "windows", "fixtures", "text", "db", "unknown"]
 
@@ -481,10 +481,26 @@ def ingest_dxf(
     fixture_polys: list[tuple[Polygon, str | None]] = []
     fixture_texts: list[tuple[str, Point]] = []
     wall_lines: list[tuple[Point2D, Point2D]] = []
+    layer0_lines: list[tuple[Point2D, Point2D]] = []
     door_arcs: list[tuple[Point2D, float, float, float]] = []
     door_leaves: list[tuple[Point2D, Point2D]] = []
     window_lines: list[tuple[Point2D, Point2D]] = []
     db_points: list[tuple[str, Point2D]] = []
+
+    # Extract room label attributes from INSERT blocks (e.g. RM-TAG with NAME='Guest bedroom')
+    for raw_ent in msp:
+        if raw_ent.dxftype() == "INSERT":
+            raw_layer = str(getattr(raw_ent.dxf, "layer", "0") or "0")
+            if _role_matches(raw_layer, "text", layer_mapping):
+                attribs = getattr(raw_ent, "attribs", None) or []
+                for att in attribs:
+                    tag_up = str(getattr(att.dxf, "tag", "") or "").upper()
+                    val = str(getattr(att.dxf, "text", "") or "").strip()
+                    if val and tag_up in ("NAME", "ROOM", "ROOM_NAME", "LABEL", "TITLE"):
+                        ins = raw_ent.dxf.insert
+                        text_labels.append(
+                            (val, Point(float(ins.x) * scale, float(ins.y) * scale), raw_layer)
+                        )
 
     for ent, layer, block_hint in resolved_entities:
         dtype = ent.dxftype()
@@ -603,6 +619,35 @@ def ingest_dxf(
                 if txt is not None:
                     fixture_texts.append((txt[0], Point(txt[1])))
 
+        # Layer "0" fallback lines (used only when dedicated wall/room layers are absent)
+        elif layer == "0" and not block_hint:
+            if dtype == "LINE":
+                layer0_lines.append(
+                    (
+                        Point2D(
+                            x_mm=float(ent.dxf.start.x) * scale,
+                            y_mm=float(ent.dxf.start.y) * scale,
+                        ),
+                        Point2D(
+                            x_mm=float(ent.dxf.end.x) * scale,
+                            y_mm=float(ent.dxf.end.y) * scale,
+                        ),
+                    )
+                )
+            elif isinstance(ent, LWPolyline):
+                pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
+                for a, b in zip(pts, pts[1:], strict=False):
+                    layer0_lines.append(
+                        (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
+                    )
+                if ent.closed and len(pts) >= 3:
+                    layer0_lines.append(
+                        (
+                            Point2D(x_mm=pts[-1][0], y_mm=pts[-1][1]),
+                            Point2D(x_mm=pts[0][0], y_mm=pts[0][1]),
+                        )
+                    )
+
         # Architectural text labels
         if _role_matches(layer, "text", layer_mapping) or (
             dtype in ("TEXT", "MTEXT")
@@ -613,7 +658,23 @@ def ingest_dxf(
             if txt is not None:
                 text_labels.append((txt[0], Point(txt[1]), layer))
 
-    # Wall-to-room polygonization fallback when A-ROOM polylines are absent
+    # Fallback: drawings with walls drawn purely on layer "0" (legacy homeowner/AutoCAD plans)
+    if not room_raw_polys and not wall_lines and layer0_lines:
+        wall_lines = layer0_lines
+        flags.append(
+            ReviewFlag(
+                code="WALLS_INFERRED_FROM_LAYER_0",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"No dedicated wall or room layer found; inferred {len(wall_lines)} wall "
+                    "segment(s) from default layer '0'. Verify room geometry or supply "
+                    "DxfLayerMapping."
+                ),
+            )
+        )
+
+    # Wall-to-room polygonization fallback OR hybrid merge for partial A-ROOM drawings
     if not room_raw_polys and wall_lines:
         room_raw_polys = _polygonize_rooms_from_walls(
             wall_lines, door_arcs, window_lines, door_leaves=door_leaves
@@ -628,6 +689,35 @@ def ingest_dxf(
                         f"No closed room polylines found; automatically derived "
                         f"{len(room_raw_polys)} room polygon(s) from wall/door geometry. "
                         "Verify room boundaries."
+                    ),
+                )
+            )
+    elif room_raw_polys and wall_lines:
+        # Hybrid merge: recover enclosed rooms that lack explicit A-ROOM polylines
+        wall_derived = _polygonize_rooms_from_walls(
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves
+        )
+        added_hybrid = 0
+        for cand in wall_derived:
+            if cand.area < 1_000_000.0:
+                continue
+            overlaps_existing = any(
+                (cand.intersection(ex).area / max(cand.area, 1.0)) >= 0.25
+                for ex in room_raw_polys
+            )
+            if not overlaps_existing:
+                room_raw_polys.append(cand)
+                added_hybrid += 1
+        if added_hybrid > 0:
+            flags.append(
+                ReviewFlag(
+                    code="ROOMS_HYBRID_AUGMENTED_FROM_WALLS",
+                    severity=ReviewSeverity.INFO,
+                    category="geometry",
+                    message=(
+                        f"Augmented {len(room_raw_polys) - added_hybrid} explicit room "
+                        f"polyline(s) with {added_hybrid} additional wall-enclosed room(s) "
+                        "lacking A-ROOM outlines."
                     ),
                 )
             )
