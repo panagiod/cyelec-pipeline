@@ -50,6 +50,23 @@ jobs:
       - name: Configure Docker for EU Artifact Registry
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
+      - name: Enforce Artifact Registry cleanup policy (keep latest 3 images)
+        run: |
+          gcloud projects add-iam-policy-binding "${{ vars.GCP_PROJECT_ID }}" \
+            --member="serviceAccount:${{ vars.GCP_DEPLOYER_SA }}" \
+            --role="roles/artifactregistry.repoAdmin" \
+            --quiet >/dev/null
+          for attempt in 1 2 3 4; do
+            if gcloud artifacts repositories set-cleanup-policies "${AR_REPO}" \
+              --project="${{ vars.GCP_PROJECT_ID }}" \
+              --location="${GCP_REGION}" \
+              --policy=deploy/gcp/ar_cleanup_policy.json; then
+              break
+            fi
+            echo "Waiting for IAM propagation (attempt ${attempt}/4)..."
+            sleep 10
+          done
+
       - name: Build and push immutable SHA-pinned container image
         run: |
           docker build -t "${{ steps.target.outputs.image_uri }}" .

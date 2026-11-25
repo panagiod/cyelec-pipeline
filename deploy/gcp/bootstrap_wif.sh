@@ -73,7 +73,7 @@ for ROLE in \
   roles/run.admin \
   roles/datastore.owner \
   roles/storage.admin \
-  roles/artifactregistry.writer \
+  roles/artifactregistry.repoAdmin \
   roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
   roles/resourcemanager.projectIamAdmin \
