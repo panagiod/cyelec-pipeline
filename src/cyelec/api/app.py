@@ -22,7 +22,12 @@ from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
 from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf, inspect_dxf_layers
 from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
-from cyelec.models.electrical import DesignOverrides, ReportLanguage, TenantBranding
+from cyelec.models.electrical import (
+    BoqRateOverrides,
+    DesignOverrides,
+    ReportLanguage,
+    TenantBranding,
+)
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
 from cyelec.render.eac_pack import build_submission_zip
@@ -96,13 +101,14 @@ class DxfLayersResponse(BaseModel):
 
 
 class TenantUpdateRequest(BaseModel):
-    """Update tenant consulting practice branding and default report language."""
+    """Update tenant consulting practice branding, language, and custom BOQ rate card."""
 
     model_config = ConfigDict(extra="forbid")
 
     display_name: str | None = None
     report_language: ReportLanguage | None = None
     branding: TenantBranding | None = None
+    boq_rate_overrides: BoqRateOverrides | None = None
 
 
 class ApiKeyIssuedResponse(BaseModel):
@@ -277,14 +283,19 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         tenant_id: str,
         overrides: DesignOverrides | None,
     ) -> DesignOverrides | None:
-        """Apply saved tenant branding/language defaults when not explicitly overridden."""
+        """Apply saved tenant branding, language, and BOQ rate defaults unless overridden."""
         profile = store.get_or_create_tenant(tenant_id)
-        if profile.branding is None and profile.report_language == ReportLanguage.EN:
+        if (
+            profile.branding is None
+            and profile.report_language == ReportLanguage.EN
+            and profile.boq_rate_overrides is None
+        ):
             return overrides
         if overrides is None:
             return DesignOverrides(
                 report_language=profile.report_language,
                 branding=profile.branding,
+                boq_rate_overrides=profile.boq_rate_overrides,
             )
         updates: dict[str, object] = {}
         if overrides.branding is None and profile.branding is not None:
@@ -294,6 +305,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             and profile.report_language != ReportLanguage.EN
         ):
             updates["report_language"] = profile.report_language
+        if overrides.boq_rate_overrides is None and profile.boq_rate_overrides is not None:
+            updates["boq_rate_overrides"] = profile.boq_rate_overrides
         return overrides.model_copy(update=updates) if updates else overrides
 
     @api.middleware("http")
@@ -386,7 +399,8 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     ) -> SolveResponseEnvelope:
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
-        p2 = run_phase2_pipeline(payload.building, overrides=payload.overrides)
+        eff_overrides = _merge_tenant_defaults(tid, payload.overrides)
+        p2 = run_phase2_pipeline(payload.building, overrides=eff_overrides)
         store.record_usage(
             tid,
             "solve_building",
@@ -404,8 +418,9 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     ) -> SolvePreviewEnvelope:
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
+        eff_overrides = _merge_tenant_defaults(tid, overrides)
         building = generate_benchmark_dxf(template)
-        p2 = run_phase2_pipeline(building, overrides=overrides)
+        p2 = run_phase2_pipeline(building, overrides=eff_overrides)
         store.record_usage(
             tid,
             "solve_benchmark",
@@ -428,10 +443,11 @@ def create_app(db_path: Path | None = None) -> FastAPI:
     ) -> Response:
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
+        eff_overrides = _merge_tenant_defaults(tid, overrides)
         with tempfile.TemporaryDirectory(prefix="cyelec_bench_") as tmp_dir:
             tmp = Path(tmp_dir)
             building = generate_benchmark_dxf(template, out_dxf=tmp / f"{template.value}.dxf")
-            p2 = run_phase2_pipeline(building, overrides=overrides)
+            p2 = run_phase2_pipeline(building, overrides=eff_overrides)
             outputs = export_phase3_deliverables(p2, tmp / "pack")
             zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
             zip_bytes = zip_path.read_bytes()
@@ -492,7 +508,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
-        overrides = _parse_overrides_json(overrides_json)
+        overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
         try:
             p2 = await anyio.to_thread.run_sync(
@@ -548,7 +564,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
-        overrides = _parse_overrides_json(overrides_json)
+        overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
         try:
             p2, zip_bytes = await anyio.to_thread.run_sync(
@@ -682,6 +698,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             display_name=payload.display_name,
             report_language=payload.report_language,
             branding=payload.branding,
+            boq_rate_overrides=payload.boq_rate_overrides,
         )
 
     @api.post("/v1/tenants/me/api-key", response_model=ApiKeyIssuedResponse)

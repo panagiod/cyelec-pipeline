@@ -266,7 +266,12 @@ def run_phase1_pipeline(
         has_blockers=has_blockers,
         etek_signoff_required=True,
     )
-    boq = generate_boq(result, standards)
+    boq = generate_boq(
+        result,
+        standards,
+        rate_overrides=overrides.boq_rate_overrides if overrides is not None else None,
+        tender_blank_rates=overrides.tender_boq_blank_rates if overrides is not None else False,
+    )
     return result.model_copy(update={"boq": boq})
 
 
@@ -424,8 +429,15 @@ def run_phase2_pipeline(
         flags=spatial_flags,
     )
 
-    # Refresh BOQ with exact placed spatial accessory counts
-    design = design.model_copy(update={"boq": generate_boq(design, standards, spatial=spatial)})
+    # Refresh BOQ with exact placed spatial accessory counts & custom/tender rate settings
+    refreshed_boq = generate_boq(
+        design,
+        standards,
+        spatial=spatial,
+        rate_overrides=overrides.boq_rate_overrides if overrides is not None else None,
+        tender_blank_rates=overrides.tender_boq_blank_rates if overrides is not None else False,
+    )
+    design = design.model_copy(update={"boq": refreshed_boq})
 
     return Phase2DesignResult(design=design, spatial=spatial)
 

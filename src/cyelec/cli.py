@@ -403,6 +403,13 @@ def solve_eac(
             help="Invoke optional isolated GPLv2+ QElectroTech CLI subprocess if installed.",
         ),
     ] = False,
+    tender_boq: Annotated[
+        bool,
+        typer.Option(
+            "--tender-boq/--priced-boq",
+            help="Leave BOQ unit rates blank with live auto-calc formulas for contractor tenders.",
+        ),
+    ] = False,
 ) -> None:
     """Run full Phase 0-3 pipeline and generate complete Cyprus EAC plan-approval pack."""
     branding = (
@@ -417,6 +424,7 @@ def solve_eac(
         pv_capacity_kva=pv_kva,
         report_language=language,
         branding=branding,
+        tender_boq_blank_rates=tender_boq,
     )
     mapping = _load_layer_mapping(layer_mapping)
     p2 = run_phase2_pipeline(
@@ -438,7 +446,12 @@ def solve_eac(
 
     res = p2.design
     sp = p2.spatial
-    boq_msg = f" | BOQ: €{res.boq.grand_total_eur:,.2f}" if res.boq is not None else ""
+    if res.boq is not None and res.boq.is_tender_blank_rates:
+        boq_msg = " | BOQ: TENDER (UNPRICED)"
+    elif res.boq is not None:
+        boq_msg = f" | BOQ: €{res.boq.grand_total_eur:,.2f}"
+    else:
+        boq_msg = ""
     typer.echo(
         f"EAC Pack Complete: {res.building.project_name} | "
         f"Supply: {res.eac_compliance.recommended_supply_tier} | "
@@ -502,6 +515,13 @@ def solve_multifloor(
         bool,
         typer.Option("--zip/--no-zip", help="Also write eac_submission_pack.zip archive."),
     ] = True,
+    tender_boq: Annotated[
+        bool,
+        typer.Option(
+            "--tender-boq/--priced-boq",
+            help="Leave BOQ unit rates blank with live auto-calc formulas for contractor tenders.",
+        ),
+    ] = False,
 ) -> None:
     """Combine multiple architectural floor DXFs into MDB -> DB-<FLOOR> EAC deliverables."""
     floor_files: list[tuple[str, Path]] = []
@@ -524,6 +544,7 @@ def solve_multifloor(
         pv_capacity_kva=pv_kva,
         report_language=language,
         branding=branding,
+        tender_boq_blank_rates=tender_boq,
     )
     mapping = _load_layer_mapping(layer_mapping)
     model, mf_flags = ingest_multi_floor_dxf(

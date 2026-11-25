@@ -17,6 +17,7 @@ from cyelec.models.building import (
 )
 from cyelec.models.electrical import (
     BoqItem,
+    BoqRateOverrides,
     BoqSummary,
     BreakerCurve,
     CircuitCategory,
@@ -50,6 +51,7 @@ from cyelec.models.spatial import (
 
 __all__ = [
     "BoqItem",
+    "BoqRateOverrides",
     "BoqSummary",
     "BreakerCurve",
     "BuildingModel",

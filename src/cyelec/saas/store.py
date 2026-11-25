@@ -12,7 +12,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyelec.models.electrical import DesignOverrides, ReportLanguage, TenantBranding
+from cyelec.models.electrical import (
+    BoqRateOverrides,
+    DesignOverrides,
+    ReportLanguage,
+    TenantBranding,
+)
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
 
@@ -31,6 +36,7 @@ class TenantProfile(BaseModel):
     plan: str = "pro_cyprus"
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
+    boq_rate_overrides: BoqRateOverrides | None = None
     has_api_key: bool = False
     created_at: str
     updated_at: str
@@ -122,6 +128,7 @@ class WorkspaceStore:
                     plan TEXT NOT NULL DEFAULT 'pro_cyprus',
                     report_language TEXT NOT NULL DEFAULT 'en',
                     branding_json TEXT,
+                    boq_rate_overrides_json TEXT,
                     api_key_prefix TEXT,
                     api_key_hash TEXT,
                     api_key_salt TEXT,
@@ -172,13 +179,15 @@ class WorkspaceStore:
                 CREATE INDEX IF NOT EXISTS idx_usage_tenant ON usage_events(tenant_id);
                 """
             )
-            # Safe idempotent migration for pre-existing DBs missing api_key_prefix
+            # Safe idempotent migrations for pre-existing SQLite databases
             cols = {
                 str(r["name"])
                 for r in self._conn.execute("PRAGMA table_info(tenants)").fetchall()
             }
             if "api_key_prefix" not in cols:
                 self._conn.execute("ALTER TABLE tenants ADD COLUMN api_key_prefix TEXT")
+            if "boq_rate_overrides_json" not in cols:
+                self._conn.execute("ALTER TABLE tenants ADD COLUMN boq_rate_overrides_json TEXT")
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tenants_key_prefix ON tenants(api_key_prefix)"
             )
@@ -219,12 +228,18 @@ class WorkspaceStore:
             if row["branding_json"]
             else None
         )
+        boq_rates = (
+            BoqRateOverrides.model_validate_json(str(row["boq_rate_overrides_json"]))
+            if row["boq_rate_overrides_json"]
+            else None
+        )
         return TenantProfile(
             tenant_id=str(row["tenant_id"]),
             display_name=str(row["display_name"]),
             plan=str(row["plan"]),
             report_language=ReportLanguage(str(row["report_language"])),
             branding=branding,
+            boq_rate_overrides=boq_rates,
             has_api_key=bool(row["api_key_hash"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
@@ -237,21 +252,27 @@ class WorkspaceStore:
         display_name: str | None = None,
         report_language: ReportLanguage | None = None,
         branding: TenantBranding | None = None,
+        boq_rate_overrides: BoqRateOverrides | None = None,
     ) -> TenantProfile:
         current = self.get_or_create_tenant(tenant_id)
         new_name = display_name if display_name is not None else current.display_name
         new_lang = report_language if report_language is not None else current.report_language
         new_branding = branding if branding is not None else current.branding
+        new_boq = (
+            boq_rate_overrides if boq_rate_overrides is not None else current.boq_rate_overrides
+        )
         b_json = new_branding.model_dump_json() if new_branding is not None else None
+        boq_json = new_boq.model_dump_json() if new_boq is not None else None
         now = _utc_now()
         with self._lock:
             self._conn.execute(
                 """
                 UPDATE tenants
-                SET display_name = ?, report_language = ?, branding_json = ?, updated_at = ?
+                SET display_name = ?, report_language = ?, branding_json = ?,
+                    boq_rate_overrides_json = ?, updated_at = ?
                 WHERE tenant_id = ?
                 """,
-                (new_name, new_lang.value, b_json, now, tenant_id),
+                (new_name, new_lang.value, b_json, boq_json, now, tenant_id),
             )
             self._conn.commit()
         return self.get_or_create_tenant(tenant_id)

@@ -126,6 +126,18 @@ class TenantBranding(BaseModel):
     logo_data_uri: str | None = None
 
 
+class BoqRateOverrides(BaseModel):
+    """Per-tenant or per-project custom EUR unit rate overrides for the Cyprus BOQ."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cable_eur_per_m: dict[str, float] = Field(default_factory=dict)
+    conduit_eur_per_m: dict[str, float] = Field(default_factory=dict)
+    switchgear_eur: dict[str, float] = Field(default_factory=dict)
+    accessories_eur: dict[str, float] = Field(default_factory=dict)
+    vat_rate: float | None = Field(default=None, ge=0.0, le=0.5)
+
+
 class BoqItem(BaseModel):
     """Single itemized Bill of Quantities line item in EUR."""
 
@@ -149,6 +161,7 @@ class BoqSummary(BaseModel):
     currency: str = "EUR"
     vat_rate: float = 0.19
     rates_version: str
+    is_tender_blank_rates: bool = False
     items: list[BoqItem] = Field(default_factory=list)
     subtotal_eur: float = Field(ge=0.0)
     vat_eur: float = Field(ge=0.0)
@@ -171,6 +184,8 @@ class DesignOverrides(BaseModel):
     db_location_override_mm: Point2D | None = None
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
+    boq_rate_overrides: BoqRateOverrides | None = None
+    tender_boq_blank_rates: bool = False
     notes: str | None = None
 
 

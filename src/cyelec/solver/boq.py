@@ -6,13 +6,56 @@ from collections import Counter, defaultdict
 
 from cyelec.models.electrical import (
     BoqItem,
+    BoqRateOverrides,
     BoqSummary,
     CircuitCategory,
     EarthingSystem,
     ElectricalDesignResult,
 )
 from cyelec.models.spatial import DeviceType, SpatialLayoutResult
-from cyelec.standards_loader import StandardsBundle
+from cyelec.standards_loader import CyprusBoqRates, StandardsBundle
+
+
+def _merge_boq_rates(
+    base: CyprusBoqRates,
+    overrides: BoqRateOverrides | None,
+) -> tuple[CyprusBoqRates, bool]:
+    """Merge per-tenant or per-project custom EUR rates onto the base Cyprus BOQ table."""
+    if overrides is None:
+        return base, False
+    has_any = bool(
+        overrides.cable_eur_per_m
+        or overrides.conduit_eur_per_m
+        or overrides.switchgear_eur
+        or overrides.accessories_eur
+        or overrides.vat_rate is not None
+    )
+    if not has_any:
+        return base, False
+
+    cables = dict(base.cable_eur_per_m)
+    for k, v in overrides.cable_eur_per_m.items():
+        try:
+            norm_k = f"{float(k):.1f}"
+        except ValueError:
+            norm_k = k
+        cables[norm_k] = v
+
+    conduits = {**base.conduit_eur_per_m, **overrides.conduit_eur_per_m}
+    switchgear = {**base.switchgear_eur, **overrides.switchgear_eur}
+    accessories = {**base.accessories_eur, **overrides.accessories_eur}
+    vat_rate = overrides.vat_rate if overrides.vat_rate is not None else base.vat_rate
+
+    merged = base.model_copy(
+        update={
+            "cable_eur_per_m": cables,
+            "conduit_eur_per_m": conduits,
+            "switchgear_eur": switchgear,
+            "accessories_eur": accessories,
+            "vat_rate": vat_rate,
+        }
+    )
+    return merged, True
 
 
 def generate_boq(
@@ -20,9 +63,11 @@ def generate_boq(
     standards: StandardsBundle,
     *,
     spatial: SpatialLayoutResult | None = None,
+    rate_overrides: BoqRateOverrides | None = None,
+    tender_blank_rates: bool = False,
 ) -> BoqSummary:
-    """Compute an itemized Cyprus electrical BOQ (EUR + 19% VAT) from solved design & layout."""
-    rates = standards.boq_rates
+    """Compute an itemized Cyprus electrical BOQ (EUR + VAT) with custom/tender support."""
+    rates, custom_applied = _merge_boq_rates(standards.boq_rates, rate_overrides)
     eac = design.eac_compliance
     items: list[BoqItem] = []
     seq = 1
@@ -39,7 +84,8 @@ def generate_boq(
         q = round(qty, 2)
         if q <= 0.0:
             return
-        total = round(q * unit_rate, 2)
+        eff_rate = 0.0 if tender_blank_rates else round(unit_rate, 2)
+        total = 0.0 if tender_blank_rates else round(q * eff_rate, 2)
         items.append(
             BoqItem(
                 item_no=f"BOQ-{seq:02d}",
@@ -48,7 +94,7 @@ def generate_boq(
                 description_el=desc_el,
                 unit=unit,
                 quantity=q,
-                unit_rate_eur=round(unit_rate, 2),
+                unit_rate_eur=eff_rate,
                 total_eur=total,
             )
         )
@@ -353,14 +399,21 @@ def generate_boq(
             acc["ev_charger_22kw"] if is_22kw else acc["ev_charger_7kw"],
         )
 
-    subtotal = round(sum(item.total_eur for item in items), 2)
-    vat_eur = round(subtotal * rates.vat_rate, 2)
-    grand_total = round(subtotal + vat_eur, 2)
+    subtotal = 0.0 if tender_blank_rates else round(sum(item.total_eur for item in items), 2)
+    vat_eur = 0.0 if tender_blank_rates else round(subtotal * rates.vat_rate, 2)
+    grand_total = 0.0 if tender_blank_rates else round(subtotal + vat_eur, 2)
+
+    rates_ver = rates.standards_version
+    if tender_blank_rates:
+        rates_ver = f"{rates_ver} (Tender Unpriced)"
+    elif custom_applied:
+        rates_ver = f"{rates_ver} (+tenant custom rates)"
 
     return BoqSummary(
         currency=rates.currency,
         vat_rate=rates.vat_rate,
-        rates_version=rates.standards_version,
+        rates_version=rates_ver,
+        is_tender_blank_rates=tender_blank_rates,
         items=items,
         subtotal_eur=subtotal,
         vat_eur=vat_eur,

@@ -450,17 +450,28 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
     _autosize_columns(ws2, max_width=70)
 
     # ==================================================================
-    # Sheet 3: Bill of Quantities (Indicative EUR + 19% Cyprus VAT)
+    # Sheet 3: Bill of Quantities (Priced EUR or Unpriced Tender Mode)
     # ==================================================================
     if result.boq is not None and result.boq.items:
         boq = result.boq
+        is_tender = boq.is_tender_blank_rates
         ws3 = wb.create_sheet(title="Bill of Quantities")
         ws3.page_setup.orientation = ws3.ORIENTATION_LANDSCAPE
         ws3.page_setup.paperSize = ws3.PAPERSIZE_A4
 
-        ws3["A1"] = f"BILL OF QUANTITIES (EUR) — {result.building.project_name}"
+        if is_tender:
+            ws3["A1"] = (
+                f"TENDER BILL OF QUANTITIES (UNPRICED CONTRACTOR BID) — "
+                f"{result.building.project_name}"
+            )
+            ws3["A2"] = (
+                f"Tender Mode: Contractor to enter Unit Rate (EUR) in Col G — "
+                f"Formulas Auto-Calculate | Currency: {boq.currency}"
+            )
+        else:
+            ws3["A1"] = f"BILL OF QUANTITIES (EUR) — {result.building.project_name}"
+            ws3["A2"] = f"Rates Table: {boq.rates_version} | Currency: {boq.currency}"
         ws3["A1"].font = _TITLE_FONT
-        ws3["A2"] = f"Rates Table: {boq.rates_version} | Currency: {boq.currency}"
         ws3["A2"].font = _BODY_FONT
 
         boq_headers = [
@@ -484,23 +495,25 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
         first_item_row = hdr_row + 1
         for idx, item in enumerate(boq.items):
             r = first_item_row + idx
-            row_vals: list[str | int | float] = [
+            row_vals: list[str | int | float | None] = [
                 item.item_no,
                 item.category,
                 item.description_en,
                 item.description_el,
                 item.unit,
                 item.quantity,
-                item.unit_rate_eur,
+                None if is_tender else item.unit_rate_eur,
                 f"=ROUND(F{r}*G{r},2)",
             ]
-            for col_idx, val in enumerate(row_vals, start=1):
-                bc = ws3.cell(row=r, column=col_idx, value=val)
+            for col_idx, cell_val in enumerate(row_vals, start=1):
+                bc = ws3.cell(row=r, column=col_idx, value=cell_val)
                 bc.font = _BODY_FONT
                 bc.border = _CELL_BORDER
                 if col_idx in (6, 7, 8):
                     bc.number_format = "#,##0.00"
                     bc.alignment = Alignment(horizontal="right")
+                if is_tender and col_idx == 7:
+                    bc.fill = _WARN_FILL
 
         last_item_row = first_item_row + len(boq.items) - 1
         sub_row = last_item_row + 2
@@ -534,7 +547,7 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
 
 
 def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
-    """Export flat evaluated Bill of Quantities CSV (EUR + 19% VAT)."""
+    """Export flat evaluated Bill of Quantities CSV (priced or blank Tender BOQ mode)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
@@ -551,6 +564,7 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
             ]
         )
         if result.boq is not None:
+            is_tender = result.boq.is_tender_blank_rates
             for item in result.boq.items:
                 writer.writerow(
                     [
@@ -560,12 +574,21 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
                         item.description_el,
                         item.unit,
                         f"{item.quantity:.2f}",
-                        f"{item.unit_rate_eur:.2f}",
-                        f"{item.total_eur:.2f}",
+                        "" if is_tender else f"{item.unit_rate_eur:.2f}",
+                        "" if is_tender else f"{item.total_eur:.2f}",
                     ]
                 )
             writer.writerow(
-                ["", "", "Subtotal (excl. VAT)", "", "", "", "", f"{result.boq.subtotal_eur:.2f}"]
+                [
+                    "",
+                    "",
+                    "Subtotal (excl. VAT)",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "" if is_tender else f"{result.boq.subtotal_eur:.2f}",
+                ]
             )
             writer.writerow(
                 [
@@ -576,7 +599,7 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
                     "",
                     "",
                     "",
-                    f"{result.boq.vat_eur:.2f}",
+                    "" if is_tender else f"{result.boq.vat_eur:.2f}",
                 ]
             )
             writer.writerow(
@@ -588,7 +611,7 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
                     "",
                     "",
                     "",
-                    f"{result.boq.grand_total_eur:.2f}",
+                    "" if is_tender else f"{result.boq.grand_total_eur:.2f}",
                 ]
             )
     return out_path
