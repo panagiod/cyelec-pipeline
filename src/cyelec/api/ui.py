@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from cyelec import __version__
+from cyelec.api.docs_ui import render_workbench_guide_tab_html
 
 
 def render_etek_workbench_html(base_url: str = "") -> str:
@@ -10,6 +11,7 @@ def render_etek_workbench_html(base_url: str = "") -> str:
     prefix = base_url.rstrip("/")
     og_img = f"{prefix}/og-thumbnail.jpg"
     logo_url = f"{prefix}/logo.png"
+    guide_tab_html = render_workbench_guide_tab_html()
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -79,6 +81,22 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       border: 1px solid rgba(56, 189, 248, 0.45);
       display: block;
     }}
+    .hdr-right {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }}
+    .hdr-link {{
+      color: #ffffff;
+      text-decoration: none;
+      font-size: 11.5px;
+      font-weight: 600;
+      padding: 5px 10px;
+      border-radius: 5px;
+      border: 1px solid rgba(56, 189, 248, 0.5);
+      background: rgba(2, 132, 199, 0.35);
+    }}
+    .hdr-link:hover {{ background: rgba(2, 132, 199, 0.6); }}
     header h1 {{ margin: 0; font-size: 16px; letter-spacing: 0.2px; }}
     header .meta {{ font-size: 11px; opacity: 0.85; }}
     .layout {{
@@ -248,7 +266,13 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       <img src="/logo.png" alt="CyElec" class="brand-logo" width="34" height="34" />
       <h1>CyElec — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
     </div>
-    <div class="meta">v{__version__} | BS 7671 / IEC 60364 / Cyprus EAC | EU B2B SaaS</div>
+    <div class="hdr-right">
+      <a class="hdr-link" href="/guide" target="_blank" rel="noopener">
+        User Guide &amp; Know-How
+      </a>
+      <a class="hdr-link" href="/docs" target="_blank" rel="noopener">API Docs</a>
+      <div class="meta">v{__version__} | BS 7671 / Cyprus EAC</div>
+    </div>
   </header>
 
   <div class="layout">
@@ -358,6 +382,9 @@ def render_etek_workbench_html(base_url: str = "") -> str:
           <button class="tab" onclick="openTab('tabWorkspace', this); loadProjects();">
             Workspace &amp; Revision Diff
           </button>
+          <button class="tab" onclick="openTab('tabGuide', this)">
+            Guide &amp; Know-How
+          </button>
         </div>
 
         <div id="tabCircuits" class="tab-pane active">
@@ -442,6 +469,10 @@ def render_etek_workbench_html(base_url: str = "") -> str:
           </div>
           <div id="revListBox" style="margin-bottom:12px;"></div>
           <div id="revDiffBox"></div>
+        </div>
+
+        <div id="tabGuide" class="tab-pane">
+          {guide_tab_html}
         </div>
       </div>
     </main>

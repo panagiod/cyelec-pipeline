@@ -61,3 +61,35 @@ def test_html_reports_embed_offline_favicon_and_logo(tmp_path: Path) -> None:
     for doc in (calc_html, cover_html):
         assert 'rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,' in doc
         assert 'class="hdr-logo"' in doc
+
+
+def test_user_guide_and_know_how_pages(tmp_path: Path) -> None:
+    client = TestClient(create_app(db_path=tmp_path / "guide.db"))
+
+    # 1. Standalone searchable /guide portal with logo, OG thumbnail & Cyprus BS 7671 know-how
+    guide = client.get(
+        "/guide",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "cyelec-prod.example.run.app",
+        },
+    )
+    assert guide.status_code == 200
+    assert "User Documentation" in guide.text
+    assert 'rel="icon" type="image/svg+xml" href="/favicon.svg"' in guide.text
+    assert (
+        'property="og:image" content="https://cyelec-prod.example.run.app/og-thumbnail.jpg"'
+        in guide.text
+    )
+    assert "Reg 433.1.204" in guide.text
+    assert "ΣΑΛΟΝΙ" in guide.text
+    assert "Unpriced Tender BOQ" in guide.text
+    assert "filterGuide" in guide.text
+
+    # 2. Main Workbench (GET /) links to /guide AND includes inline Guide & Know-How tab
+    ui = client.get("/")
+    assert ui.status_code == 200
+    assert 'href="/guide"' in ui.text
+    assert 'id="tabGuide"' in ui.text
+    assert "Guide &amp; Know-How" in ui.text
+

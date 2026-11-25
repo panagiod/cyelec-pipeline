@@ -439,6 +439,15 @@ def create_app(
         base_url = f"{proto}://{host}" if host else ""
         return HTMLResponse(content=render_etek_workbench_html(base_url=base_url))
 
+    @api.get("/guide", response_class=HTMLResponse)
+    def user_guide_ui(request: Request) -> HTMLResponse:
+        from cyelec.api.docs_ui import render_user_guide_html
+
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "")).strip()
+        base_url = f"{proto}://{host}" if host else ""
+        return HTMLResponse(content=render_user_guide_html(base_url=base_url))
+
     @api.get("/favicon.ico", include_in_schema=False)
     def favicon_ico() -> Response:
         from cyelec.assets import get_asset_bytes, get_asset_media_type
