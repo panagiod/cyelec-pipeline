@@ -21,13 +21,22 @@ from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
 from cyelec.ingest.dxf_ingest import inspect_dxf_layers
 from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
-from cyelec.models.electrical import DesignOverrides
+from cyelec.models.electrical import DesignOverrides, ReportLanguage, TenantBranding
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
 from cyelec.render.eac_pack import build_submission_zip
 from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.qet_bridge import is_qelectrotech_available
 from cyelec.render.sld import render_sld_svg
+from cyelec.saas.revisions import RevisionDiff, carry_forward_overrides, compute_revision_diff
+from cyelec.saas.store import (
+    ProjectSummary,
+    RevisionRecord,
+    RevisionSummary,
+    TenantProfile,
+    UsageSummary,
+    WorkspaceStore,
+)
 from cyelec.standards_loader import load_standards
 from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 
@@ -83,6 +92,46 @@ class DxfLayersResponse(BaseModel):
     tenant_id: str
     filename: str
     layers: list[DxfLayerInfo]
+
+
+class TenantUpdateRequest(BaseModel):
+    """Update tenant consulting practice branding and default report language."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    report_language: ReportLanguage | None = None
+    branding: TenantBranding | None = None
+
+
+class ApiKeyIssuedResponse(BaseModel):
+    """One-time plaintext response when issuing or rotating a tenant API key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    api_key: str
+
+
+class CreateProjectRequest(BaseModel):
+    """Create a new tenant-scoped electrical engineering project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str = ""
+
+
+class CreateRevisionRequest(BaseModel):
+    """Create a new solved revision from a benchmark template or canonical BuildingModel."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    benchmark_template: BenchmarkTemplate | None = None
+    building: BuildingModel | None = None
+    overrides: DesignOverrides | None = None
+    carry_forward_overrides: bool = True
+    notes: str = ""
 
 
 def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
@@ -175,16 +224,48 @@ def _solve_dxf_bundle_sync(
         return p2, zip_path.read_bytes()
 
 
-def create_app() -> FastAPI:
-    """Create a strictly stateless Multi-Tenant EU B2B SaaS FastAPI application."""
+def create_app(db_path: Path | None = None) -> FastAPI:
+    """Create the Multi-Tenant EU B2B SaaS FastAPI application with strict tenant isolation."""
+    store = WorkspaceStore(db_path=db_path)
     api = FastAPI(
         title="cyelec-pipeline SaaS API",
         version=__version__,
         description=(
-            "Stateless deterministic BS 7671 / IEC 60364 / Cyprus EAC electrical engineering "
-            "service. All runs are isolated in ephemeral storage with zero cross-tenant state."
+            "Deterministic BS 7671 / IEC 60364 / Cyprus EAC electrical engineering "
+            "Multi-Tenant EU B2B SaaS service with strict per-tenant isolation, "
+            "revision diffing, Pass-2 override carry-forward, and usage metering."
         ),
     )
+    api.state.store = store
+
+    def _effective_tenant(request: Request, header_tenant: str) -> str:
+        auth_tid = getattr(request.state, "auth_tenant_id", None)
+        if isinstance(auth_tid, str) and auth_tid:
+            return auth_tid
+        return header_tenant or "anonymous"
+
+    def _merge_tenant_defaults(
+        tenant_id: str,
+        overrides: DesignOverrides | None,
+    ) -> DesignOverrides | None:
+        """Apply saved tenant branding/language defaults when not explicitly overridden."""
+        profile = store.get_or_create_tenant(tenant_id)
+        if profile.branding is None and profile.report_language == ReportLanguage.EN:
+            return overrides
+        if overrides is None:
+            return DesignOverrides(
+                report_language=profile.report_language,
+                branding=profile.branding,
+            )
+        updates: dict[str, object] = {}
+        if overrides.branding is None and profile.branding is not None:
+            updates["branding"] = profile.branding
+        if (
+            overrides.report_language == ReportLanguage.EN
+            and profile.report_language != ReportLanguage.EN
+        ):
+            updates["report_language"] = profile.report_language
+        return overrides.model_copy(update=updates) if updates else overrides
 
     @api.middleware("http")
     async def security_and_observability_middleware(
@@ -194,11 +275,19 @@ def create_app() -> FastAPI:
         req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         t0 = time.perf_counter()
 
-        # Optional API-key enforcement when CYELEC_API_KEY is configured in production
-        expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
-        if expected_key and request.url.path.startswith("/v1/"):
-            supplied = request.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(supplied, expected_key):
+        supplied = request.headers.get("X-API-Key", "").strip()
+        auth_tenant: str | None = None
+        if supplied:
+            auth_tenant = store.resolve_tenant_by_api_key(supplied)
+            if auth_tenant is not None:
+                request.state.auth_tenant_id = auth_tenant
+
+        if request.url.path.startswith("/v1/"):
+            expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
+            auth_required = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip() in ("1", "true")
+            global_ok = bool(expected_key) and hmac.compare_digest(supplied, expected_key)
+
+            if (expected_key or auth_required) and not (global_ok or auth_tenant is not None):
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Invalid or missing X-API-Key."},
@@ -385,6 +474,226 @@ def create_app() -> FastAPI:
                 "X-Input-SHA256": p2.design.provenance.input_sha256,
             },
         )
+
+    # ==================================================================
+    # Multi-Tenant B2B SaaS Workspace, Branding, Revisions, Diff & Usage
+    # ==================================================================
+    @api.get("/v1/tenants/me", response_model=TenantProfile)
+    def get_my_tenant(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> TenantProfile:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.get_or_create_tenant(tid)
+
+    @api.put("/v1/tenants/me", response_model=TenantProfile)
+    def update_my_tenant(
+        request: Request,
+        payload: TenantUpdateRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> TenantProfile:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.update_tenant_profile(
+            tid,
+            display_name=payload.display_name,
+            report_language=payload.report_language,
+            branding=payload.branding,
+        )
+
+    @api.post("/v1/tenants/me/api-key", response_model=ApiKeyIssuedResponse)
+    def issue_my_api_key(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> ApiKeyIssuedResponse:
+        tid = _effective_tenant(request, x_tenant_id)
+        raw_key = store.issue_tenant_api_key(tid)
+        return ApiKeyIssuedResponse(tenant_id=tid, api_key=raw_key)
+
+    @api.post("/v1/projects", response_model=ProjectSummary, status_code=201)
+    def create_project(
+        request: Request,
+        payload: CreateProjectRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> ProjectSummary:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.create_project(tid, payload.name, payload.description)
+
+    @api.get("/v1/projects", response_model=list[ProjectSummary])
+    def list_projects(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> list[ProjectSummary]:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.list_projects(tid)
+
+    @api.get("/v1/projects/{project_id}", response_model=ProjectSummary)
+    def get_project(
+        request: Request,
+        project_id: str,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> ProjectSummary:
+        tid = _effective_tenant(request, x_tenant_id)
+        proj = store.get_project(tid, project_id)
+        if proj is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return proj
+
+    @api.post(
+        "/v1/projects/{project_id}/revisions",
+        response_model=RevisionRecord,
+        status_code=201,
+    )
+    def create_project_revision(
+        request: Request,
+        project_id: str,
+        payload: CreateRevisionRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> RevisionRecord:
+        """Solve & persist a new revision with optional Pass-2 override carry-forward."""
+        tid = _effective_tenant(request, x_tenant_id)
+        proj = store.get_project(tid, project_id)
+        if proj is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+
+        if payload.building is None and payload.benchmark_template is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Provide either 'building' or 'benchmark_template'.",
+            )
+
+        t0 = time.perf_counter()
+        eff_overrides = payload.overrides
+        if payload.carry_forward_overrides:
+            prev = store.get_latest_revision(tid, project_id)
+            if prev is not None:
+                eff_overrides = carry_forward_overrides(prev.overrides, eff_overrides)
+        eff_overrides = _merge_tenant_defaults(tid, eff_overrides)
+
+        building = (
+            payload.building
+            if payload.building is not None
+            else generate_benchmark_dxf(payload.benchmark_template)  # type: ignore[arg-type]
+        )
+        p2 = run_phase2_pipeline(building, overrides=eff_overrides)
+        rec = store.save_revision(tid, project_id, p2, overrides=eff_overrides, notes=payload.notes)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        store.record_usage(
+            tid,
+            "revision_solve",
+            elapsed_ms,
+            len(p2.model_dump_json().encode("utf-8")),
+            project_id=project_id,
+        )
+        return rec
+
+    @api.post(
+        "/v1/projects/{project_id}/revisions/dxf",
+        response_model=RevisionRecord,
+        status_code=201,
+    )
+    async def create_project_revision_dxf(
+        request: Request,
+        project_id: str,
+        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf or .ifc")],
+        overrides_json: Annotated[str | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
+        building_type: Annotated[BuildingType | None, Form()] = None,
+        carry_forward: Annotated[bool, Form()] = True,
+        notes: Annotated[str, Form()] = "",
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> RevisionRecord:
+        """Upload a DXF/IFC revision, carry forward Pass-2 engineer overrides, and persist."""
+        tid = _effective_tenant(request, x_tenant_id)
+        if store.get_project(tid, project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+
+        filename = file.filename or "upload.dxf"
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".dxf", ".ifc"):
+            raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
+
+        t0 = time.perf_counter()
+        data = await _read_upload_bounded(file)
+        overrides = _parse_overrides_json(overrides_json)
+        layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
+
+        if carry_forward:
+            prev = store.get_latest_revision(tid, project_id)
+            if prev is not None:
+                overrides = carry_forward_overrides(prev.overrides, overrides)
+        overrides = _merge_tenant_defaults(tid, overrides)
+
+        try:
+            p2 = await anyio.to_thread.run_sync(
+                _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
+            )
+        except (ValueError, ImportError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        rec = store.save_revision(tid, project_id, p2, overrides=overrides, notes=notes)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        store.record_usage(
+            tid,
+            "dxf_revision_solve",
+            elapsed_ms,
+            len(data),
+            project_id=project_id,
+        )
+        return rec
+
+    @api.get("/v1/projects/{project_id}/revisions", response_model=list[RevisionSummary])
+    def list_project_revisions(
+        request: Request,
+        project_id: str,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> list[RevisionSummary]:
+        tid = _effective_tenant(request, x_tenant_id)
+        if store.get_project(tid, project_id) is None:
+            raise HTTPException(status_code=404, detail="Project not found.")
+        return store.list_revisions(tid, project_id)
+
+    @api.get(
+        "/v1/projects/{project_id}/revisions/{revision_number}",
+        response_model=RevisionRecord,
+    )
+    def get_project_revision(
+        request: Request,
+        project_id: str,
+        revision_number: int,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> RevisionRecord:
+        tid = _effective_tenant(request, x_tenant_id)
+        rec = store.get_revision(tid, project_id, revision_number)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Revision not found.")
+        return rec
+
+    @api.get(
+        "/v1/projects/{project_id}/diff/{rev_a}/{rev_b}",
+        response_model=RevisionDiff,
+    )
+    def diff_project_revisions(
+        request: Request,
+        project_id: str,
+        rev_a: int,
+        rev_b: int,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> RevisionDiff:
+        """Compute deterministic engineering diff (rooms, circuits, BOQ, flags) across revisions."""
+        tid = _effective_tenant(request, x_tenant_id)
+        ra = store.get_revision(tid, project_id, rev_a)
+        rb = store.get_revision(tid, project_id, rev_b)
+        if ra is None or rb is None:
+            raise HTTPException(status_code=404, detail="One or both revisions not found.")
+        return compute_revision_diff(rev_a, ra.result, rev_b, rb.result)
+
+    @api.get("/v1/tenant/usage", response_model=UsageSummary)
+    def get_tenant_usage(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> UsageSummary:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.get_usage_summary(tid)
 
     return api
 

@@ -314,6 +314,9 @@ def render_etek_workbench_html() -> str:
             Bill of Quantities (EUR)
           </button>
           <button class="tab" onclick="openTab('tabFlags', this)">ETEK Review Flags</button>
+          <button class="tab" onclick="openTab('tabWorkspace', this); loadProjects();">
+            Workspace &amp; Revision Diff
+          </button>
         </div>
 
         <div id="tabCircuits" class="tab-pane active">
@@ -382,6 +385,22 @@ def render_etek_workbench_html() -> str:
             </thead>
             <tbody id="flagsBody"></tbody>
           </table>
+        </div>
+
+        <div id="tabWorkspace" class="tab-pane">
+          <div class="fp-toolbar">
+            <input id="projName" style="width:200px;" placeholder="New Project Name" />
+            <button class="btn btn-primary btn-sm" onclick="createAndSaveRevision()">
+              Save as New Revision
+            </button>
+            <select id="projectSel" style="width:220px;" onchange="loadRevisions()"></select>
+            <button class="btn btn-secondary btn-sm" onclick="diffLatestRevisions()">
+              Diff Latest 2 Revisions
+            </button>
+            <span id="wsStatus" style="color:var(--muted);"></span>
+          </div>
+          <div id="revListBox" style="margin-bottom:12px;"></div>
+          <div id="revDiffBox"></div>
         </div>
       </div>
     </main>
@@ -799,6 +818,116 @@ def render_etek_workbench_html() -> str:
       a.download = 'eac_submission_pack.zip';
       a.click();
       URL.revokeObjectURL(url);
+    }}
+
+    async function loadProjects() {{
+      const tenant = document.getElementById('tenantId').value || 'anonymous';
+      const resp = await fetch('/v1/projects', {{ headers: {{ 'X-Tenant-ID': tenant }} }});
+      if (!resp.ok) return;
+      const list = await resp.json();
+      const sel = document.getElementById('projectSel');
+      const cur = sel.value;
+      sel.innerHTML = list.map(p =>
+        `<option value="${{escapeHtml(p.project_id)}}">`
+        + `${{escapeHtml(p.name)}} (${{p.revision_count}} rev)</option>`
+      ).join('');
+      if (cur && list.some(p => p.project_id === cur)) sel.value = cur;
+      if (sel.value) loadRevisions();
+    }}
+
+    async function createAndSaveRevision() {{
+      const tenant = document.getElementById('tenantId').value || 'anonymous';
+      const st = document.getElementById('wsStatus');
+      const sel = document.getElementById('projectSel');
+      let pid = sel.value;
+      const newName = document.getElementById('projName').value.trim();
+      if (!pid || newName) {{
+        const pr = await fetch('/v1/projects', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+          body: JSON.stringify({{ name: newName || 'Cyprus Project' }})
+        }});
+        if (!pr.ok) {{ st.textContent = 'Project creation failed.'; return; }}
+        const created = await pr.json();
+        pid = created.project_id;
+        document.getElementById('projName').value = '';
+      }}
+      const tmpl = document.getElementById('benchmarkSel').value;
+      const resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+        body: JSON.stringify({{
+          benchmark_template: tmpl,
+          overrides: collectOverrides(),
+          carry_forward_overrides: true
+        }})
+      }});
+      if (!resp.ok) {{ st.textContent = 'Save revision failed.'; return; }}
+      const rec = await resp.json();
+      st.textContent = `Saved Rev ${{rec.summary.revision_number}} cleanly.`;
+      await loadProjects();
+      sel.value = pid;
+      await loadRevisions();
+    }}
+
+    async function loadRevisions() {{
+      const tenant = document.getElementById('tenantId').value || 'anonymous';
+      const pid = document.getElementById('projectSel').value;
+      if (!pid) return;
+      const resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
+        headers: {{ 'X-Tenant-ID': tenant }}
+      }});
+      if (!resp.ok) return;
+      const revs = await resp.json();
+      const rows = revs.map(r => `<tr>
+        <td><strong>Rev ${{r.revision_number}}</strong></td>
+        <td><code>${{escapeHtml(r.input_sha256.slice(0, 12))}}</code></td>
+        <td>${{escapeHtml(r.supply_tier)}}</td>
+        <td class="r">${{r.diversified_kva.toFixed(2)}} kVA</td>
+        <td class="r">€${{r.boq_grand_total_eur.toFixed(2)}}</td>
+        <td>${{escapeHtml(r.created_at)}}</td>
+      </tr>`).join('');
+      document.getElementById('revListBox').innerHTML = `<table>
+        <thead><tr>
+          <th>Rev</th><th>Input SHA</th><th>Supply Tier</th>
+          <th class="r">Div. kVA</th><th class="r">BOQ (EUR)</th><th>Timestamp</th>
+        </tr></thead><tbody>${{rows}}</tbody></table>`;
+    }}
+
+    async function diffLatestRevisions() {{
+      const tenant = document.getElementById('tenantId').value || 'anonymous';
+      const pid = document.getElementById('projectSel').value;
+      const box = document.getElementById('revDiffBox');
+      if (!pid) return;
+      const rResp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
+        headers: {{ 'X-Tenant-ID': tenant }}
+      }});
+      const revs = await rResp.json();
+      if (revs.length < 2) {{
+        box.textContent = 'Save at least 2 revisions to compare diffs.';
+        return;
+      }}
+      const a = revs[revs.length - 2].revision_number;
+      const b = revs[revs.length - 1].revision_number;
+      const dResp = await fetch(
+        `/v1/projects/${{encodeURIComponent(pid)}}/diff/${{a}}/${{b}}`,
+        {{ headers: {{ 'X-Tenant-ID': tenant }} }}
+      );
+      if (!dResp.ok) return;
+      const diff = await dResp.json();
+      const cRows = diff.circuit_deltas.map(c => `<tr>
+        <td><code>${{escapeHtml(c.circuit_id)}}</code></td>
+        <td>${{escapeHtml(c.change)}}</td>
+        <td>${{escapeHtml(c.old_summary || '-')}}</td>
+        <td>${{escapeHtml(c.new_summary || '-')}}</td>
+      </tr>`).join('');
+      box.innerHTML = `<p><strong>Diff Rev ${{a}} -&gt; Rev ${{b}}:</strong>
+        ΔkVA=${{diff.diversified_kva_delta}} | ΔConduit=${{diff.conduit_m_delta}} m |
+        ΔBOQ=€${{diff.boq_eur_delta.toFixed(2)}}</p>
+        <table><thead><tr>
+          <th>Circuit</th><th>Change</th><th>Rev ${{a}}</th><th>Rev ${{b}}</th>
+        </tr></thead><tbody>${{cRows || '<tr><td colspan="4">No circuit deltas.</td></tr>'}}
+        </tbody></table>`;
     }}
 
     window.addEventListener('DOMContentLoaded', runSolve);

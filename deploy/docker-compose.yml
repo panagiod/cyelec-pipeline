@@ -22,6 +22,9 @@ services:
     environment:
       QT_QPA_PLATFORM: offscreen
       CYELEC_STANDARDS_DIR: /app/standards
+      CYELEC_DB_PATH: /var/lib/cyelec/workspace.db
+    volumes:
+      - cyelec_workspace:/var/lib/cyelec
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:
@@ -45,5 +48,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  cyelec_workspace:
   caddy_data:
   caddy_config:
