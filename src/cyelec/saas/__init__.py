@@ -1,6 +1,6 @@
 """Multi-tenant EU B2B SaaS workspace persistence, auth, revision diffing & usage metering."""
 
-from cyelec.saas.auth import generate_api_key, hash_api_key, verify_api_key
+from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
 from cyelec.saas.revisions import (
     CircuitDelta,
     RevisionDiff,
@@ -29,6 +29,7 @@ __all__ = [
     "WorkspaceStore",
     "carry_forward_overrides",
     "compute_revision_diff",
+    "extract_key_prefix",
     "generate_api_key",
     "hash_api_key",
     "verify_api_key",

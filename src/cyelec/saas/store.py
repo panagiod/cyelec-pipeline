@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cyelec.models.electrical import DesignOverrides, ReportLanguage, TenantBranding
 from cyelec.models.spatial import Phase2DesignResult
-from cyelec.saas.auth import generate_api_key, hash_api_key, verify_api_key
+from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
 
 
 def _utc_now() -> str:
@@ -122,6 +122,7 @@ class WorkspaceStore:
                     plan TEXT NOT NULL DEFAULT 'pro_cyprus',
                     report_language TEXT NOT NULL DEFAULT 'en',
                     branding_json TEXT,
+                    api_key_prefix TEXT,
                     api_key_hash TEXT,
                     api_key_salt TEXT,
                     created_at TEXT NOT NULL,
@@ -170,6 +171,16 @@ class WorkspaceStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_tenant ON usage_events(tenant_id);
                 """
+            )
+            # Safe idempotent migration for pre-existing DBs missing api_key_prefix
+            cols = {
+                str(r["name"])
+                for r in self._conn.execute("PRAGMA table_info(tenants)").fetchall()
+            }
+            if "api_key_prefix" not in cols:
+                self._conn.execute("ALTER TABLE tenants ADD COLUMN api_key_prefix TEXT")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tenants_key_prefix ON tenants(api_key_prefix)"
             )
             self._conn.commit()
 
@@ -246,32 +257,43 @@ class WorkspaceStore:
         return self.get_or_create_tenant(tenant_id)
 
     def issue_tenant_api_key(self, tenant_id: str) -> str:
-        """Issue or rotate a per-tenant API key, storing only its salted PBKDF2 hash."""
+        """Issue or rotate a prefix-indexed per-tenant API key (salted PBKDF2 stored)."""
         self.get_or_create_tenant(tenant_id)
         raw_key = generate_api_key()
+        prefix = extract_key_prefix(raw_key)
         digest, salt = hash_api_key(raw_key)
         now = _utc_now()
         with self._lock:
             self._conn.execute(
                 """
                 UPDATE tenants
-                SET api_key_hash = ?, api_key_salt = ?, updated_at = ?
+                SET api_key_prefix = ?, api_key_hash = ?, api_key_salt = ?, updated_at = ?
                 WHERE tenant_id = ?
                 """,
-                (digest, salt, now, tenant_id),
+                (prefix, digest, salt, now, tenant_id),
             )
             self._conn.commit()
         return raw_key
 
     def resolve_tenant_by_api_key(self, api_key: str) -> str | None:
-        """Verify an API key across stored tenant hashes and return matching tenant_id."""
+        """O(1) key-prefix indexed lookup + constant-time PBKDF2 verification."""
         if not api_key:
             return None
+        prefix = extract_key_prefix(api_key)
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT tenant_id, api_key_hash, api_key_salt FROM tenants "
-                "WHERE api_key_hash IS NOT NULL AND api_key_salt IS NOT NULL"
-            ).fetchall()
+            if prefix is not None:
+                rows = self._conn.execute(
+                    "SELECT tenant_id, api_key_hash, api_key_salt FROM tenants "
+                    "WHERE api_key_prefix = ? AND api_key_hash IS NOT NULL "
+                    "AND api_key_salt IS NOT NULL",
+                    (prefix,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT tenant_id, api_key_hash, api_key_salt FROM tenants "
+                    "WHERE api_key_prefix IS NULL AND api_key_hash IS NOT NULL "
+                    "AND api_key_salt IS NOT NULL"
+                ).fetchall()
         for row in rows:
             if verify_api_key(api_key, str(row["api_key_hash"]), str(row["api_key_salt"])):
                 return str(row["tenant_id"])

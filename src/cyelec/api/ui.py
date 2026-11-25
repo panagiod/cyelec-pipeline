@@ -219,6 +219,9 @@ def render_etek_workbench_html() -> str:
       <label for="tenantId">Tenant ID (X-Tenant-ID)</label>
       <input id="tenantId" value="cy-etek-demo" />
 
+      <label for="apiKeyInput">Tenant API Key (X-API-Key, session only)</label>
+      <input id="apiKeyInput" type="password" placeholder="Optional: cyelec_live_..." />
+
       <label for="benchmarkSel">Cyprus Benchmark Fixture</label>
       <select id="benchmarkSel">
         <option value="apartment_3bed">3-Bed Cyprus Apartment (120 m²)</option>
@@ -701,6 +704,18 @@ def render_etek_workbench_html() -> str:
       document.getElementById('roomEditBox').style.display = 'inline-flex';
     }});
 
+    function authHeaders(isJson) {{
+      const h = {{ 'X-Tenant-ID': document.getElementById('tenantId').value || 'anonymous' }};
+      const key = (document.getElementById('apiKeyInput').value || '').trim();
+      if (key) h['X-API-Key'] = key;
+      if (isJson) h['Content-Type'] = 'application/json';
+      return h;
+    }}
+
+    document.getElementById('apiKeyInput').addEventListener('change', (ev) => {{
+      try {{ sessionStorage.setItem('cyelec_api_key', ev.target.value.trim()); }} catch (_) {{}}
+    }});
+
     // DXF Layer Mapping Wizard trigger on file select
     document.getElementById('dxfFile').addEventListener('change', async (ev) => {{
       const f = ev.target.files[0];
@@ -713,11 +728,10 @@ def render_etek_workbench_html() -> str:
       }}
       const fd = new FormData();
       fd.append('file', f);
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       try {{
         const resp = await fetch('/v1/dxf/layers', {{
           method: 'POST',
-          headers: {{ 'X-Tenant-ID': tenant }},
+          headers: authHeaders(false),
           body: fd
         }});
         if (!resp.ok) return;
@@ -750,7 +764,6 @@ def render_etek_workbench_html() -> str:
     async function runSolve() {{
       const status = document.getElementById('statusLine');
       status.textContent = 'Running deterministic BS 7671 / EAC / NetworkX solve...';
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
 
@@ -764,14 +777,14 @@ def render_etek_workbench_html() -> str:
           if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
           resp = await fetch('/v1/solve/dxf/preview', {{
             method: 'POST',
-            headers: {{ 'X-Tenant-ID': tenant }},
+            headers: authHeaders(false),
             body: fd
           }});
         }} else {{
           const tmpl = document.getElementById('benchmarkSel').value;
           resp = await fetch(`/v1/solve/benchmark/${{tmpl}}`, {{
             method: 'POST',
-            headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+            headers: authHeaders(true),
             body: JSON.stringify(overrides)
           }});
         }}
@@ -787,7 +800,6 @@ def render_etek_workbench_html() -> str:
     }}
 
     async function downloadBundle() {{
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
       let resp;
@@ -799,14 +811,14 @@ def render_etek_workbench_html() -> str:
         if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
         resp = await fetch('/v1/solve/dxf/bundle', {{
           method: 'POST',
-          headers: {{ 'X-Tenant-ID': tenant }},
+          headers: authHeaders(false),
           body: fd
         }});
       }} else {{
         const tmpl = document.getElementById('benchmarkSel').value;
         resp = await fetch(`/v1/solve/benchmark/${{tmpl}}/bundle`, {{
           method: 'POST',
-          headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+          headers: authHeaders(true),
           body: JSON.stringify(overrides)
         }});
       }}
@@ -821,8 +833,7 @@ def render_etek_workbench_html() -> str:
     }}
 
     async function loadProjects() {{
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
-      const resp = await fetch('/v1/projects', {{ headers: {{ 'X-Tenant-ID': tenant }} }});
+      const resp = await fetch('/v1/projects', {{ headers: authHeaders(false) }});
       if (!resp.ok) return;
       const list = await resp.json();
       const sel = document.getElementById('projectSel');
@@ -836,7 +847,6 @@ def render_etek_workbench_html() -> str:
     }}
 
     async function createAndSaveRevision() {{
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       const st = document.getElementById('wsStatus');
       const sel = document.getElementById('projectSel');
       let pid = sel.value;
@@ -844,7 +854,7 @@ def render_etek_workbench_html() -> str:
       if (!pid || newName) {{
         const pr = await fetch('/v1/projects', {{
           method: 'POST',
-          headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+          headers: authHeaders(true),
           body: JSON.stringify({{ name: newName || 'Cyprus Project' }})
         }});
         if (!pr.ok) {{ st.textContent = 'Project creation failed.'; return; }}
@@ -855,7 +865,7 @@ def render_etek_workbench_html() -> str:
       const tmpl = document.getElementById('benchmarkSel').value;
       const resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
         method: 'POST',
-        headers: {{ 'Content-Type': 'application/json', 'X-Tenant-ID': tenant }},
+        headers: authHeaders(true),
         body: JSON.stringify({{
           benchmark_template: tmpl,
           overrides: collectOverrides(),
@@ -871,11 +881,10 @@ def render_etek_workbench_html() -> str:
     }}
 
     async function loadRevisions() {{
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       const pid = document.getElementById('projectSel').value;
       if (!pid) return;
       const resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
-        headers: {{ 'X-Tenant-ID': tenant }}
+        headers: authHeaders(false)
       }});
       if (!resp.ok) return;
       const revs = await resp.json();
@@ -895,12 +904,11 @@ def render_etek_workbench_html() -> str:
     }}
 
     async function diffLatestRevisions() {{
-      const tenant = document.getElementById('tenantId').value || 'anonymous';
       const pid = document.getElementById('projectSel').value;
       const box = document.getElementById('revDiffBox');
       if (!pid) return;
       const rResp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
-        headers: {{ 'X-Tenant-ID': tenant }}
+        headers: authHeaders(false)
       }});
       const revs = await rResp.json();
       if (revs.length < 2) {{
@@ -911,7 +919,7 @@ def render_etek_workbench_html() -> str:
       const b = revs[revs.length - 1].revision_number;
       const dResp = await fetch(
         `/v1/projects/${{encodeURIComponent(pid)}}/diff/${{a}}/${{b}}`,
-        {{ headers: {{ 'X-Tenant-ID': tenant }} }}
+        {{ headers: authHeaders(false) }}
       );
       if (!dResp.ok) return;
       const diff = await dResp.json();
@@ -930,7 +938,13 @@ def render_etek_workbench_html() -> str:
         </tbody></table>`;
     }}
 
-    window.addEventListener('DOMContentLoaded', runSolve);
+    window.addEventListener('DOMContentLoaded', () => {{
+      try {{
+        const savedKey = sessionStorage.getItem('cyelec_api_key');
+        if (savedKey) document.getElementById('apiKeyInput').value = savedKey;
+      }} catch (_) {{}}
+      runSolve();
+    }});
   </script>
 </body>
 </html>

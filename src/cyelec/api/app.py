@@ -282,7 +282,22 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             if auth_tenant is not None:
                 request.state.auth_tenant_id = auth_tenant
 
-        if request.url.path.startswith("/v1/"):
+        if request.url.path.startswith("/v1/admin/"):
+            admin_key = os.environ.get("CYELEC_ADMIN_KEY", "").strip()
+            supplied_admin = request.headers.get("X-Admin-Key", "").strip()
+            if not admin_key:
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": "Admin provisioning disabled (CYELEC_ADMIN_KEY not set)."},
+                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                )
+            if not hmac.compare_digest(supplied_admin, admin_key):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Invalid or missing X-Admin-Key."},
+                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                )
+        elif request.url.path.startswith("/v1/"):
             expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
             auth_required = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip() in ("1", "true")
             global_ok = bool(expected_key) and hmac.compare_digest(supplied, expected_key)
@@ -328,24 +343,48 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             "ambient_defaults_c": std.eac_rules.ambient_defaults_c.model_dump(),
         }
 
+    @api.post("/v1/admin/tenants/{tenant_id}/api-key", response_model=ApiKeyIssuedResponse)
+    def admin_provision_tenant_api_key(tenant_id: str) -> ApiKeyIssuedResponse:
+        """Provision or rotate a tenant API key using CYELEC_ADMIN_KEY (X-Admin-Key)."""
+        raw_key = store.issue_tenant_api_key(tenant_id)
+        return ApiKeyIssuedResponse(tenant_id=tenant_id, api_key=raw_key)
+
     @api.post("/v1/solve/building", response_model=SolveResponseEnvelope)
     def solve_building(
+        request: Request,
         payload: SolveBuildingRequest,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolveResponseEnvelope:
+        tid = _effective_tenant(request, x_tenant_id)
+        t0 = time.perf_counter()
         p2 = run_phase2_pipeline(payload.building, overrides=payload.overrides)
-        return SolveResponseEnvelope(tenant_id=x_tenant_id, result=p2)
+        store.record_usage(
+            tid,
+            "solve_building",
+            (time.perf_counter() - t0) * 1000.0,
+            len(payload.model_dump_json().encode("utf-8")),
+        )
+        return SolveResponseEnvelope(tenant_id=tid, result=p2)
 
     @api.post("/v1/solve/benchmark/{template}", response_model=SolvePreviewEnvelope)
     def solve_benchmark_preview(
+        request: Request,
         template: BenchmarkTemplate,
         overrides: Annotated[DesignOverrides | None, Body()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
+        tid = _effective_tenant(request, x_tenant_id)
+        t0 = time.perf_counter()
         building = generate_benchmark_dxf(template)
         p2 = run_phase2_pipeline(building, overrides=overrides)
+        store.record_usage(
+            tid,
+            "solve_benchmark",
+            (time.perf_counter() - t0) * 1000.0,
+            len(p2.model_dump_json().encode("utf-8")),
+        )
         return SolvePreviewEnvelope(
-            tenant_id=x_tenant_id,
+            tenant_id=tid,
             result=p2,
             floorplan_svg=render_floorplan_svg(p2),
             sld_svg=render_sld_svg(p2.design),
@@ -353,10 +392,13 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @api.post("/v1/solve/benchmark/{template}/bundle")
     def solve_benchmark_bundle(
+        request: Request,
         template: BenchmarkTemplate,
         overrides: Annotated[DesignOverrides | None, Body()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> Response:
+        tid = _effective_tenant(request, x_tenant_id)
+        t0 = time.perf_counter()
         with tempfile.TemporaryDirectory(prefix="cyelec_bench_") as tmp_dir:
             tmp = Path(tmp_dir)
             building = generate_benchmark_dxf(template, out_dxf=tmp / f"{template.value}.dxf")
@@ -364,47 +406,62 @@ def create_app(db_path: Path | None = None) -> FastAPI:
             outputs = export_phase3_deliverables(p2, tmp / "pack")
             zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
             zip_bytes = zip_path.read_bytes()
+        store.record_usage(
+            tid,
+            "solve_benchmark_bundle",
+            (time.perf_counter() - t0) * 1000.0,
+            len(zip_bytes),
+        )
         return Response(
             content=zip_bytes,
             media_type="application/zip",
             headers={
                 "Content-Disposition": f'attachment; filename="eac_pack_{template.value}.zip"',
-                "X-Tenant-ID": x_tenant_id,
+                "X-Tenant-ID": tid,
                 "X-Input-SHA256": p2.design.provenance.input_sha256,
             },
         )
 
     @api.post("/v1/dxf/layers", response_model=DxfLayersResponse)
     async def inspect_dxf_layers_upload(
+        request: Request,
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> DxfLayersResponse:
         """Inspect layers, entity counts, and inferred roles of an uploaded DXF."""
+        tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         if Path(filename).suffix.lower() != ".dxf":
             raise HTTPException(status_code=400, detail="Only .dxf files support layer inspection.")
 
+        t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
         try:
             layers = await anyio.to_thread.run_sync(_inspect_dxf_layers_sync, data)
         except (ValueError, DXFError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        return DxfLayersResponse(tenant_id=x_tenant_id, filename=filename, layers=layers)
+        store.record_usage(
+            tid, "dxf_layer_inspect", (time.perf_counter() - t0) * 1000.0, len(data)
+        )
+        return DxfLayersResponse(tenant_id=tid, filename=filename, layers=layers)
 
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
     async def solve_dxf_upload(
+        request: Request,
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolveResponseEnvelope:
+        tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
         if suffix not in (".dxf", ".ifc"):
             raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
 
+        t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
@@ -415,10 +472,12 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         except (ValueError, ImportError, DXFError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        return SolveResponseEnvelope(tenant_id=x_tenant_id, result=p2)
+        store.record_usage(tid, "solve_dxf", (time.perf_counter() - t0) * 1000.0, len(data))
+        return SolveResponseEnvelope(tenant_id=tid, result=p2)
 
     @api.post("/v1/solve/dxf/preview", response_model=SolvePreviewEnvelope)
     async def solve_dxf_preview(
+        request: Request,
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
@@ -426,6 +485,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
         envelope = await solve_dxf_upload(
+            request=request,
             file=file,
             overrides_json=overrides_json,
             building_type=building_type,
@@ -443,6 +503,7 @@ def create_app(db_path: Path | None = None) -> FastAPI:
 
     @api.post("/v1/solve/dxf/bundle")
     async def solve_dxf_bundle(
+        request: Request,
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
@@ -450,11 +511,13 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> Response:
         """Run full Phase 0-3 pipeline and return a ZIP archive of the EAC submission pack."""
+        tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
         if suffix not in (".dxf", ".ifc"):
             raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
 
+        t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
@@ -465,12 +528,15 @@ def create_app(db_path: Path | None = None) -> FastAPI:
         except (ValueError, ImportError, DXFError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+        store.record_usage(
+            tid, "solve_dxf_bundle", (time.perf_counter() - t0) * 1000.0, len(zip_bytes)
+        )
         return Response(
             content=zip_bytes,
             media_type="application/zip",
             headers={
                 "Content-Disposition": 'attachment; filename="eac_submission_pack.zip"',
-                "X-Tenant-ID": x_tenant_id,
+                "X-Tenant-ID": tid,
                 "X-Input-SHA256": p2.design.provenance.input_sha256,
             },
         )

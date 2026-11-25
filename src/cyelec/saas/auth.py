@@ -1,4 +1,4 @@
-"""Zero-dependency per-tenant API key generation and constant-time PBKDF2-SHA256 verification."""
+"""Zero-dependency per-tenant API key generation and O(1) prefix-indexed PBKDF2 verification."""
 
 from __future__ import annotations
 
@@ -7,11 +7,25 @@ import hmac
 import secrets
 
 _PBKDF2_ITERATIONS = 100_000
+_KEY_PREFIX_TAG = "cyelec_live_"
 
 
 def generate_api_key() -> str:
-    """Generate a high-entropy tenant API key suitable for X-API-Key authentication."""
-    return f"cyelec_live_{secrets.token_urlsafe(32)}"
+    """Generate a prefix-indexed high-entropy tenant API key (cyelec_live_<8hex>_<secret>)."""
+    key_id = secrets.token_hex(4)  # 8 hex chars for O(1) DB index lookup
+    secret_part = secrets.token_urlsafe(32)
+    return f"{_KEY_PREFIX_TAG}{key_id}_{secret_part}"
+
+
+def extract_key_prefix(api_key: str) -> str | None:
+    """Extract the 8-hex key_id prefix from a formatted API key for O(1) indexed lookup."""
+    if not api_key.startswith(_KEY_PREFIX_TAG):
+        return None
+    rest = api_key[len(_KEY_PREFIX_TAG) :]
+    if "_" not in rest:
+        return None
+    prefix, _ = rest.split("_", 1)
+    return prefix if len(prefix) == 8 else None
 
 
 def hash_api_key(api_key: str, salt: str | None = None) -> tuple[str, str]:

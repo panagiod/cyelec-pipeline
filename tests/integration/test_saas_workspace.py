@@ -186,3 +186,66 @@ def test_per_tenant_api_key_auth_prevents_tenant_spoofing(
     assert me_resp.status_code == 200
     assert me_resp.json()["tenant_id"] == "firm-alpha"
     assert me_resp.json()["has_api_key"] is True
+
+
+def test_admin_key_provisioning_prefix_auth_and_full_route_metering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(db_path=tmp_path / "admin_ws.db")
+    client = TestClient(app)
+
+    # Admin route disabled (503) when CYELEC_ADMIN_KEY is not configured
+    assert client.post("/v1/admin/tenants/firm-paphos/api-key").status_code == 503
+
+    monkeypatch.setenv("CYELEC_ADMIN_KEY", "super-admin-secret")
+    monkeypatch.setenv("CYELEC_AUTH_REQUIRED", "1")
+
+    # Wrong admin key -> 401
+    assert (
+        client.post(
+            "/v1/admin/tenants/firm-paphos/api-key",
+            headers={"X-Admin-Key": "wrong"},
+        ).status_code
+        == 401
+    )
+
+    # Correct admin key provisions a prefix-indexed key even while CYELEC_AUTH_REQUIRED=1
+    prov = client.post(
+        "/v1/admin/tenants/firm-paphos/api-key",
+        headers={"X-Admin-Key": "super-admin-secret"},
+    )
+    assert prov.status_code == 200
+    key = prov.json()["api_key"]
+    assert key.startswith("cyelec_live_")
+    assert len(key.split("_")[2]) == 8  # 8-hex O(1) key prefix
+
+    # Call stateless solve + layer inspection using the provisioned tenant key -> all metered!
+    bench = client.post(
+        "/v1/solve/benchmark/apartment_3bed",
+        headers={"X-API-Key": key},
+    )
+    assert bench.status_code == 200
+    assert bench.json()["tenant_id"] == "firm-paphos"
+
+    dxf_path = tmp_path / "m.dxf"
+    generate_benchmark_dxf(BenchmarkTemplate.APARTMENT_3BED, out_dxf=dxf_path)
+    lay = client.post(
+        "/v1/dxf/layers",
+        files={"file": ("m.dxf", dxf_path.read_bytes(), "application/dxf")},
+        headers={"X-API-Key": key},
+    )
+    assert lay.status_code == 200
+    assert lay.json()["tenant_id"] == "firm-paphos"
+
+    usage = client.get("/v1/tenant/usage", headers={"X-API-Key": key}).json()
+    assert usage["tenant_id"] == "firm-paphos"
+    assert usage["total_events"] == 2
+    assert usage["counts_by_event_type"]["solve_benchmark"] == 1
+    assert usage["counts_by_event_type"]["dxf_layer_inspect"] == 1
+
+    # Workbench UI includes session-only API key input
+    ui = client.get("/")
+    assert ui.status_code == 200
+    assert 'id="apiKeyInput"' in ui.text
+
