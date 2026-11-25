@@ -1,19 +1,23 @@
-"""Deterministic R12-R2018 DXF architectural plan ingestion into BuildingModel via ezdxf+shapely."""
+"""Resilient R12-R2018 DXF ingestion: INSERT block explosion, wall polygonization, layer mapping."""
 
 from __future__ import annotations
 
 import hashlib
 import math
+from collections import Counter, defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal
 
 from ezdxf.entities.dxfgfx import DXFGraphic
+from ezdxf.entities.insert import Insert
 from ezdxf.entities.lwpolyline import LWPolyline
 from ezdxf.entities.mtext import MText
 from ezdxf.entities.polyline import Polyline
 from ezdxf.entities.text import Text
 from ezdxf.filemanagement import readfile as read_dxf
 from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import polygonize, snap, unary_union
 
 from cyelec.ingest.room_classifier import (
     RoomClassifierFallback,
@@ -25,6 +29,8 @@ from cyelec.models.building import (
     BuildingType,
     DistributionBoardAnchor,
     DoorOpening,
+    DxfLayerInfo,
+    DxfLayerMapping,
     PlumbingFixture,
     Point2D,
     Room,
@@ -51,10 +57,113 @@ _FIXT_LAYER_TOKENS = ("A-FIXT", "FIXT", "SANIT", "PLUMB", "BATH", "ΕΙΔΗ")
 _TEXT_LAYER_TOKENS = ("A-TEXT", "TEXT", "LABEL", "ANNO", "ROOM-TXT")
 _DB_LAYER_TOKENS = ("A-DB", "E-DB", "DB", "PANEL", "ΠΙΝΑΚ")
 
+_LayerRole = Literal["rooms", "walls", "doors", "windows", "fixtures", "text", "db", "unknown"]
+
 
 def _layer_matches(layer: str, tokens: tuple[str, ...]) -> bool:
     up = layer.upper()
     return any(tok in up for tok in tokens)
+
+
+def _infer_layer_role(layer: str) -> _LayerRole:
+    if _layer_matches(layer, _ROOM_LAYER_TOKENS):
+        return "rooms"
+    if _layer_matches(layer, _WALL_LAYER_TOKENS):
+        return "walls"
+    if _layer_matches(layer, _DOOR_LAYER_TOKENS):
+        return "doors"
+    if _layer_matches(layer, _WIND_LAYER_TOKENS):
+        return "windows"
+    if _layer_matches(layer, _FIXT_LAYER_TOKENS):
+        return "fixtures"
+    if _layer_matches(layer, _DB_LAYER_TOKENS):
+        return "db"
+    if _layer_matches(layer, _TEXT_LAYER_TOKENS):
+        return "text"
+    return "unknown"
+
+
+def _role_matches(
+    layer: str,
+    role: _LayerRole,
+    mapping: DxfLayerMapping | None,
+) -> bool:
+    """Match a layer name using explicit DxfLayerMapping when provided, else token heuristics."""
+    if mapping is not None:
+        explicit: list[str] = getattr(mapping, role, [])
+        if explicit:
+            norm = layer.strip().casefold()
+            return any(norm == item.strip().casefold() for item in explicit)
+
+    token_map: dict[str, tuple[str, ...]] = {
+        "rooms": _ROOM_LAYER_TOKENS,
+        "walls": _WALL_LAYER_TOKENS,
+        "doors": _DOOR_LAYER_TOKENS,
+        "windows": _WIND_LAYER_TOKENS,
+        "fixtures": _FIXT_LAYER_TOKENS,
+        "text": _TEXT_LAYER_TOKENS,
+        "db": _DB_LAYER_TOKENS,
+    }
+    tokens = token_map.get(role)
+    return _layer_matches(layer, tokens) if tokens else False
+
+
+def _iter_resolved_entities(
+    entities: list[DXFGraphic],
+    *,
+    parent_layer: str | None = None,
+    block_hint: str | None = None,
+    depth: int = 0,
+    max_depth: int = 4,
+) -> Iterator[tuple[DXFGraphic, str, str | None]]:
+    """Yield primitives, recursively exploding AutoCAD INSERT blocks with Layer-0 inheritance."""
+    for ent in entities:
+        raw_layer = str(ent.dxf.layer)
+        eff_layer = (
+            parent_layer
+            if (parent_layer is not None and raw_layer in ("0", ""))
+            else raw_layer
+        )
+        if isinstance(ent, Insert) and depth < max_depth:
+            bname = str(ent.dxf.name)
+            try:
+                virtual = list(ent.virtual_entities())
+            except Exception:
+                continue
+            yield from _iter_resolved_entities(
+                virtual,
+                parent_layer=eff_layer,
+                block_hint=bname,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+        else:
+            yield ent, eff_layer, block_hint
+
+
+def inspect_dxf_layers(dxf_path: Path) -> list[DxfLayerInfo]:
+    """Inspect all layers in a DXF file with entity counts and inferred architectural roles."""
+    if not dxf_path.is_file():
+        raise FileNotFoundError(f"DXF file not found: {dxf_path}")
+    doc = read_dxf(str(dxf_path))
+    msp = doc.modelspace()
+
+    counts_by_layer: dict[str, Counter[str]] = defaultdict(Counter)
+    for ent, eff_layer, _hint in _iter_resolved_entities(list(msp)):
+        counts_by_layer[eff_layer][ent.dxftype()] += 1
+
+    infos: list[DxfLayerInfo] = []
+    for layer_name in sorted(counts_by_layer):
+        type_counts = dict(sorted(counts_by_layer[layer_name].items()))
+        infos.append(
+            DxfLayerInfo(
+                layer_name=layer_name,
+                entity_count=sum(type_counts.values()),
+                entity_types=type_counts,
+                inferred_role=_infer_layer_role(layer_name),
+            )
+        )
+    return infos
 
 
 def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, float]] | None:
@@ -82,7 +191,6 @@ def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, 
     else:
         return None
 
-    # Remove duplicate closing vertex if present
     if len(pts) >= 2 and math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) < 1e-3:
         pts = pts[:-1]
     return pts if len(pts) >= 3 else None
@@ -140,13 +248,13 @@ def _classify_fixture_type(
 ) -> Literal["bathtub", "shower_tray", "basin", "wc", "sink"]:
     if label:
         norm = normalize_label(label)
-        if any(k in norm for k in ("bathtub", "bath", "μπανιερα")):
+        if any(k in norm for k in ("bathtub", "bath", "μπανιερα", "mpaniera")):
             return "bathtub"
-        if any(k in norm for k in ("shower", "ντους", "ντουζιερα")):
+        if any(k in norm for k in ("shower", "ντους", "ντουζιερα", "ntoys", "ntous")):
             return "shower_tray"
-        if any(k in norm for k in ("basin", "washbasin", "νιπτηρ")):
+        if any(k in norm for k in ("basin", "washbasin", "νιπτηρ", "niptir")):
             return "basin"
-        if any(k in norm for k in ("sink", "νεροχυτ")):
+        if any(k in norm for k in ("sink", "νεροχυτ", "neroxyt")):
             return "sink"
         if any(k in norm for k in ("wc", "toilet", "λεκαν")):
             return "wc"
@@ -195,6 +303,56 @@ def _find_containing_room(
     return best_rid if best_dist <= max_fallback_dist_mm else None
 
 
+def _polygonize_rooms_from_walls(
+    wall_lines: list[tuple[Point2D, Point2D]],
+    door_arcs: list[tuple[Point2D, float, float, float]],
+    window_lines: list[tuple[Point2D, Point2D]],
+) -> list[Polygon]:
+    """Derive closed room polygons from wall + doorway + window segments when A-ROOM is absent."""
+    lines: list[LineString] = []
+    for p0, p1 in wall_lines:
+        if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
+            lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
+    for p0, p1 in window_lines:
+        if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
+            lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
+    # Seal doorway wall openings along both start and end rays of each swing arc
+    for center, radius, start_ang, end_ang in door_arcs:
+        for ang in (start_ang, end_ang):
+            rad = math.radians(ang)
+            end_x = center.x_mm + radius * math.cos(rad)
+            end_y = center.y_mm + radius * math.sin(rad)
+            lines.append(LineString([(center.x_mm, center.y_mm), (end_x, end_y)]))
+
+    if not lines:
+        return []
+
+    merged = unary_union(lines)
+    # Snap tiny drafting tolerances (<= 80 mm) so nearly touching wall corners close cleanly
+    snapped = snap(merged, merged, 80.0)
+    noded = unary_union(snapped)
+
+    raw_polys = [
+        p for p in polygonize(noded) if isinstance(p, Polygon) and 1_200_000.0 <= p.area <= 5e8
+    ]
+    if not raw_polys:
+        return []
+
+    # Drop any outer shell polygon that encloses 2+ smaller interior rooms
+    filtered: list[Polygon] = []
+    for i, cand in enumerate(raw_polys):
+        contained = sum(
+            1
+            for j, other in enumerate(raw_polys)
+            if i != j
+            and cand.area > other.area * 1.15
+            and cand.contains(other.representative_point())
+        )
+        if contained < 2:
+            filtered.append(cand)
+    return filtered
+
+
 def ingest_dxf(
     dxf_path: Path,
     *,
@@ -204,6 +362,7 @@ def ingest_dxf(
     building_type: BuildingType | None = None,
     pv_capacity_kva: float = 0.0,
     tier2_fallback: RoomClassifierFallback | None = None,
+    layer_mapping: DxfLayerMapping | None = None,
 ) -> tuple[BuildingModel, list[ReviewFlag]]:
     """Ingest a DXF floorplan into a validated BuildingModel plus ingestion ReviewFlags."""
     if not dxf_path.is_file():
@@ -229,12 +388,12 @@ def ingest_dxf(
         )
 
     msp = doc.modelspace()
-    all_entities = list(msp)
+    resolved_entities = list(_iter_resolved_entities(list(msp)))
 
     # First pass: compute raw coordinate span in case $INSUNITS is unitless
     xs: list[float] = []
     ys: list[float] = []
-    for ent in all_entities:
+    for ent, _layer, _hint in resolved_entities:
         t = ent.dxftype()
         if t == "LINE":
             xs.extend([float(ent.dxf.start.x), float(ent.dxf.end.x)])
@@ -247,10 +406,9 @@ def ingest_dxf(
     insunits = int(doc.header.get("$INSUNITS", 0))
     scale = _infer_unit_scale(insunits, span, flags)
 
-    # Collect text labels & room polygons
     room_raw_polys: list[Polygon] = []
-    text_labels: list[tuple[str, Point, str]] = []  # (text, point, layer)
-    fixture_polys: list[Polygon] = []
+    text_labels: list[tuple[str, Point, str]] = []
+    fixture_polys: list[tuple[Polygon, str | None]] = []
     fixture_texts: list[tuple[str, Point]] = []
     wall_lines: list[tuple[Point2D, Point2D]] = []
     door_arcs: list[tuple[Point2D, float, float, float]] = []
@@ -258,22 +416,22 @@ def ingest_dxf(
     window_lines: list[tuple[Point2D, Point2D]] = []
     db_points: list[tuple[str, Point2D]] = []
 
-    for ent in all_entities:
-        layer = str(ent.dxf.layer)
+    for ent, layer, block_hint in resolved_entities:
         dtype = ent.dxftype()
+        hint_up = (block_hint or "").upper()
 
         # Room boundary polygons
-        if _layer_matches(layer, _ROOM_LAYER_TOKENS):
+        if _role_matches(layer, "rooms", layer_mapping):
             coords = _extract_poly_coords(ent, scale)
             if coords is not None:
                 poly = Polygon(coords)
                 if not poly.is_valid:
                     poly = poly.buffer(0.0)
-                if isinstance(poly, Polygon) and poly.area >= 500_000.0:  # >= 0.5 m²
+                if isinstance(poly, Polygon) and poly.area >= 500_000.0:
                     room_raw_polys.append(poly)
 
         # Wall segments
-        elif _layer_matches(layer, _WALL_LAYER_TOKENS):
+        elif _role_matches(layer, "walls", layer_mapping):
             if dtype == "LINE":
                 wall_lines.append(
                     (
@@ -301,8 +459,8 @@ def ingest_dxf(
                         )
                     )
 
-        # Doors (arcs + leaf lines)
-        elif _layer_matches(layer, _DOOR_LAYER_TOKENS):
+        # Doors (on door layer OR exploded from a DOOR block)
+        elif _role_matches(layer, "doors", layer_mapping) or "DOOR" in hint_up:
             if dtype == "ARC":
                 center = Point2D(
                     x_mm=float(ent.dxf.center.x) * scale,
@@ -331,7 +489,7 @@ def ingest_dxf(
                 )
 
         # Windows
-        elif _layer_matches(layer, _WIND_LAYER_TOKENS):
+        elif _role_matches(layer, "windows", layer_mapping):
             if dtype == "LINE":
                 window_lines.append(
                     (
@@ -346,24 +504,14 @@ def ingest_dxf(
                     )
                 )
 
-        # Plumbing fixtures
-        elif _layer_matches(layer, _FIXT_LAYER_TOKENS):
-            coords = _extract_poly_coords(ent, scale)
-            if coords is not None:
-                fpoly = Polygon(coords)
-                if fpoly.is_valid and fpoly.area >= 40_000.0:  # >= 200x200 mm
-                    fixture_polys.append(fpoly)
-            else:
-                txt = _extract_text_item(ent, scale)
-                if txt is not None:
-                    fixture_texts.append((txt[0], Point(txt[1])))
-
-        # Distribution board anchor
-        elif _layer_matches(layer, _DB_LAYER_TOKENS):
+        # Distribution board anchor (layer OR DB block name)
+        elif _role_matches(layer, "db", layer_mapping) or any(
+            tok in hint_up for tok in ("DB1", "MDB", "DIST_BOARD", "PANEL")
+        ):
             coords = _extract_poly_coords(ent, scale)
             if coords is not None:
                 c = Polygon(coords).centroid
-                db_points.append(("DB1", Point2D(x_mm=float(c.x), y_mm=float(c.y))))
+                db_points.append((block_hint or "DB1", Point2D(x_mm=float(c.x), y_mm=float(c.y))))
             else:
                 txt = _extract_text_item(ent, scale)
                 if txt is not None:
@@ -371,25 +519,56 @@ def ingest_dxf(
                         (txt[0].strip() or "DB1", Point2D(x_mm=txt[1][0], y_mm=txt[1][1]))
                     )
 
-        # Architectural text labels (A-TEXT or generic text layers)
-        if _layer_matches(layer, _TEXT_LAYER_TOKENS) or (
+        # Plumbing fixtures (layer OR exploded from BATH/SHOWER/WC/SINK/BASIN block)
+        elif _role_matches(layer, "fixtures", layer_mapping) or any(
+            tok in hint_up for tok in ("BATH", "SHOWER", "BASIN", "SINK", "WC", "TOILET")
+        ):
+            coords = _extract_poly_coords(ent, scale)
+            if coords is not None:
+                fpoly = Polygon(coords)
+                if fpoly.is_valid and fpoly.area >= 40_000.0:
+                    fixture_polys.append((fpoly, block_hint))
+            else:
+                txt = _extract_text_item(ent, scale)
+                if txt is not None:
+                    fixture_texts.append((txt[0], Point(txt[1])))
+
+        # Architectural text labels
+        if _role_matches(layer, "text", layer_mapping) or (
             dtype in ("TEXT", "MTEXT")
-            and not _layer_matches(layer, _FIXT_LAYER_TOKENS)
-            and not _layer_matches(layer, _DB_LAYER_TOKENS)
+            and not _role_matches(layer, "fixtures", layer_mapping)
+            and not _role_matches(layer, "db", layer_mapping)
         ):
             txt = _extract_text_item(ent, scale)
             if txt is not None:
                 text_labels.append((txt[0], Point(txt[1]), layer))
 
+    # Wall-to-room polygonization fallback when A-ROOM polylines are absent
+    if not room_raw_polys and wall_lines:
+        room_raw_polys = _polygonize_rooms_from_walls(wall_lines, door_arcs, window_lines)
+        if room_raw_polys:
+            flags.append(
+                ReviewFlag(
+                    code="ROOMS_POLYGONIZED_FROM_WALLS",
+                    severity=ReviewSeverity.INFO,
+                    category="geometry",
+                    message=(
+                        f"No closed room polylines found; automatically derived "
+                        f"{len(room_raw_polys)} room polygon(s) from wall/door geometry. "
+                        "Verify room boundaries."
+                    ),
+                )
+            )
+
     if not room_raw_polys:
         raise ValueError(
-            f"No closed room polygons (>= 0.5 m²) found on room layers in DXF '{dxf_path}'."
+            f"No closed room polygons (>= 0.5 m²) or polygonizable wall loops found in "
+            f"DXF '{dxf_path}'. Use DxfLayerMapping to map custom architect layers."
         )
 
     # Sort rooms deterministically (top-to-bottom, left-to-right by centroid)
     room_raw_polys.sort(key=lambda p: (-round(p.centroid.y, 1), round(p.centroid.x, 1)))
 
-    # Match labels to rooms & classify deterministically
     rooms: list[Room] = []
     room_poly_pairs: list[tuple[str, Polygon]] = []
     tmpl_std = std.room_templates
@@ -450,19 +629,20 @@ def ingest_dxf(
 
     rooms_by_id = {r.id: r for r in rooms}
 
-    # Attach plumbing fixtures to their enclosing room
-    for f_idx, fpoly in enumerate(fixture_polys, start=1):
+    # Attach plumbing fixtures (using block-name hint or nearby text label)
+    for f_idx, (fpoly, f_hint) in enumerate(fixture_polys, start=1):
         target_rid = _find_containing_room(
             fpoly.centroid, room_poly_pairs, max_fallback_dist_mm=500.0
         )
         if target_rid is None:
             continue
         room_obj = rooms_by_id[target_rid]
-        matched_label: str | None = None
-        for ftxt, fpt in fixture_texts:
-            if fpoly.contains(fpt) or fpoly.distance(fpt) < 400.0:
-                matched_label = ftxt
-                break
+        matched_label: str | None = f_hint
+        if not matched_label:
+            for ftxt, fpt in fixture_texts:
+                if fpoly.contains(fpt) or fpoly.distance(fpt) < 400.0:
+                    matched_label = ftxt
+                    break
         ftype = _classify_fixture_type(matched_label, fpoly, room_obj.is_wet_room)
         fcoords = list(fpoly.exterior.coords)[:-1]
         fixt = PlumbingFixture(
@@ -477,9 +657,7 @@ def ingest_dxf(
         if ftype in ("bathtub", "shower_tray") and not room_obj.is_wet_room:
             room_obj.is_wet_room = True
 
-    # Build WallSegments (tag true exterior perimeter edges via exact room-union boundary)
-    from shapely.ops import unary_union
-
+    # Build WallSegments (exact exterior perimeter via room-union boundary)
     outer_ring = unary_union(room_raw_polys).boundary
 
     walls: list[WallSegment] = []
@@ -508,7 +686,6 @@ def ingest_dxf(
         )
         target_rid = _find_containing_room(probe, room_poly_pairs) or rooms[0].id
 
-        # Match leaf line starting at hinge to determine ccw vs cw orientation
         swing_dir: Literal["cw", "ccw"] = "ccw"
         angle_deg = start_ang % 360.0
         for ls, le in door_leaves:
@@ -552,7 +729,6 @@ def ingest_dxf(
 
     # Distribution Board Anchor
     if db_points:
-        # Prefer polygon centroid over text offset when both exist on A-DB
         db_id = "DB1"
         for label, _ in db_points:
             if label and label != "DB1":

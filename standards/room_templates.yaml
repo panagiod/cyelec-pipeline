@@ -21,8 +21,28 @@ circuit_defaults:
 
 rooms:
   living_room:
-    aliases_en: ["living room", "living", "lounge", "sitting room", "salon"]
-    aliases_el: ["ΣΑΛΟΝΙ", "ΚΑΘΙΣΤΙΚΟ", "ΣΑΛΟΝΙ - ΤΡΑΠΕΖΑΡΙΑ"]
+    aliases_en:
+      [
+        "living room",
+        "living",
+        "lounge",
+        "sitting room",
+        "salon",
+        "saloni",
+        "kathistiko",
+        "dining",
+        "living/dining",
+        "liv",
+      ]
+    aliases_el:
+      [
+        "ΣΑΛΟΝΙ",
+        "ΚΑΘΙΣΤΙΚΟ",
+        "ΣΑΛΟΝΙ - ΤΡΑΠΕΖΑΡΙΑ",
+        "ΤΡΑΠΕΖΑΡΙΑ",
+        "ΣΑΛ.",
+        "ΚΑΘ.",
+      ]
     lighting_w_per_m2: 8.0
     min_lighting_points: 2
     lighting_zone: "day"
@@ -35,8 +55,8 @@ rooms:
     dedicated_appliances: []
 
   kitchen:
-    aliases_en: ["kitchen", "kitchenette"]
-    aliases_el: ["ΚΟΥΖΙΝΑ"]
+    aliases_en: ["kitchen", "kitchenette", "kouzina", "koyzina", "kouz", "kouz.", "kit", "kit."]
+    aliases_el: ["ΚΟΥΖΙΝΑ", "ΚΟΥΖ.", "ΚΟΥΖ"]
     lighting_w_per_m2: 10.0
     min_lighting_points: 2
     lighting_zone: "day"
@@ -76,8 +96,17 @@ rooms:
         curve: "B"
 
   kitchen_living:
-    aliases_en: ["kitchen/living", "open plan", "living/kitchen"]
-    aliases_el: ["ΣΑΛΟΚΟΥΖΙΝΑ", "ΣΑΛΟΝΙ-ΚΟΥΖΙΝΑ"]
+    aliases_en:
+      [
+        "kitchen/living",
+        "open plan",
+        "living/kitchen",
+        "salokouzina",
+        "salonokouzina",
+        "salonokoyzina",
+        "saloni-kouzina",
+      ]
+    aliases_el: ["ΣΑΛΟΚΟΥΖΙΝΑ", "ΣΑΛΟΝΟΚΟΥΖΙΝΑ", "ΣΑΛΟΝΙ-ΚΟΥΖΙΝΑ", "ΕΝΙΑΙΟΣ ΧΩΡΟΣ"]
     lighting_w_per_m2: 9.0
     min_lighting_points: 3
     lighting_zone: "day"
@@ -117,8 +146,26 @@ rooms:
         curve: "B"
 
   master_bedroom:
-    aliases_en: ["master bedroom", "master bed", "bedroom 1"]
-    aliases_el: ["ΚΥΡΙΟ ΥΠΝΟΔΩΜΑΤΙΟ", "ΥΠΝΟΔΩΜΑΤΙΟ 1"]
+    aliases_en:
+      [
+        "master bedroom",
+        "master bed",
+        "master",
+        "bedroom 1",
+        "bed 1",
+        "ypn 1",
+        "ypn. 1",
+        "ypnodomatio 1",
+        "kyrio ypnodomatio",
+      ]
+    aliases_el:
+      [
+        "ΚΥΡΙΟ ΥΠΝΟΔΩΜΑΤΙΟ",
+        "ΥΠΝΟΔΩΜΑΤΙΟ 1",
+        "ΥΠΝ. 1",
+        "ΥΠΝ.1",
+        "ΥΠΝ 1",
+      ]
     lighting_w_per_m2: 7.0
     min_lighting_points: 1
     lighting_zone: "night"
@@ -131,8 +178,32 @@ rooms:
     dedicated_appliances: []
 
   bedroom:
-    aliases_en: ["bedroom", "bed", "bedroom 2", "bedroom 3", "guest bedroom"]
-    aliases_el: ["ΥΠΝΟΔΩΜΑΤΙΟ", "ΥΠΝΟΔΩΜΑΤΙΟ 2", "ΥΠΝΟΔΩΜΑΤΙΟ 3", "ΔΩΜΑΤΙΟ"]
+    aliases_en:
+      [
+        "bedroom",
+        "bed",
+        "bed 2",
+        "bed 3",
+        "bed 4",
+        "bedroom 2",
+        "bedroom 3",
+        "bedroom 4",
+        "guest bedroom",
+        "ypnodomatio",
+        "ypn",
+        "ypn.",
+        "domatio",
+      ]
+    aliases_el:
+      [
+        "ΥΠΝΟΔΩΜΑΤΙΟ",
+        "ΥΠΝΟΔΩΜΑΤΙΟ 2",
+        "ΥΠΝΟΔΩΜΑΤΙΟ 3",
+        "ΥΠΝΟΔΩΜΑΤΙΟ 4",
+        "ΥΠΝ.",
+        "ΥΠΝ",
+        "ΔΩΜΑΤΙΟ",
+      ]
     lighting_w_per_m2: 7.0
     min_lighting_points: 1
     lighting_zone: "night"
@@ -145,8 +216,17 @@ rooms:
     dedicated_appliances: []
 
   bathroom:
-    aliases_en: ["bathroom", "bath", "main bathroom", "wc/bath"]
-    aliases_el: ["ΜΠΑΝΙΟ", "ΛΟΥΤΡΟ"]
+    aliases_en:
+      [
+        "bathroom",
+        "bath",
+        "main bathroom",
+        "wc/bath",
+        "mpanio",
+        "banio",
+        "loutro",
+      ]
+    aliases_el: ["ΜΠΑΝΙΟ", "ΛΟΥΤΡΟ", "ΜΠ."]
     lighting_w_per_m2: 10.0
     min_lighting_points: 1
     lighting_zone: "night"
@@ -159,8 +239,20 @@ rooms:
     dedicated_appliances: []
 
   ensuite:
-    aliases_en: ["en-suite", "ensuite", "en suite", "shower room", "wc/shower"]
-    aliases_el: ["ΝΤΟΥΣ", "ΜΠΑΝΙΟ 2", "ΕΝ ΣΟΥΙΤ"]
+    aliases_en:
+      [
+        "en-suite",
+        "ensuite",
+        "en suite",
+        "shower room",
+        "shower",
+        "wc/shower",
+        "wc/ntoys",
+        "ntoys",
+        "ntous",
+        "dous",
+      ]
+    aliases_el: ["ΝΤΟΥΣ", "ΝΤΟΥΖΙΕΡΑ", "ΜΠΑΝΙΟ 2", "ΕΝ ΣΟΥΙΤ", "WC/ΝΤΟΥΣ"]
     lighting_w_per_m2: 10.0
     min_lighting_points: 1
     lighting_zone: "night"
@@ -173,7 +265,7 @@ rooms:
     dedicated_appliances: []
 
   wc:
-    aliases_en: ["wc", "guest wc", "toilet", "cloakroom"]
+    aliases_en: ["wc", "guest wc", "toilet", "cloakroom", "toualeta", "w.c.", "w.c"]
     aliases_el: ["ΤΟΥΑΛΕΤΑ", "ΑΠΟΧΩΡΗΤΗΡΙΟ", "WC ΞΕΝΩΝ"]
     lighting_w_per_m2: 10.0
     min_lighting_points: 1
@@ -187,8 +279,20 @@ rooms:
     dedicated_appliances: []
 
   corridor:
-    aliases_en: ["corridor", "hallway", "hall", "entrance", "foyer"]
-    aliases_el: ["ΔΙΑΔΡΟΜΟΣ", "ΕΙΣΟΔΟΣ", "ΧΩΛ"]
+    aliases_en:
+      [
+        "corridor",
+        "hallway",
+        "hall",
+        "entrance",
+        "foyer",
+        "lobby",
+        "diadromos",
+        "eisodos",
+        "xol",
+        "hol",
+      ]
+    aliases_el: ["ΔΙΑΔΡΟΜΟΣ", "ΕΙΣΟΔΟΣ", "ΧΩΛ", "ΔΙΑΔΡ."]
     lighting_w_per_m2: 6.0
     min_lighting_points: 2
     lighting_zone: "night"
@@ -201,8 +305,16 @@ rooms:
     dedicated_appliances: []
 
   utility:
-    aliases_en: ["utility", "laundry", "utility room"]
-    aliases_el: ["ΠΛΥΣΤΑΡΙΟ", "ΒΟΗΘΗΤΙΚΟΣ ΧΩΡΟΣ"]
+    aliases_en:
+      [
+        "utility",
+        "laundry",
+        "utility room",
+        "plystario",
+        "plistario",
+        "voithitikos",
+      ]
+    aliases_el: ["ΠΛΥΣΤΑΡΙΟ", "ΒΟΗΘΗΤΙΚΟΣ ΧΩΡΟΣ", "ΠΛΥΣΤ."]
     lighting_w_per_m2: 8.0
     min_lighting_points: 1
     lighting_zone: "day"
@@ -233,8 +345,19 @@ rooms:
         curve: "B"
 
   veranda:
-    aliases_en: ["veranda", "balcony", "terrace", "patio"]
-    aliases_el: ["ΒΕΡΑΝΤΑ", "ΜΠΑΛΚΟΝΙ"]
+    aliases_en:
+      [
+        "veranda",
+        "balcony",
+        "terrace",
+        "patio",
+        "veranta",
+        "balkoni",
+        "mpalkoni",
+        "covered veranda",
+        "uncovered veranda",
+      ]
+    aliases_el: ["ΒΕΡΑΝΤΑ", "ΜΠΑΛΚΟΝΙ", "ΚΑΛΥΜΜΕΝΗ ΒΕΡΑΝΤΑ", "ΒΕΡ."]
     lighting_w_per_m2: 6.0
     min_lighting_points: 1
     lighting_zone: "day"
@@ -247,8 +370,8 @@ rooms:
     dedicated_appliances: []
 
   storage:
-    aliases_en: ["storage", "store", "store room"]
-    aliases_el: ["ΑΠΟΘΗΚΗ"]
+    aliases_en: ["storage", "store", "store room", "apothiki", "apoth."]
+    aliases_el: ["ΑΠΟΘΗΚΗ", "ΑΠΟΘ."]
     lighting_w_per_m2: 6.0
     min_lighting_points: 1
     lighting_zone: "day"

@@ -151,3 +151,30 @@ class BuildingModel(BaseModel):
     extra_three_phase_load_kva: float = Field(default=0.0, ge=0.0)
     source_file: str | None = None
     source_sha256: str | None = None
+
+
+class DxfLayerMapping(BaseModel):
+    """Explicit architect layer-name mapping overriding heuristic DXF layer discovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rooms: list[str] = Field(default_factory=list)
+    walls: list[str] = Field(default_factory=list)
+    doors: list[str] = Field(default_factory=list)
+    windows: list[str] = Field(default_factory=list)
+    fixtures: list[str] = Field(default_factory=list)
+    text: list[str] = Field(default_factory=list)
+    db: list[str] = Field(default_factory=list)
+
+
+class DxfLayerInfo(BaseModel):
+    """Summary of one DXF layer discovered during pre-ingest layer inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    layer_name: str
+    entity_count: int = Field(ge=0)
+    entity_types: dict[str, int] = Field(default_factory=dict)
+    inferred_role: Literal[
+        "rooms", "walls", "doors", "windows", "fixtures", "text", "db", "unknown"
+    ] = "unknown"

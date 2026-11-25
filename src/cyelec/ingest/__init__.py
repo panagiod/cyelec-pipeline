@@ -1,6 +1,6 @@
 """Architectural DXF/IFC ingestion and deterministic EN/EL room classification."""
 
-from cyelec.ingest.dxf_ingest import ingest_dxf
+from cyelec.ingest.dxf_ingest import ingest_dxf, inspect_dxf_layers
 from cyelec.ingest.ifc_ingest import (
     IfcFixtureRecord,
     IfcSpaceRecord,
@@ -24,4 +24,5 @@ __all__ = [
     "clean_room_label",
     "ingest_dxf",
     "ingest_ifc",
+    "inspect_dxf_layers",
 ]

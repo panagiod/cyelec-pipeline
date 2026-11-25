@@ -19,7 +19,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
-from cyelec.models.building import BuildingModel, BuildingType
+from cyelec.ingest.dxf_ingest import inspect_dxf_layers
+from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
 from cyelec.models.electrical import DesignOverrides
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
@@ -74,6 +75,16 @@ class SolvePreviewEnvelope(BaseModel):
     sld_svg: str
 
 
+class DxfLayersResponse(BaseModel):
+    """Discovered DXF layers and inferred architectural roles for the Layer Mapping Wizard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    filename: str
+    layers: list[DxfLayerInfo]
+
+
 def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
     if raw is None or not raw.strip():
         return None
@@ -82,6 +93,17 @@ def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
     except ValidationError as exc:
         raise HTTPException(
             status_code=422, detail=f"Invalid DesignOverrides JSON: {exc}"
+        ) from exc
+
+
+def _parse_layer_mapping_json(raw: str | None) -> DxfLayerMapping | None:
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return DxfLayerMapping.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid DxfLayerMapping JSON: {exc}"
         ) from exc
 
 
@@ -106,11 +128,19 @@ async def _read_upload_bounded(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BY
     return data
 
 
+def _inspect_dxf_layers_sync(data: bytes) -> list[DxfLayerInfo]:
+    with tempfile.TemporaryDirectory(prefix="cyelec_layers_") as tmp_dir:
+        in_path = Path(tmp_dir) / "plan.dxf"
+        in_path.write_bytes(data)
+        return inspect_dxf_layers(in_path)
+
+
 def _solve_dxf_bytes_sync(
     data: bytes,
     suffix: str,
     overrides: DesignOverrides | None,
     building_type: BuildingType | None,
+    layer_mapping: DxfLayerMapping | None = None,
 ) -> Phase2DesignResult:
     with tempfile.TemporaryDirectory(prefix="cyelec_req_") as tmp_dir:
         in_path = Path(tmp_dir) / f"plan{suffix}"
@@ -119,6 +149,7 @@ def _solve_dxf_bytes_sync(
             in_path,
             overrides=overrides,
             building_type=building_type,
+            layer_mapping=layer_mapping,
         )
 
 
@@ -127,6 +158,7 @@ def _solve_dxf_bundle_sync(
     suffix: str,
     overrides: DesignOverrides | None,
     building_type: BuildingType | None,
+    layer_mapping: DxfLayerMapping | None = None,
 ) -> tuple[Phase2DesignResult, bytes]:
     with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
         tmp = Path(tmp_dir)
@@ -136,6 +168,7 @@ def _solve_dxf_bundle_sync(
             in_path,
             overrides=overrides,
             building_type=building_type,
+            layer_mapping=layer_mapping,
         )
         outputs = export_phase3_deliverables(p2, tmp / "pack")
         zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
@@ -252,11 +285,30 @@ def create_app() -> FastAPI:
             },
         )
 
+    @api.post("/v1/dxf/layers", response_model=DxfLayersResponse)
+    async def inspect_dxf_layers_upload(
+        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> DxfLayersResponse:
+        """Inspect layers, entity counts, and inferred roles of an uploaded DXF."""
+        filename = file.filename or "upload.dxf"
+        if Path(filename).suffix.lower() != ".dxf":
+            raise HTTPException(status_code=400, detail="Only .dxf files support layer inspection.")
+
+        data = await _read_upload_bounded(file)
+        try:
+            layers = await anyio.to_thread.run_sync(_inspect_dxf_layers_sync, data)
+        except (ValueError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return DxfLayersResponse(tenant_id=x_tenant_id, filename=filename, layers=layers)
+
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
     async def solve_dxf_upload(
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolveResponseEnvelope:
         filename = file.filename or "upload.dxf"
@@ -266,9 +318,10 @@ def create_app() -> FastAPI:
 
         data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
+        layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
         try:
             p2 = await anyio.to_thread.run_sync(
-                _solve_dxf_bytes_sync, data, suffix, overrides, building_type
+                _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
             )
         except (ValueError, ImportError, DXFError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -280,12 +333,14 @@ def create_app() -> FastAPI:
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
         envelope = await solve_dxf_upload(
             file=file,
             overrides_json=overrides_json,
             building_type=building_type,
+            layer_mapping_json=layer_mapping_json,
             x_tenant_id=x_tenant_id,
         )
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, envelope.result)
@@ -302,6 +357,7 @@ def create_app() -> FastAPI:
         file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> Response:
         """Run full Phase 0-3 pipeline and return a ZIP archive of the EAC submission pack."""
@@ -312,9 +368,10 @@ def create_app() -> FastAPI:
 
         data = await _read_upload_bounded(file)
         overrides = _parse_overrides_json(overrides_json)
+        layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
         try:
             p2, zip_bytes = await anyio.to_thread.run_sync(
-                _solve_dxf_bundle_sync, data, suffix, overrides, building_type
+                _solve_dxf_bundle_sync, data, suffix, overrides, building_type, layer_mapping
             )
         except (ValueError, ImportError, DXFError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

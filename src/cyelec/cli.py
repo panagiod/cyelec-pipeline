@@ -8,8 +8,8 @@ from typing import Annotated
 import typer
 
 from cyelec import __version__
-from cyelec.ingest.dxf_ingest import ingest_dxf
-from cyelec.models.building import BuildingType
+from cyelec.ingest.dxf_ingest import ingest_dxf, inspect_dxf_layers
+from cyelec.models.building import BuildingType, DxfLayerMapping
 from cyelec.models.electrical import (
     DesignOverrides,
     EacProfile,
@@ -196,15 +196,41 @@ def solve_synth(
         typer.echo(f"{key.upper():<4}: {path}")
 
 
+def _load_layer_mapping(layer_mapping_path: Path | None) -> DxfLayerMapping | None:
+    if layer_mapping_path is None:
+        return None
+    return DxfLayerMapping.model_validate_json(layer_mapping_path.read_text(encoding="utf-8"))
+
+
 @app.command("inspect-dxf")
 def inspect_dxf_cmd(
     dxf_path: Annotated[
         Path,
         typer.Argument(help="Path to architectural .dxf floorplan."),
     ],
+    layers: Annotated[
+        bool,
+        typer.Option("--layers", help="List discovered DXF layers, counts, and inferred roles."),
+    ] = False,
+    layer_mapping: Annotated[
+        Path | None,
+        typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
+    ] = None,
 ) -> None:
     """Ingest a DXF floorplan and print bilingual classified rooms, fixtures, doors, and DB1."""
-    model, flags = ingest_dxf(dxf_path)
+    if layers:
+        discovered = inspect_dxf_layers(dxf_path)
+        typer.echo(f"Discovered {len(discovered)} DXF layer(s) in {dxf_path}:")
+        for info in discovered:
+            types_str = ", ".join(f"{k}:{v}" for k, v in sorted(info.entity_types.items()))
+            typer.echo(
+                f"  {info.layer_name:<24} role={info.inferred_role:<9} "
+                f"count={info.entity_count:<4} [{types_str}]"
+            )
+        return
+
+    mapping = _load_layer_mapping(layer_mapping)
+    model, flags = ingest_dxf(dxf_path, layer_mapping=mapping)
     typer.echo(f"File: {dxf_path} | SHA-256: {(model.source_sha256 or '')[:16]}")
     typer.echo(
         f"Inferred Building Type: {model.building_type.value} | "
@@ -257,6 +283,10 @@ def solve_dxf(
         float,
         typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
     ] = 0.0,
+    layer_mapping: Annotated[
+        Path | None,
+        typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
+    ] = None,
 ) -> None:
     """Run end-to-end Phase 2 pipeline from a DXF/IFC plan to layout DXF, Excel, and reports."""
     overrides = DesignOverrides(
@@ -265,7 +295,13 @@ def solve_dxf(
         ambient_temp_c=ambient_c,
         pv_capacity_kva=pv_kva,
     )
-    p2 = run_phase2_pipeline(input_path, overrides=overrides, building_type=building_type)
+    mapping = _load_layer_mapping(layer_mapping)
+    p2 = run_phase2_pipeline(
+        input_path,
+        overrides=overrides,
+        building_type=building_type,
+        layer_mapping=mapping,
+    )
     outputs = export_phase2_deliverables(p2, out_dir)
     res = p2.design
     sp = p2.spatial
@@ -330,6 +366,10 @@ def solve_eac(
         float,
         typer.Option("--pv-kva", help="Optional rooftop PV capacity in kVA."),
     ] = 0.0,
+    layer_mapping: Annotated[
+        Path | None,
+        typer.Option("--layer-mapping", help="Optional JSON file with custom DxfLayerMapping."),
+    ] = None,
     zip_bundle: Annotated[
         bool,
         typer.Option("--zip/--no-zip", help="Also write eac_submission_pack.zip archive."),
@@ -349,7 +389,13 @@ def solve_eac(
         ambient_temp_c=ambient_c,
         pv_capacity_kva=pv_kva,
     )
-    p2 = run_phase2_pipeline(input_path, overrides=overrides, building_type=building_type)
+    mapping = _load_layer_mapping(layer_mapping)
+    p2 = run_phase2_pipeline(
+        input_path,
+        overrides=overrides,
+        building_type=building_type,
+        layer_mapping=mapping,
+    )
     outputs = export_phase3_deliverables(p2, out_dir, run_qet_subprocess=qet_subprocess)
     if zip_bundle:
         outputs["zip_bundle"] = build_submission_zip(

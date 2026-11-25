@@ -10,7 +10,7 @@ from cyelec import __version__
 from cyelec.ingest.dxf_ingest import ingest_dxf
 from cyelec.ingest.ifc_ingest import ingest_ifc
 from cyelec.ingest.room_classifier import RoomClassifierFallback
-from cyelec.models.building import BuildingModel, BuildingType
+from cyelec.models.building import BuildingModel, BuildingType, DxfLayerMapping
 from cyelec.models.electrical import (
     CircuitSpec,
     DesignOverrides,
@@ -221,6 +221,7 @@ def run_phase2_pipeline(
     building_type: BuildingType | None = None,
     project_name: str | None = None,
     tier2_fallback: RoomClassifierFallback | None = None,
+    layer_mapping: DxfLayerMapping | None = None,
 ) -> Phase2DesignResult:
     """Execute stateless Phase 2 pipeline: DXF/IFC ingest, wet zones, placement, routing, solve."""
     standards = load_standards(standards_dir)
@@ -242,6 +243,7 @@ def run_phase2_pipeline(
                 project_name=project_name,
                 building_type=building_type,
                 tier2_fallback=tier2_fallback,
+                layer_mapping=layer_mapping,
             )
             spatial_flags.extend(ingest_flags)
         elif suffix == ".ifc":
