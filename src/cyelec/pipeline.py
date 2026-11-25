@@ -267,6 +267,72 @@ def run_phase1_pipeline(
     return result.model_copy(update={"boq": boq})
 
 
+def _apply_building_overrides(
+    building: BuildingModel,
+    overrides: DesignOverrides | None,
+    standards: StandardsBundle,
+) -> tuple[BuildingModel, list[ReviewFlag]]:
+    """Apply Pass-2 room-type and DB-location overrides before spatial & electrical solving."""
+    if overrides is None:
+        return building, []
+
+    flags: list[ReviewFlag] = []
+    updated = building
+
+    if overrides.room_type_overrides:
+        new_rooms = []
+        for room in updated.rooms:
+            new_type = overrides.room_type_overrides.get(room.id)
+            if new_type is not None and new_type != room.normalized_type:
+                tmpl = standards.room_templates.rooms[new_type]
+                new_rooms.append(
+                    room.model_copy(
+                        update={
+                            "normalized_type": new_type,
+                            "is_wet_room": tmpl.is_wet_room,
+                            "is_outdoor": tmpl.is_outdoor,
+                        }
+                    )
+                )
+                flags.append(
+                    ReviewFlag(
+                        code="ROOM_TYPE_OVERRIDDEN",
+                        severity=ReviewSeverity.INFO,
+                        category="geometry",
+                        message=(
+                            f"Room {room.id} ('{room.raw_label}') reclassified by engineer "
+                            f"override: {room.normalized_type.value} -> {new_type.value}."
+                        ),
+                    )
+                )
+            else:
+                new_rooms.append(room)
+        updated = updated.model_copy(update={"rooms": new_rooms})
+
+    if overrides.db_location_override_mm is not None:
+        loc = overrides.db_location_override_mm
+        updated = updated.model_copy(
+            update={
+                "db_anchor": updated.db_anchor.model_copy(
+                    update={"location_mm": loc, "wall_id": None}
+                )
+            }
+        )
+        flags.append(
+            ReviewFlag(
+                code="DB_LOCATION_OVERRIDDEN",
+                severity=ReviewSeverity.INFO,
+                category="geometry",
+                message=(
+                    f"Main distribution board {updated.db_anchor.id} relocated by engineer "
+                    f"override to ({loc.x_mm:.0f}, {loc.y_mm:.0f} mm); all conduits re-routed."
+                ),
+            )
+        )
+
+    return updated, flags
+
+
 def run_phase2_pipeline(
     source: Path | BuildingModel,
     *,
@@ -313,6 +379,10 @@ def run_phase2_pipeline(
             raise ValueError(f"Unsupported architectural input format: '{suffix}' (use .dxf/.ifc)")
     else:
         building = source
+
+    # 1b. Apply Pass-2 visual room-type & DB-location overrides before spatial layout
+    building, ov_flags = _apply_building_overrides(building, overrides, standards)
+    spatial_flags.extend(ov_flags)
 
     # 2. BS 7671 Section 701 wet zones (clipped to room walls)
     wet_zones = compute_building_wet_zones(building, standards, eac_profile=eac_profile)

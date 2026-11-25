@@ -55,14 +55,19 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" '
-            f'width="{svg_w}" height="{svg_h}">'
+            f'width="{svg_w}" height="{svg_h}" '
+            f'data-minx="{minx:.2f}" data-maxy="{maxy:.2f}" '
+            f'data-scale="{scale:.6f}" data-pad-left="{pad_left:.2f}" '
+            f'data-pad-top="{pad_top:.2f}">'
         ),
         "  <style>",
         '    text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
         "    .fp-title { font-size: 14px; font-weight: 700; fill: #1b365d; }",
         "    .fp-sub { font-size: 10px; fill: #4a5568; }",
-        "    .room-lbl { font-size: 9px; font-weight: 600; fill: #2d3748; }",
-        "    .room-area { font-size: 8px; fill: #718096; }",
+        "    .room-poly { cursor: pointer; transition: fill-opacity 0.12s; }",
+        "    .room-poly:hover { stroke: #1b365d; stroke-width: 2; }",
+        "    .room-lbl { font-size: 9px; font-weight: 600; fill: #2d3748; pointer-events: none; }",
+        "    .room-area { font-size: 8px; fill: #718096; pointer-events: none; }",
         "    .dev-tag { font-size: 7.2px; font-weight: 700; fill: #1a202c; }",
         "    .leg-hdr { font-size: 10px; font-weight: 700; fill: #1b365d; }",
         "    .leg-txt { font-size: 8.8px; fill: #2d3748; }",
@@ -82,11 +87,14 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
         ),
     ]
 
-    # 1. Room fills
+    # 1. Room fills (interactive polygons for Pass-2 visual room override)
     for room in building.rooms:
         fill = "#edf2f7" if room.is_wet_room else ("#f0fff4" if room.is_outdoor else "#f8fafc")
         parts.append(
-            f'  <polygon points="{poly_points(room.polygon_mm)}" '
+            f'  <polygon class="room-poly" data-room-id="{_esc(room.id)}" '
+            f'data-room-type="{_esc(room.normalized_type.value)}" '
+            f'data-room-label="{_esc(room.raw_label)}" '
+            f'points="{poly_points(room.polygon_mm)}" '
             f'fill="{fill}" stroke="#cbd5e0" stroke-width="1" />'
         )
 
@@ -96,17 +104,19 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
             parts.append(
                 f'  <polygon points="{poly_points(ring)}" '
                 'fill="#fbb6ce" fill-opacity="0.28" stroke="#b83280" '
-                'stroke-width="1.2" stroke-dasharray="5,3" />'
+                'stroke-width="1.2" stroke-dasharray="5,3" style="pointer-events:none;" />'
             )
         for ring in wz.zone_2_polygons_mm:
             parts.append(
                 f'  <polygon points="{poly_points(ring)}" '
-                'fill="#fbd38d" fill-opacity="0.45" stroke="#c05621" stroke-width="1" />'
+                'fill="#fbd38d" fill-opacity="0.45" stroke="#c05621" '
+                'stroke-width="1" style="pointer-events:none;" />'
             )
         for ring in wz.zone_0_polygons_mm:
             parts.append(
                 f'  <polygon points="{poly_points(ring)}" '
-                'fill="#feb2b2" fill-opacity="0.72" stroke="#c53030" stroke-width="1.4" />'
+                'fill="#feb2b2" fill-opacity="0.72" stroke="#c53030" '
+                'stroke-width="1.4" style="pointer-events:none;" />'
             )
 
     # 3. Plumbing fixtures
@@ -114,7 +124,8 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
         for fixt in room.fixtures:
             parts.append(
                 f'  <polygon points="{poly_points(fixt.polygon_mm)}" '
-                'fill="#bee3f8" fill-opacity="0.6" stroke="#2b6cb0" stroke-width="1" />'
+                'fill="#bee3f8" fill-opacity="0.6" stroke="#2b6cb0" '
+                'stroke-width="1" style="pointer-events:none;" />'
             )
 
     # 4. Architectural walls, windows, and doors
@@ -123,13 +134,14 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
         parts.append(
             f'  <line x1="{tx(wall.start.x_mm):.1f}" y1="{ty(wall.start.y_mm):.1f}" '
             f'x2="{tx(wall.end.x_mm):.1f}" y2="{ty(wall.end.y_mm):.1f}" '
-            f'stroke="#2d3748" stroke-width="{sw}" stroke-linecap="square" />'
+            f'stroke="#2d3748" stroke-width="{sw}" stroke-linecap="square" '
+            'style="pointer-events:none;" />'
         )
     for win in building.windows:
         parts.append(
             f'  <line x1="{tx(win.start.x_mm):.1f}" y1="{ty(win.start.y_mm):.1f}" '
             f'x2="{tx(win.end.x_mm):.1f}" y2="{ty(win.end.y_mm):.1f}" '
-            'stroke="#00b5d8" stroke-width="4.2" />'
+            'stroke="#00b5d8" stroke-width="4.2" style="pointer-events:none;" />'
         )
     for door in building.doors:
         hx, hy = door.hinge.x_mm, door.hinge.y_mm
@@ -140,7 +152,7 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
         parts.append(
             f'  <line x1="{tx(hx):.1f}" y1="{ty(hy):.1f}" '
             f'x2="{tx(lx):.1f}" y2="{ty(ly):.1f}" '
-            'stroke="#38a169" stroke-width="1.6" />'
+            'stroke="#38a169" stroke-width="1.6" style="pointer-events:none;" />'
         )
 
     # 5. NetworkX Routed Conduit Paths
@@ -149,7 +161,8 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
             parts.append(
                 f'  <line x1="{tx(seg.start_mm.x_mm):.1f}" y1="{ty(seg.start_mm.y_mm):.1f}" '
                 f'x2="{tx(seg.end_mm.x_mm):.1f}" y2="{ty(seg.end_mm.y_mm):.1f}" '
-                'stroke="#4a5568" stroke-width="1.15" stroke-opacity="0.55" />'
+                'stroke="#4a5568" stroke-width="1.15" stroke-opacity="0.55" '
+                'style="pointer-events:none;" />'
             )
 
     # 6. Room Bilingual Labels
@@ -165,22 +178,40 @@ def render_floorplan_svg(result: Phase2DesignResult) -> str:
             f'class="room-area">{room.area_m2:.1f} m²</text>'
         )
 
-    # 7. Distribution Board Anchor (DB1)
+    # 7. Distribution Board Anchor (DB1 / MDB) & Sub-Boards
     dbx = tx(building.db_anchor.location_mm.x_mm)
     dby = ty(building.db_anchor.location_mm.y_mm)
     parts.extend(
         [
             (
-                f'  <rect x="{dbx - 14:.1f}" y="{dby - 8:.1f}" width="28" height="16" '
-                'fill="#c53030" stroke="#742a2a" stroke-width="1.5" rx="2" />'
+                f'  <rect data-db="true" x="{dbx - 14:.1f}" y="{dby - 8:.1f}" '
+                'width="28" height="16" fill="#c53030" stroke="#742a2a" '
+                'stroke-width="1.5" rx="2" />'
             ),
             (
                 f'  <text x="{dbx:.1f}" y="{dby + 3:.1f}" text-anchor="middle" '
-                f'style="fill:#ffffff;font-size:8px;font-weight:700;">'
+                f'style="fill:#ffffff;font-size:8px;font-weight:700;pointer-events:none;">'
                 f"{_esc(building.db_anchor.id)}</text>"
             ),
         ]
     )
+    for sb in building.sub_boards:
+        sbx = tx(sb.location_mm.x_mm)
+        sby = ty(sb.location_mm.y_mm)
+        parts.extend(
+            [
+                (
+                    f'  <rect data-sub-board="{_esc(sb.board_id)}" '
+                    f'x="{sbx - 18:.1f}" y="{sby - 8:.1f}" width="36" height="16" '
+                    'fill="#dd6b20" stroke="#7b341e" stroke-width="1.5" rx="2" />'
+                ),
+                (
+                    f'  <text x="{sbx:.1f}" y="{sby + 3:.1f}" text-anchor="middle" '
+                    f'style="fill:#ffffff;font-size:7.2px;font-weight:700;pointer-events:none;">'
+                    f"{_esc(sb.board_id)}</text>"
+                ),
+            ]
+        )
 
     # 8. Placed Electrical Devices
     for dev in spatial.devices:

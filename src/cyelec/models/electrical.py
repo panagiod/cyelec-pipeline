@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cyelec.models.building import BuildingModel
+from cyelec.models.building import BuildingModel, Point2D, RoomType
 
 
 class ReviewSeverity(StrEnum):
@@ -166,6 +166,8 @@ class DesignOverrides(BaseModel):
     ambient_temp_c: int | None = Field(default=None, ge=10, le=70)
     pv_capacity_kva: float | None = Field(default=None, ge=0.0)
     circuit_overrides: dict[str, CircuitOverride] = Field(default_factory=dict)
+    room_type_overrides: dict[str, RoomType] = Field(default_factory=dict)
+    db_location_override_mm: Point2D | None = None
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
     notes: str | None = None
