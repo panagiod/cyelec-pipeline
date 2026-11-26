@@ -265,11 +265,24 @@ def run_phase1_pipeline(
     report_language = overrides.report_language if overrides is not None else ReportLanguage.EN
     branding = overrides.branding if overrides is not None else None
 
+    is_commercial = effective_building.building_type in (
+        BuildingType.OFFICE,
+        BuildingType.SHOP,
+        BuildingType.WORKSHOP,
+        BuildingType.INDUSTRIAL,
+    )
+    eff_ipf_ka = (
+        overrides.prospective_fault_current_ka
+        if (overrides is not None and overrides.prospective_fault_current_ka is not None)
+        else (10.0 if (eac_compliance.ct_metering_required or is_commercial) else 6.0)
+    )
+
     result = ElectricalDesignResult(
         provenance=provenance,
         building=effective_building,
         earthing_system=earthing_system,
         ze_or_ra_ohm=ze_or_ra_ohm,
+        prospective_fault_current_ka=eff_ipf_ka,
         circuits=solved_circuits,
         sub_mains=solved_sub_mains,
         phase_balance=phase_balance,
@@ -469,6 +482,58 @@ def run_phase2_pipeline(
         routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
 
     spatial_flags.extend(routing_flags)
+
+    # 4b. BS 7671 Table 4C1 corridor conduit grouping check / optional trunking Cg propagation
+    trunk_counts = {rc.circuit_id: rc.max_parallel_circuits_on_trunk for rc in routed_circuits}
+    peak_corridor = max(trunk_counts.values(), default=1)
+    apply_cg = bool(overrides is not None and overrides.apply_corridor_grouping)
+    if apply_cg and peak_corridor > 1:
+        updated_specs = []
+        affected = 0
+        explicit_ov = overrides.circuit_overrides if overrides is not None else {}
+        for sp in specs:
+            par = trunk_counts.get(sp.circuit_id, 1)
+            has_manual_cg = (
+                sp.circuit_id in explicit_ov
+                and explicit_ov[sp.circuit_id].grouping_count is not None
+            )
+            if par > 1 and not has_manual_cg:
+                # Cap practical shared trunking bundle at 6 (BS 7671 Table 4C1 Cg=0.57)
+                eff_grp = min(par, 6)
+                updated_specs.append(sp.model_copy(update={"grouping_count": eff_grp}))
+                affected += 1
+            else:
+                updated_specs.append(sp)
+        specs = updated_specs
+        spatial_flags.append(
+            ReviewFlag(
+                code="CORRIDOR_CG_GROUPING_APPLIED",
+                severity=ReviewSeverity.INFO,
+                category="bs7671",
+                regulation_ref="BS 7671 Table 4C1 (Grouping Factor Cg)",
+                message=(
+                    f"Trunking/tray grouping mode enabled: applied BS 7671 Table 4C1 Cg derating "
+                    f"to {affected} co-routed circuit(s) (peak corridor density: {peak_corridor})."
+                ),
+            )
+        )
+    elif peak_corridor >= 4:
+        ref_cg, _ = standards.cables.get_cg(min(peak_corridor, 6))
+        spatial_flags.append(
+            ReviewFlag(
+                code="CONDUIT_CORRIDOR_GROUPING_CHECK",
+                severity=ReviewSeverity.WARNING,
+                category="bs7671",
+                regulation_ref="BS 7671 Table 4C1 (Grouping Factor Cg)",
+                message=(
+                    f"Peak {peak_corridor} circuits share a main corridor/DB departure route. "
+                    "Separate recessed Cyprus masonry PVC conduits (>=2xD spacing) retain Cg=1.00; "
+                    f"if installed in shared trunking/cable tray, enable 'Apply Corridor Cg "
+                    f"Grouping' (Table 4C1 Cg={ref_cg:.2f} for 6 grouped circuits)."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
 
     # 5. Feed true NetworkX routed lengths and precomputed specs into Phase 1 solvers
     design = run_phase1_pipeline(

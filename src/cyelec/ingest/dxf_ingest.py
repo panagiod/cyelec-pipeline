@@ -14,6 +14,7 @@ from ezdxf.entities.insert import Insert
 from ezdxf.entities.lwpolyline import LWPolyline
 from ezdxf.entities.mtext import MText
 from ezdxf.entities.polyline import Polyline
+from ezdxf.entities.spline import Spline
 from ezdxf.entities.text import Text
 from ezdxf.filemanagement import readfile as read_dxf
 from shapely.geometry import LineString, Point, Polygon
@@ -31,6 +32,7 @@ from cyelec.models.building import (
     DoorOpening,
     DxfLayerInfo,
     DxfLayerMapping,
+    FloorUnderlayRef,
     PlumbingFixture,
     Point2D,
     Room,
@@ -167,6 +169,18 @@ def inspect_dxf_layers(dxf_path: Path) -> list[DxfLayerInfo]:
     return infos
 
 
+def _flatten_spline_xy(entity: Spline, scale: float) -> list[tuple[float, float]]:
+    """Flatten a DXF SPLINE entity into scaled 2D vertices (mm)."""
+    try:
+        dist = max(0.02, 50.0 / max(scale, 1e-6))
+        return [(float(v.x) * scale, float(v.y) * scale) for v in entity.flattening(dist)]
+    except Exception:
+        return [
+            (float(p[0]) * scale, float(p[1]) * scale)
+            for p in entity.control_points
+        ]
+
+
 def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, float]] | None:
     pts: list[tuple[float, float]] = []
     if isinstance(entity, LWPolyline):
@@ -189,6 +203,16 @@ def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, 
         if not is_closed:
             return None
         pts = [(x * scale, y * scale) for x, y in raw_v]
+    elif isinstance(entity, Spline):
+        raw_s = _flatten_spline_xy(entity, scale)
+        if len(raw_s) < 3:
+            return None
+        is_closed = bool(entity.closed) or (
+            math.hypot(raw_s[0][0] - raw_s[-1][0], raw_s[0][1] - raw_s[-1][1]) < 25.0
+        )
+        if not is_closed:
+            return None
+        pts = raw_s
     else:
         return None
 
@@ -505,6 +529,32 @@ def ingest_dxf(
             )
         )
 
+    # Detect unresolved external XREF attachments common in Cyprus architect DWGs
+    xref_names = sorted(
+        blk.name
+        for blk in doc.blocks
+        if blk.block is not None
+        and (
+            getattr(blk.block, "is_xref", False)
+            or getattr(blk.block, "is_xref_overlay", False)
+            or bool(str(blk.block.dxf.get("xref_path", "")).strip())
+        )
+    )
+    if xref_names:
+        flags.append(
+            ReviewFlag(
+                code="DXF_UNRESOLVED_XREFS",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"Input CAD references {len(xref_names)} external XREF block(s) "
+                    f"({', '.join(xref_names[:5])}). Bind XREFs in AutoCAD (XREF -> Bind -> "
+                    "Insert) if architectural walls, grids, or sanitary fixtures are missing."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+
     msp = doc.modelspace()
     resolved_entities = list(_iter_resolved_entities(list(msp)))
 
@@ -521,6 +571,10 @@ def ingest_dxf(
             for px, py in ent.get_points("xy"):
                 xs.append(float(px))
                 ys.append(float(py))
+        elif isinstance(ent, Spline):
+            for cp in ent.control_points:
+                xs.append(float(cp[0]))
+                ys.append(float(cp[1]))
         elif t == "ARC" and _role_matches(layer_name, "doors", layer_mapping):
             raw_arc_radii.append(float(ent.dxf.radius))
     span = max((max(xs) - min(xs)) if xs else 0.0, (max(ys) - min(ys)) if ys else 0.0)
@@ -567,7 +621,7 @@ def ingest_dxf(
                 if isinstance(poly, Polygon) and poly.area >= 500_000.0:
                     room_raw_polys.append(poly)
 
-        # Wall segments
+        # Wall segments (LINE, LWPOLYLINE, and flattened curved SPLINE walls)
         elif _role_matches(layer, "walls", layer_mapping):
             if dtype == "LINE":
                 wall_lines.append(
@@ -593,6 +647,19 @@ def ingest_dxf(
                         (
                             Point2D(x_mm=pts[-1][0], y_mm=pts[-1][1]),
                             Point2D(x_mm=pts[0][0], y_mm=pts[0][1]),
+                        )
+                    )
+            elif isinstance(ent, Spline):
+                s_pts = _flatten_spline_xy(ent, scale)
+                for a, b in zip(s_pts, s_pts[1:], strict=False):
+                    wall_lines.append(
+                        (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
+                    )
+                if ent.closed and len(s_pts) >= 3:
+                    wall_lines.append(
+                        (
+                            Point2D(x_mm=s_pts[-1][0], y_mm=s_pts[-1][1]),
+                            Point2D(x_mm=s_pts[0][0], y_mm=s_pts[0][1]),
                         )
                     )
 
@@ -1126,6 +1193,7 @@ def ingest_multi_floor_dxf(
     combined_doors: list[DoorOpening] = []
     combined_windows: list[WindowOpening] = []
     sub_boards: list[SubBoardSpec] = []
+    floor_underlays: list[FloorUnderlayRef] = []
     combined_flags: list[ReviewFlag] = []
     hasher = hashlib.sha256()
 
@@ -1149,6 +1217,14 @@ def ingest_multi_floor_dxf(
         min_x = min(all_x) if all_x else 0.0
         max_x = max(all_x) if all_x else 10_000.0
         dx = cursor_x - min_x
+        floor_underlays.append(
+            FloorUnderlayRef(
+                floor=floor,
+                source_file=str(dxf_path),
+                dx_mm=round(dx, 2),
+                unit_scale_to_mm=f_model.source_unit_scale_to_mm,
+            )
+        )
 
         for r in f_model.rooms:
             new_rid = f"{floor}-{r.id}"
@@ -1264,5 +1340,6 @@ def ingest_multi_floor_dxf(
         pv_capacity_kva=pv_capacity_kva,
         source_file=",".join(str(p) for _, p in floor_files),
         source_sha256=hasher.hexdigest(),
+        floor_underlays=floor_underlays,
     )
     return model, combined_flags

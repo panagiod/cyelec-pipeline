@@ -147,17 +147,20 @@ def test_layout_dxf_preserves_original_architect_underlay_and_meter_units(tmp_pa
     custom_furn = [e for e in out_msp if e.dxf.layer == "A-FURN-CUSTOM"]
     assert len(custom_furn) == 1
 
-    e_circles = [
+    e_inserts = [
         e
         for e in out_msp
-        if e.dxf.layer in ("E-LITE", "E-SWIT") and e.dxftype() == "CIRCLE"
+        if e.dxf.layer in ("E-LITE", "E-SWIT") and e.dxftype() == "INSERT"
     ]
-    assert len(e_circles) >= 2
-    # Coordinates & symbol radii must be scaled back into meters (~0..8 m), NOT raw mm (0..8000)
-    for c in e_circles:
-        assert -2.0 <= float(c.dxf.center.x) <= 12.0
-        assert -2.0 <= float(c.dxf.center.y) <= 10.0
-        assert 0.01 <= float(c.dxf.radius) <= 0.5
+    assert len(e_inserts) >= 2
+    # Coordinates & IEC block radii must be scaled back into meters (~0..8 m), NOT raw mm (0..8000)
+    for ins in e_inserts:
+        assert -2.0 <= float(ins.dxf.insert.x) <= 12.0
+        assert -2.0 <= float(ins.dxf.insert.y) <= 10.0
+        blk = out_doc.blocks.get(ins.dxf.name)
+        blk_circles = [b for b in blk if b.dxftype() == "CIRCLE"]
+        assert blk_circles
+        assert all(0.01 <= float(c.dxf.radius) <= 0.5 for c in blk_circles)
 
 
 def test_prod_ui_hides_docs_and_multifloor_bundle_returns_zip(

@@ -14,6 +14,8 @@ def render_etek_workbench_html(
     show_api_docs: bool = True,
     ifc_available: bool = False,
     dwg_available: bool = False,
+    auth_required: bool = False,
+    invite_code_required: bool = False,
 ) -> str:
     """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard served at GET /."""
     prefix = base_url.rstrip("/")
@@ -32,9 +34,13 @@ def render_etek_workbench_html(
         exts.append(".ifc")
     upload_accept = ",".join(exts)
     fmt_list = " / ".join(exts)
+    mf_exts = ".dxf/.dwg" if dwg_available else ".dxf"
     upload_label = (
-        f"Or Upload Architectural Floorplan(s) ({fmt_list} — select 2+ .dxf for multi-floor)"
+        f"Or Upload Architectural Floorplan(s) ({fmt_list} — select 2+ {mf_exts} for multi-floor)"
     )
+    auth_req_js = "true" if auth_required else "false"
+    invite_req_js = "true" if invite_code_required else "false"
+    invite_disp = "block" if invite_code_required else "none"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -281,15 +287,108 @@ def render_etek_workbench_html(
       margin: 4px 0;
       font-size: 11px;
     }}
+    .auth-backdrop {{
+      position: fixed;
+      inset: 0;
+      background: rgba(16, 42, 67, 0.72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      padding: 16px;
+    }}
+    .auth-backdrop.open {{ display: flex; }}
+    .auth-card {{
+      background: #ffffff;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      max-width: 430px;
+      width: 100%;
+      padding: 20px 22px;
+      box-shadow: 0 18px 42px rgba(16, 42, 67, 0.28);
+    }}
+    .auth-card h2 {{ margin: 0 0 6px 0; font-size: 16px; color: var(--navy); border: none; }}
+    .auth-tabs {{ display: flex; gap: 6px; margin: 12px 0; }}
+    .auth-tab {{
+      flex: 1;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: #f8fafc;
+      color: var(--navy);
+      font-weight: 600;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    .auth-tab.active {{ background: var(--navy); color: #fff; border-color: var(--navy); }}
+    .acct-pill {{
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 999px;
+      padding: 4px 11px;
+      font-size: 11.5px;
+      color: #ffffff;
+      cursor: pointer;
+    }}
   </style>
 </head>
 <body>
+  <div id="authModal" class="auth-backdrop">
+    <div class="auth-card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <img src="/logo.png" alt="CyElec" width="32" height="32" style="border-radius:6px;" />
+        <div>
+          <h2>CyElec — ETEK Engineer Portal</h2>
+          <div style="font-size:11.5px;color:var(--muted);">
+            Sign in or register your Cyprus electrical engineering firm
+          </div>
+        </div>
+      </div>
+      <div class="auth-tabs">
+        <button id="mTabLogin" class="auth-tab active" onclick="switchAuthModalTab('login')">
+          Sign In
+        </button>
+        <button id="mTabReg" class="auth-tab" onclick="switchAuthModalTab('register')">
+          Create Firm Account
+        </button>
+      </div>
+      <div id="modalRegFields" style="display:none;">
+        <label for="mFirm">Consulting Firm Name</label>
+        <input id="mFirm" placeholder="e.g., Kypros MEP Consulting Ltd" />
+        <label for="mName">Lead Engineer Full Name</label>
+        <input id="mName" placeholder="e.g., N. Papadopoulos" />
+        <div id="mInviteWrap" style="display:{invite_disp};">
+          <label for="mInvite">Closed Pilot Invite Code</label>
+          <input id="mInvite" placeholder="Enter your pilot invite code" />
+        </div>
+      </div>
+      <label for="mEmail">Work Email</label>
+      <input id="mEmail" type="email" placeholder="engineer@yourfirm.cy" />
+      <label for="mPass">Password</label>
+      <input id="mPass" type="password" placeholder="Min 8 characters" />
+      <div id="mError" style="color:#c53030;font-size:11.5px;margin-top:8px;"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button id="mSubmitBtn" class="btn btn-primary" style="flex:1;margin:0;"
+          onclick="submitAuthModal()">Sign In</button>
+        <button id="mCancelBtn" class="btn btn-secondary" style="width:auto;margin:0;"
+          onclick="closeAuthModal()">Close</button>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin:10px 0 0 0;">
+        Forgot your password? Contact your firm Owner (Team Seats -> Reset Password) or Pilot
+        Administrator for instant recovery.
+      </p>
+    </div>
+  </div>
+
   <header>
     <div class="brand-lockup">
       <img src="/logo.png" alt="CyElec" class="brand-logo" width="34" height="34" />
       <h1>CyElec — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
     </div>
     <div class="hdr-right">
+      <button id="hdrAccountBtn" class="acct-pill" onclick="openAuthModal('login')">
+        Sign In / Register
+      </button>
       <a class="hdr-link" href="/guide" target="_blank" rel="noopener">
         User Guide &amp; Know-How
       </a>
@@ -300,13 +399,7 @@ def render_etek_workbench_html(
 
   <div class="layout">
     <aside class="panel">
-      <h2>1. Input &amp; DXF Layer Wizard</h2>
-      <label for="tenantId">Tenant ID (X-Tenant-ID)</label>
-      <input id="tenantId" value="cy-etek-demo" />
-
-      <label for="apiKeyInput">Tenant API Key (X-API-Key, session only)</label>
-      <input id="apiKeyInput" type="password" placeholder="Optional: cyelec_live_..." />
-
+      <h2>1. Input &amp; CAD Layer Wizard</h2>
       <label for="benchmarkSel">Cyprus Benchmark Fixture</label>
       <select id="benchmarkSel">
         <option value="apartment_3bed">3-Bed Cyprus Apartment (120 m²)</option>
@@ -328,9 +421,20 @@ def render_etek_workbench_html(
         <div id="multiFloorRows"></div>
       </div>
       <div id="layerWizard" class="layer-box">
-        <strong style="font-size:11px;color:#1b365d;">DXF Layer Mapping Wizard</strong>
+        <strong style="font-size:11px;color:#1b365d;">CAD Layer Mapping Wizard</strong>
         <div id="layerRows"></div>
       </div>
+
+      <details style="margin:10px 0 4px 0;padding:6px 8px;background:#f8fafc;
+                      border:1px solid var(--border);border-radius:4px;">
+        <summary style="font-size:11px;color:var(--muted);cursor:pointer;font-weight:600;">
+          Advanced / API Key Access (Optional)
+        </summary>
+        <label for="tenantId">Tenant Workspace ID</label>
+        <input id="tenantId" value="cy-etek-demo" />
+        <label for="apiKeyInput">Tenant API Key (session only)</label>
+        <input id="apiKeyInput" type="password" placeholder="Optional: cyelec_live_..." />
+      </details>
 
       <h2 style="margin-top:14px;">2. BS 7671 &amp; EAC Overrides</h2>
       <label for="eacProfile">EAC / BS 7671 Profile</label>
@@ -354,6 +458,11 @@ def render_etek_workbench_html(
 
       <label for="pvKva">PV Capacity Override (kVA, optional)</label>
       <input id="pvKva" type="number" step="0.5" placeholder="Use model default" />
+
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;">
+        <input id="corridorCgChk" type="checkbox" style="width:auto;" />
+        <span>Apply Auto Corridor Cg Grouping (Trunking / Tray Mode)</span>
+      </label>
 
       <h2 style="margin-top:14px;">3. Branding, BOQ &amp; Language</h2>
       <label for="reportLang">Deliverable Language</label>
@@ -522,12 +631,16 @@ def render_etek_workbench_html(
             <div class="panel" style="margin:0;">
               <h2>Firm Sign In / Self-Serve Registration (JWT)</h2>
               <div id="authBadge" style="font-size:11.5px;color:var(--muted);margin-bottom:6px;">
-                Not signed in via JWT (using X-API-Key or Demo mode).
+                Not signed in via JWT.
               </div>
               <input id="authFirm" placeholder="Firm Name (for new signup)"
-                style="margin-bottom:6px;" />
+                style="margin-bottom:5px;" />
+              <input id="authDisplayName" placeholder="Lead Engineer Name (for new signup)"
+                style="margin-bottom:5px;" />
+              <input id="authInvite" placeholder="Closed Pilot Invite Code (if required)"
+                style="margin-bottom:5px;display:{invite_disp};" />
               <input id="authEmail" type="email" placeholder="Work Email"
-                style="margin-bottom:6px;" />
+                style="margin-bottom:5px;" />
               <input id="authPass" type="password" placeholder="Password (min 8 chars)"
                 style="margin-bottom:8px;" />
               <div class="fp-toolbar" style="margin:0;">
@@ -537,6 +650,18 @@ def render_etek_workbench_html(
                 </button>
                 <button class="btn btn-secondary btn-sm" onclick="firmLogout()">Sign Out</button>
               </div>
+              <details style="margin-top:8px;font-size:11.5px;">
+                <summary style="cursor:pointer;color:var(--navy);font-weight:600;">
+                  Change My Password
+                </summary>
+                <input id="chgCurPass" type="password" placeholder="Current Password"
+                  style="margin:6px 0 4px 0;" />
+                <input id="chgNewPass" type="password" placeholder="New Password (8+ chars)"
+                  style="margin-bottom:6px;" />
+                <button class="btn btn-secondary btn-sm" onclick="changeMyPassword()">
+                  Save New Password
+                </button>
+              </details>
             </div>
 
             <div class="panel" style="margin:0;">
@@ -669,6 +794,7 @@ def render_etek_workbench_html(
         earthing_system: document.getElementById('earthing').value,
         report_language: document.getElementById('reportLang').value,
         tender_boq_blank_rates: document.getElementById('tenderBoqChk').checked,
+        apply_corridor_grouping: document.getElementById('corridorCgChk').checked,
         circuit_overrides: circuitOverrides,
         room_type_overrides: roomTypeOverrides
       }};
@@ -960,7 +1086,8 @@ def render_etek_workbench_html(
       }}
 
       const f = files[0];
-      if (!f || !f.name.toLowerCase().endsWith('.dxf')) {{
+      const fnLow = f ? f.name.toLowerCase() : '';
+      if (!f || (!fnLow.endsWith('.dxf') && !fnLow.endsWith('.dwg'))) {{
         box.style.display = 'none';
         return;
       }}
@@ -1277,13 +1404,106 @@ def render_etek_workbench_html(
         </tbody></table>`;
     }}
 
+    const AUTH_REQUIRED = {auth_req_js};
+    const INVITE_CODE_REQUIRED = {invite_req_js};
+    let authModalMode = 'login';
+
+    function openAuthModal(mode) {{
+      authModalMode = mode || 'login';
+      switchAuthModalTab(authModalMode);
+      document.getElementById('mError').textContent = '';
+      document.getElementById('authModal').classList.add('open');
+    }}
+
+    function closeAuthModal() {{
+      document.getElementById('authModal').classList.remove('open');
+    }}
+
+    function switchAuthModalTab(mode) {{
+      authModalMode = mode;
+      const isReg = (mode === 'register');
+      document.getElementById('mTabLogin').classList.toggle('active', !isReg);
+      document.getElementById('mTabReg').classList.toggle('active', isReg);
+      document.getElementById('modalRegFields').style.display = isReg ? 'block' : 'none';
+      document.getElementById('mSubmitBtn').textContent = isReg
+        ? 'Create Firm Account'
+        : 'Sign In';
+      document.getElementById('mError').textContent = '';
+    }}
+
+    function applySignedInSession(data) {{
+      if (data.access_token) {{
+        try {{ sessionStorage.setItem('cyelec_jwt', data.access_token); }} catch (_) {{}}
+      }}
+      const t = data.tenant || {{}};
+      const u = data.user || data.principal || {{}};
+      const q = data.quota || null;
+      if (t.tenant_id) document.getElementById('tenantId').value = t.tenant_id;
+      if (t.branding) {{
+        if (t.branding.firm_name) document.getElementById('firmName').value = t.branding.firm_name;
+        if (t.branding.engineer_name) {{
+          document.getElementById('engName').value = t.branding.engineer_name;
+        }}
+        if (t.branding.etek_reg_no) {{
+          document.getElementById('etekReg').value = t.branding.etek_reg_no;
+        }}
+      }}
+      if (t.report_language) document.getElementById('reportLang').value = t.report_language;
+      const roleStr = (u.role || 'owner').toUpperCase();
+      const emailStr = u.email || t.display_name || t.tenant_id || 'Signed In';
+      const qStr = q ? ` · ${{q.solves_used}}/${{q.solves_limit}} solves` : '';
+      document.getElementById('authBadge').textContent =
+        `Signed in: ${{emailStr}} (${{roleStr}})${{qStr}}`;
+      document.getElementById('hdrAccountBtn').textContent =
+        `${{emailStr}} (${{roleStr}})${{qStr}}`;
+      closeAuthModal();
+    }}
+
+    async function submitAuthModal() {{
+      const errEl = document.getElementById('mError');
+      errEl.textContent = '';
+      const email = document.getElementById('mEmail').value.trim();
+      const password = document.getElementById('mPass').value;
+      const isReg = (authModalMode === 'register');
+      const endpoint = isReg ? '/v1/auth/register' : '/v1/auth/login';
+      const body = isReg
+        ? {{
+            firm_name: document.getElementById('mFirm').value.trim(),
+            display_name: document.getElementById('mName').value.trim(),
+            invite_code: (document.getElementById('mInvite').value || '').trim(),
+            email,
+            password
+          }}
+        : {{ email, password }};
+      try {{
+        const resp = await fetch(endpoint, {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(body)
+        }});
+        if (!resp.ok) {{
+          let msg = await resp.text();
+          try {{ msg = JSON.parse(msg).detail || msg; }} catch (_) {{}}
+          errEl.textContent = msg;
+          return;
+        }}
+        const data = await resp.json();
+        applySignedInSession(data);
+        await loadSubscriptionAndTeam();
+        await runSolve();
+      }} catch (err) {{
+        errEl.textContent = err.message || 'Network error';
+      }}
+    }}
+
     async function firmRegister() {{
       const st = document.getElementById('wsStatus');
       const body = {{
         firm_name: document.getElementById('authFirm').value.trim(),
+        display_name: (document.getElementById('authDisplayName').value || '').trim(),
+        invite_code: (document.getElementById('authInvite').value || '').trim(),
         email: document.getElementById('authEmail').value.trim(),
-        password: document.getElementById('authPass').value,
-        display_name: document.getElementById('authFirm').value.trim()
+        password: document.getElementById('authPass').value
       }};
       const resp = await fetch('/v1/auth/register', {{
         method: 'POST',
@@ -1292,12 +1512,10 @@ def render_etek_workbench_html(
       }});
       if (!resp.ok) {{ st.textContent = `Register failed: ${{await resp.text()}}`; return; }}
       const data = await resp.json();
-      try {{ sessionStorage.setItem('cyelec_jwt', data.access_token); }} catch (_) {{}}
-      document.getElementById('tenantId').value = data.tenant.tenant_id;
-      document.getElementById('authBadge').textContent =
-        `Signed in: ${{data.user.email}} (${{data.user.role.toUpperCase()}})`;
+      applySignedInSession(data);
       st.textContent = `Registered firm ${{data.tenant.display_name}}.`;
       await loadSubscriptionAndTeam();
+      await runSolve();
     }}
 
     async function firmLogin() {{
@@ -1313,18 +1531,46 @@ def render_etek_workbench_html(
       }});
       if (!resp.ok) {{ st.textContent = `Sign in failed: ${{await resp.text()}}`; return; }}
       const data = await resp.json();
-      try {{ sessionStorage.setItem('cyelec_jwt', data.access_token); }} catch (_) {{}}
-      document.getElementById('tenantId').value = data.tenant.tenant_id;
-      document.getElementById('authBadge').textContent =
-        `Signed in: ${{data.user.email}} (${{data.user.role.toUpperCase()}})`;
+      applySignedInSession(data);
       st.textContent = `Welcome back, ${{data.user.display_name}}.`;
       await loadSubscriptionAndTeam();
+      await runSolve();
     }}
 
     function firmLogout() {{
       try {{ sessionStorage.removeItem('cyelec_jwt'); }} catch (_) {{}}
-      document.getElementById('authBadge').textContent = 'Signed out of JWT session.';
+      document.getElementById('authBadge').textContent = 'Signed out.';
+      document.getElementById('hdrAccountBtn').textContent = 'Sign In / Register';
       document.getElementById('wsStatus').textContent = 'Signed out.';
+      if (AUTH_REQUIRED) openAuthModal('login');
+    }}
+
+    async function changeMyPassword() {{
+      const st = document.getElementById('wsStatus');
+      const cur = document.getElementById('chgCurPass').value;
+      const nxt = document.getElementById('chgNewPass').value;
+      const resp = await fetch('/v1/auth/change-password', {{
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({{ current_password: cur, new_password: nxt }})
+      }});
+      if (!resp.ok) {{ st.textContent = `Password change failed: ${{await resp.text()}}`; return; }}
+      document.getElementById('chgCurPass').value = '';
+      document.getElementById('chgNewPass').value = '';
+      st.textContent = 'Your password has been updated.';
+    }}
+
+    async function resetMemberPassword(uid, email) {{
+      const st = document.getElementById('wsStatus');
+      const npw = prompt(`Enter new temporary password (8+ chars) for ${{email}}:`);
+      if (!npw || npw.length < 8) return;
+      const resp = await fetch(`/v1/team/members/${{encodeURIComponent(uid)}}/reset-password`, {{
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({{ new_password: npw }})
+      }});
+      if (!resp.ok) {{ st.textContent = `Reset failed: ${{await resp.text()}}`; return; }}
+      st.textContent = `Password reset for ${{email}}.`;
     }}
 
     async function loadSubscriptionAndTeam() {{
@@ -1345,8 +1591,14 @@ def render_etek_workbench_html(
         const members = await tResp.json();
         teamBox.innerHTML = members.length
           ? members.map(m =>
-              `<div><code>${{escapeHtml(m.role)}}</code> — ${{escapeHtml(m.email)}}
-               (${{escapeHtml(m.display_name)}})</div>`
+              `<div style="display:flex;justify-content:space-between;align-items:center;
+                           gap:6px;margin:3px 0;">
+                <span><code>${{escapeHtml(m.role)}}</code> — ${{escapeHtml(m.email)}}
+                (${{escapeHtml(m.display_name)}})</span>
+                <button class="btn btn-secondary btn-sm"
+                  onclick="resetMemberPassword('${{escapeHtml(m.user_id)}}',
+                  '${{escapeHtml(m.email)}}')">Reset PW</button>
+              </div>`
             ).join('')
           : 'No user accounts registered on this tenant yet.';
       }}
@@ -1393,12 +1645,34 @@ def render_etek_workbench_html(
       if (data.portal_url) window.open(data.portal_url, '_blank', 'noopener');
     }}
 
-    window.addEventListener('DOMContentLoaded', () => {{
+    window.addEventListener('DOMContentLoaded', async () => {{
+      let savedJwt = '';
+      let savedKey = '';
       try {{
-        const savedKey = sessionStorage.getItem('cyelec_api_key');
+        savedKey = (sessionStorage.getItem('cyelec_api_key') || '').trim();
         if (savedKey) document.getElementById('apiKeyInput').value = savedKey;
+        savedJwt = (sessionStorage.getItem('cyelec_jwt') || '').trim();
       }} catch (_) {{}}
-      runSolve();
+
+      if (savedJwt) {{
+        const meResp = await fetch('/v1/auth/me', {{ headers: authHeaders(false) }});
+        if (meResp.ok) {{
+          const me = await meResp.json();
+          applySignedInSession(me);
+          await loadSubscriptionAndTeam();
+          await runSolve();
+          return;
+        }}
+        try {{ sessionStorage.removeItem('cyelec_jwt'); }} catch (_) {{}}
+      }}
+
+      if (AUTH_REQUIRED && !savedKey) {{
+        document.getElementById('statusLine').textContent =
+          'Sign in or create your firm account to start designing.';
+        openAuthModal('login');
+        return;
+      }}
+      await runSolve();
     }});
   </script>
 </body>

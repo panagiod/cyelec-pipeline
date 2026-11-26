@@ -51,8 +51,11 @@ def test_phase2_dxf_to_deliverables_end_to_end(tmp_path: Path) -> None:
     auditor = layout_doc.audit()
     assert len(auditor.errors) == 0
     assert layout_doc.dxfversion == "AC1032"
-    msp = layout_doc.modelspace()
-    used_layers = {ent.dxf.layer for ent in msp}
+    used_layers = {
+        ent.dxf.layer
+        for layout in layout_doc.layouts
+        for ent in layout
+    }
     for layer in ELECTRICAL_LAYERS:
         assert layer in layout_doc.layers
         assert layer in used_layers

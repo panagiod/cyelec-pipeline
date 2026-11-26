@@ -186,6 +186,9 @@ class WorkspaceStoreProtocol(Protocol):
     def update_user_role(
         self, tenant_id: str, user_id: str, role: Role
     ) -> UserRecord | None: ...
+    def update_user_password(
+        self, tenant_id: str, user_id: str, new_password: str
+    ) -> UserRecord | None: ...
     def delete_user(self, tenant_id: str, user_id: str) -> bool: ...
     def get_monthly_solve_count(
         self, tenant_id: str, month_key: str | None = None
@@ -661,6 +664,32 @@ class WorkspaceStore:
             self._conn.execute(
                 "UPDATE users SET role = ?, updated_at = ? WHERE user_id = ? AND tenant_id = ?",
                 (role.value, _utc_now(), user_id, tenant_id),
+            )
+            self._conn.commit()
+            updated = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+        return self._row_to_user(updated) if updated is not None else None
+
+    def update_user_password(
+        self, tenant_id: str, user_id: str, new_password: str
+    ) -> UserRecord | None:
+        pw_hash, pw_salt = hash_password(new_password)
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+            if cur is None:
+                return None
+            self._conn.execute(
+                """
+                UPDATE users
+                SET password_hash = ?, password_salt = ?, auth_provider = 'password', updated_at = ?
+                WHERE user_id = ? AND tenant_id = ?
+                """,
+                (pw_hash, pw_salt, _utc_now(), user_id, tenant_id),
             )
             self._conn.commit()
             updated = self._conn.execute(

@@ -599,11 +599,17 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
          result.building.building_type.value),
         ("A. Premises", "Total Floor Area (m²)", "Συνολικό Εμβαδόν",
          f"{result.building.total_floor_area_m2:.2f} m²"),
-        ("A. Premises", "District / Plot No.", "Επαρχία / Αρ. Τεμαχίου",
+        ("A. Premises", "District / Sheet / Plan / Plot", "Επαρχία / Φύλλο / Σχέδιο / Τεμάχιο",
          "[Complete before EAC filing]"),
-        ("B. ETEK", "Consulting Firm", "Μελετητικό Γραφείο", firm_str),
-        ("B. ETEK", "Lead Engineer", "Ηλεκτρολόγος Μηχανικός", eng_str),
-        ("B. ETEK", "ETEK Reg. No.", "Αρ. Μητρώου ΕΤΕΚ", etek_str),
+        ("A. Premises", "EAC Tariff Code", "Διατίμηση ΑΗΚ",
+         "Code 10 (Commercial)"
+         if result.building.building_type.value in ("office", "shop", "workshop")
+         else "Code 01 (Domestic)"),
+        ("B. Ε-ΔΔ-516", "Consulting Firm", "Μελετητικό Γραφείο ΕΤΕΚ", firm_str),
+        ("B. Ε-ΔΔ-516", "Lead Engineer", "Μελετητής Ηλεκτρολόγος Μηχανικός", eng_str),
+        ("B. Ε-ΔΔ-516", "ETEK Reg. No.", "Αρ. Μητρώου ΕΤΕΚ", etek_str),
+        ("B. Ε-ΔΔ-514", "Licensed Installer (Class A/B/C)", "Αδειούχος Εγκαταστάτης",
+         "[Contractor Name & HMY Licence No.]"),
         ("C. Supply", "Requested EAC Tier", "Αιτούμενη Παροχή ΑΗΚ", eac.recommended_supply_tier),
         ("C. Supply", "Connected / Diversified kVA", "Εγκατεστημένη / Ταυτόχρονη", kva_str),
         ("C. Supply", "Peak Phase Current", "Μέγιστο Ρεύμα Φάσης", peak_str),
@@ -612,7 +618,7 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
         ("C. Supply", "Earthing & Ze/Ra", "Σύστημα Γείωσης", earth_str),
         ("D. Systems", "PV Capacity (kVA)", "Φωτοβολταϊκά (Φ/Β)", pv_str),
         ("D. Systems", "EV Charger (Sec 722)", "Φορτιστής EV", ev_str),
-        ("E. Sign-Off", "ETEK Statutory Stamp", "Σφραγίδα & Υπογραφή ΕΤΕΚ",
+        ("E. Sign-Off", "ETEK Statutory Stamp (Ε-ΔΔ-516)", "Σφραγίδα & Υπογραφή ΕΤΕΚ",
          "REQUIRED BEFORE EAC SUBMISSION"),
     ]
     for app_r_idx, app_row in enumerate(app_rows, start=5):
@@ -621,6 +627,69 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
             c.font = _BOLD_FONT if app_c_idx == 2 else _BODY_FONT
             c.border = _CELL_BORDER
     _autosize_columns(ws4, max_width=46)
+
+    # ==================================================================
+    # Sheet 5: Cyprus HMY 58 (18-1) BS 7671 Initial Verification Test Schedule
+    # ==================================================================
+    ws5 = wb.create_sheet(title="HMY 58 Test Schedule")
+    ws5.views.sheetView[0].showGridLines = True
+    ws5.page_setup.orientation = ws5.ORIENTATION_LANDSCAPE
+    ws5.page_setup.paperSize = ws5.PAPERSIZE_A4
+
+    ws5["A1"] = "CYPRUS HMY 58 (18-1) — BS 7671 INITIAL VERIFICATION CIRCUIT TEST SCHEDULE"
+    ws5["A1"].font = _TITLE_FONT
+    ws5["A2"] = (
+        f"Project: {result.building.project_name} | Earthing: {earth_str} | "
+        "Complete blank site test columns during inspection (Ε-ΔΔ-514)"
+    )
+    ws5["A2"].font = _BODY_FONT
+
+    hmy_headers = [
+        "Board",
+        "Circuit ID",
+        "Phase",
+        "Description",
+        "Live/CPC (mm²)",
+        "Device",
+        "RCD (mA)",
+        "Max Zs (Ω)",
+        "R1+R2 (Ω)",
+        "IR (MΩ >=1.0)",
+        "Polarity",
+        "Meas. Zs/Ra (Ω)",
+        "RCD 1x (ms)",
+        "RCD 5x (ms)",
+        "Site Pass/Fail",
+    ]
+    for c_idx, title in enumerate(hmy_headers, start=1):
+        cell = ws5.cell(row=4, column=c_idx, value=title)
+        cell.font = _HEADER_FONT
+        cell.fill = _NAVY_FILL
+        cell.border = _CELL_BORDER
+
+    for t_idx, circ in enumerate(result.circuits, start=5):
+        hmy_row: list[str | float | int | None] = [
+            circ.spec.board_id,
+            circ.spec.circuit_id,
+            circ.phase.value,
+            circ.spec.description,
+            f"{circ.cable_mm2:g}/{circ.cpc_mm2:g}",
+            circ.device_label,
+            circ.spec.rcd_idn_ma if circ.spec.rcd_idn_ma else "-",
+            round(circ.zs_max_ohm, 3),
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
+        for c_idx, cell_val in enumerate(hmy_row, start=1):
+            tc = ws5.cell(row=t_idx, column=c_idx, value=cell_val)
+            tc.font = _BOLD_FONT if c_idx == 2 else _BODY_FONT
+            tc.border = _CELL_BORDER
+    _autosize_columns(ws5, max_width=32)
 
     wb.save(str(out_path))
     return out_path

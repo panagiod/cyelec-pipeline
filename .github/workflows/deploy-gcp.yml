@@ -76,6 +76,8 @@ jobs:
 
       - name: Terraform Init & Apply (Cloud Run + Firestore + GCS in europe-west1)
         working-directory: deploy/gcp/terraform
+        env:
+          TF_VAR_pilot_invite_code: ${{ secrets.CYELEC_PILOT_INVITE_CODE || vars.CYELEC_PILOT_INVITE_CODE || '' }}
         run: |
           terraform init \
             -backend-config="bucket=${{ steps.target.outputs.tf_state_bucket }}" \
@@ -115,6 +117,7 @@ jobs:
           assert data["status"] == "ok", f"Unhealthy: {data}"
           assert data["store_backend"] == "firestore", f"Wrong store backend: {data}"
           assert data.get("ifc_available") is True, f"IFC BIM not enabled: {data}"
+          assert data.get("dwg_available") is True, f"DWG converter not enabled: {data}"
           assert data.get("pdf_export_available") is True, f"WeasyPrint PDF not enabled: {data}"
           for required in (
               "x-frame-options: deny",
@@ -124,7 +127,7 @@ jobs:
               "strict-transport-security:",
           ):
               assert required in hdrs, f"Missing security header: {required}"
-          print("VERIFIED: status=ok, store_backend=firestore, ifc=true, pdf=true, OWASP headers present, version=" + data["pipeline_version"])
+          print("VERIFIED: status=ok, store_backend=firestore, ifc=true, dwg=true, pdf=true, OWASP headers present, version=" + data["pipeline_version"])
           ' "${RESP}" "${HDR_FILE}"
           if [ "${ENV_NAME}" = "prod" ]; then
             OPENAPI_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${URL}/openapi.json")"

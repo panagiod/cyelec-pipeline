@@ -765,7 +765,78 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             dxfattribs={"layer": "E-SLD-TEXT", "height": 165.0},
         ).set_placement((cx - 820.0, 5_500.0))
 
+    _add_sld_paper_space_sheet(doc, result, sheet_w=sheet_w, sheet_h=sheet_h)
     return doc
+
+
+def _add_sld_paper_space_sheet(
+    doc: Drawing,
+    result: ElectricalDesignResult,
+    *,
+    sheet_w: float,
+    sheet_h: float,
+) -> None:
+    """Create a print-ready ISO A3 or A1 Paper-Space layout tab for single_line_diagram.dxf."""
+    use_a1 = len(result.circuits) > 18 or bool(result.sub_mains)
+    paper_w, paper_h = (841.0, 594.0) if use_a1 else (420.0, 297.0)
+    tab_name = "EAC-SLD-A1" if use_a1 else "EAC-SLD-A3"
+
+    if tab_name in doc.layouts:
+        doc.layouts.delete(tab_name)
+    psp = doc.layouts.new(tab_name)
+    psp.page_setup(size=(paper_w, paper_h), margins=(10.0, 10.0, 10.0, 10.0), units="mm")
+
+    m = 10.0
+    ix0, iy0, ix1, iy1 = m, m, paper_w - m, paper_h - m
+    psp.add_lwpolyline(
+        [(0.0, 0.0), (paper_w, 0.0), (paper_w, paper_h), (0.0, paper_h)],
+        close=True,
+        dxfattribs={"layer": "E-SLD-TITLE"},
+    )
+    psp.add_lwpolyline(
+        [(ix0, iy0), (ix1, iy0), (ix1, iy1), (ix0, iy1)],
+        close=True,
+        dxfattribs={"layer": "E-SLD-TITLE"},
+    )
+
+    tb_h = 26.0
+    psp.add_line((ix0, iy0 + tb_h), (ix1, iy0 + tb_h), dxfattribs={"layer": "E-SLD-TITLE"})
+    eac = result.eac_compliance
+    br = result.branding
+    firm = br.firm_name if br and br.firm_name else "ETEK LICENSED PRACTICE"
+    eng = br.engineer_name if br and br.engineer_name else "ETEK REVIEW PENDING"
+    reg = br.etek_reg_no if br and br.etek_reg_no else "ETEK-E"
+    psp.add_text(
+        f"SINGLE-LINE DIAGRAM ({tab_name}) — {result.building.project_name[:38]}",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 3.4},
+    ).set_placement((ix0 + 5.0, iy0 + 18.0))
+    psp.add_text(
+        (
+            f"SUPPLY: {eac.recommended_supply_tier} | "
+            f"EARTH: {result.earthing_system.value} ({result.ze_or_ra_ohm:.1f} OHM) | "
+            f"FIRM: {firm[:22]} | ENG: {eng[:16]} ({reg[:20]}) | DWG E-201"
+        ),
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 2.4},
+    ).set_placement((ix0 + 5.0, iy0 + 9.0))
+    psp.add_text(
+        f"ETEK SIGN-OFF REQUIRED | SHA256: {result.provenance.input_sha256[:20]}",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 2.1},
+    ).set_placement((ix0 + 5.0, iy0 + 3.0))
+
+    vp_w = (ix1 - ix0) - 8.0
+    vp_h = (iy1 - (iy0 + tb_h)) - 8.0
+    vp_cx = (ix0 + ix1) / 2.0
+    vp_cy = (iy0 + tb_h) + 4.0 + (vp_h / 2.0)
+    # Fit full SLD width & height comfortably inside the paper-space viewport
+    vh_for_h = sheet_h * 1.06
+    vh_for_w = (sheet_w * 1.06) * (vp_h / max(1.0, vp_w))
+    psp.add_viewport(
+        center=(vp_cx, vp_cy),
+        size=(vp_w, vp_h),
+        view_center_point=(sheet_w / 2.0, sheet_h / 2.0),
+        view_height=max(vh_for_h, vh_for_w),
+        dxfattribs={"layer": "E-SLD-TITLE"},
+    )
 
 
 def export_sld_deliverables(

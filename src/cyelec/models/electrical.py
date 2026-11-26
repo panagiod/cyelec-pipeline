@@ -194,6 +194,7 @@ class DesignOverrides(BaseModel):
     branding: TenantBranding | None = None
     boq_rate_overrides: BoqRateOverrides | None = None
     tender_boq_blank_rates: bool = False
+    apply_corridor_grouping: bool = False
     notes: str | None = None
 
 
@@ -376,6 +377,7 @@ class ElectricalDesignResult(BaseModel):
     building: BuildingModel
     earthing_system: EarthingSystem
     ze_or_ra_ohm: float
+    prospective_fault_current_ka: float = 6.0
     circuits: list[SolvedCircuit]
     sub_mains: list[SolvedSubMain] = Field(default_factory=list)
     phase_balance: PhaseBalanceResult | None = None

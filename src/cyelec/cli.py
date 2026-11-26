@@ -8,13 +8,7 @@ from typing import Annotated
 import typer
 
 from cyelec import __version__
-from cyelec.eval import (
-    evaluate_against_reference,
-    export_evaluation_reports,
-    load_reference_plan,
-)
-from cyelec.ingest.dxf_ingest import ingest_dxf, ingest_multi_floor_dxf, inspect_dxf_layers
-from cyelec.models.building import BuildingType, DxfLayerMapping
+from cyelec.models.building import BenchmarkTemplate, BuildingType, DxfLayerMapping
 from cyelec.models.electrical import (
     DesignOverrides,
     EacProfile,
@@ -24,19 +18,7 @@ from cyelec.models.electrical import (
     ReviewSeverity,
     TenantBranding,
 )
-from cyelec.pipeline import (
-    export_phase1_deliverables,
-    export_phase2_deliverables,
-    export_phase3_deliverables,
-    run_phase1_pipeline,
-    run_phase2_pipeline,
-)
-from cyelec.render.eac_pack import build_submission_zip
-from cyelec.render.qet_bridge import export_qet_project
-from cyelec.render.sld import export_sld_deliverables
 from cyelec.standards_loader import load_standards, resolve_standards_dir
-from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
-from cyelec.synth.sample_plan import generate_cyprus_3bed_dxf
 
 app = typer.Typer(
     name="cyelec",
@@ -92,6 +74,8 @@ def synth_plan(
     ] = None,
 ) -> None:
     """Generate a synthetic Cyprus architectural benchmark R2018 DXF fixture."""
+    from cyelec.synth.benchmarks import generate_benchmark_dxf
+
     model = generate_benchmark_dxf(template, out_dxf=out)
     if pv_kva is not None:
         model = model.model_copy(update={"pv_capacity_kva": pv_kva})
@@ -115,6 +99,9 @@ def benchmark_suite(
     ] = Path("out/benchmarks"),
 ) -> None:
     """Run all 3 Cyprus benchmarks (Apartment, Villa PV+EV, Commercial Office) end-to-end."""
+    from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
+    from cyelec.synth.benchmarks import generate_benchmark_dxf
+
     for tmpl in BenchmarkTemplate:
         sub = out_dir / tmpl.value
         sub.mkdir(parents=True, exist_ok=True)
@@ -159,6 +146,9 @@ def solve_synth(
     ] = 0.0,
 ) -> None:
     """Generate the synthetic 3-bed Cyprus apartment DXF and run the full Phase 1 pipeline."""
+    from cyelec.pipeline import export_phase1_deliverables, run_phase1_pipeline
+    from cyelec.synth.sample_plan import generate_cyprus_3bed_dxf
+
     out_dir.mkdir(parents=True, exist_ok=True)
     dxf_path = out_dir / "cyprus_3bed_120m2.dxf"
     building = generate_cyprus_3bed_dxf(out_dxf=dxf_path, pv_capacity_kva=pv_kva)
@@ -225,6 +215,8 @@ def inspect_dxf_cmd(
     ] = None,
 ) -> None:
     """Ingest a DXF floorplan and print bilingual classified rooms, fixtures, doors, and DB1."""
+    from cyelec.ingest.dxf_ingest import ingest_dxf, inspect_dxf_layers
+
     if layers:
         discovered = inspect_dxf_layers(dxf_path)
         typer.echo(f"Discovered {len(discovered)} DXF layer(s) in {dxf_path}:")
@@ -296,6 +288,8 @@ def solve_dxf(
     ] = None,
 ) -> None:
     """Run end-to-end Phase 2 pipeline from a DXF/IFC plan to layout DXF, Excel, and reports."""
+    from cyelec.pipeline import export_phase2_deliverables, run_phase2_pipeline
+
     overrides = DesignOverrides(
         eac_profile=profile,
         earthing_system=earthing,
@@ -417,6 +411,9 @@ def solve_eac(
     ] = False,
 ) -> None:
     """Run full Phase 0-3 pipeline and generate complete Cyprus EAC plan-approval pack."""
+    from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
+    from cyelec.render.eac_pack import build_submission_zip
+
     branding = (
         TenantBranding(firm_name=firm_name, engineer_name=engineer, etek_reg_no=etek_reg)
         if (firm_name or engineer or etek_reg)
@@ -552,6 +549,10 @@ def solve_multifloor(
         tender_boq_blank_rates=tender_boq,
     )
     mapping = _load_layer_mapping(layer_mapping)
+    from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf
+    from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
+    from cyelec.render.eac_pack import build_submission_zip
+
     model, mf_flags = ingest_multi_floor_dxf(
         floor_files,
         building_type=building_type,
@@ -588,6 +589,9 @@ def export_sld(
     ] = Path("out/sld"),
 ) -> None:
     """Export Single-Line Diagram (.svg, .dxf, .qet) from any saved design_result.json."""
+    from cyelec.render.qet_bridge import export_qet_project
+    from cyelec.render.sld import export_sld_deliverables
+
     design = ElectricalDesignResult.model_validate_json(design_json.read_text(encoding="utf-8"))
     svg_path, dxf_path = export_sld_deliverables(
         design,
@@ -636,6 +640,14 @@ def eval_compare(
     ] = None,
 ) -> None:
     """Solve an architectural DXF and compare quantitatively against a reference electrical plan."""
+    from cyelec.eval import (
+        evaluate_against_reference,
+        export_evaluation_reports,
+        load_reference_plan,
+    )
+    from cyelec.ingest.dxf_ingest import ingest_dxf
+    from cyelec.pipeline import run_phase2_pipeline
+
     ref = load_reference_plan(reference_plan)
     mapping = _load_layer_mapping(layer_mapping)
     model, ingest_flags = ingest_dxf(

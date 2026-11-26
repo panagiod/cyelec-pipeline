@@ -827,18 +827,20 @@ def test_eac_application_form_excel_sheet_and_iso_paperspace_dxf(tmp_path: Path)
     assert "SCALE 1:50 (METRIC)" in psp_texts
     assert "ETEK-E-9021" in psp_texts
 
-    # B) Commercial Office (span > 16m -> automatically selects ISO A1 1:100 layout)
+    # B) Commercial Office (span > A3 capacity -> exact true-scale ISO A1 1:50 layout)
     off_dxf = tmp_path / "office.dxf"
     off_bldg = generate_benchmark_dxf(BenchmarkTemplate.COMMERCIAL_OFFICE, out_dxf=off_dxf)
     off_res = run_phase2_pipeline(off_bldg)
     off_out = export_phase3_deliverables(off_res, tmp_path / "office_pack")
 
     off_doc = ezdxf.readfile(str(off_out["layout_dxf"]))
-    assert "EAC-A1-1-100" in off_doc.layouts
-    off_psp = off_doc.layouts.get("EAC-A1-1-100")
-    assert len(list(off_psp.query("VIEWPORT"))) >= 1
+    assert "EAC-A1-1-50" in off_doc.layouts
+    off_psp = off_doc.layouts.get("EAC-A1-1-50")
+    off_vps = [v for v in off_psp.query("VIEWPORT") if v.dxf.id != 1]
+    assert len(off_vps) == 1
+    assert off_vps[0].dxf.view_height / off_vps[0].dxf.height == pytest.approx(50.0, abs=1e-4)
     off_texts = " ".join(e.dxf.text for e in off_psp.query("TEXT"))
-    assert "SCALE 1:100 (METRIC)" in off_texts
+    assert "SCALE 1:50 (METRIC)" in off_texts
     assert "Commercial Office" in off_out["eac_form_html"].read_text(encoding="utf-8")
 
     # C) 2-storey villa renders Section F Sub-Distribution Boards table in EAC Application Form

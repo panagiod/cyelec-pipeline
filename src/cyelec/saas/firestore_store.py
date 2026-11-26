@@ -870,6 +870,25 @@ class FirestoreWorkspaceStore:
         ref.set({"role": role.value, "updated_at": _utc_now()}, merge=True)
         return self.get_user(tenant_id, user_id)
 
+    def update_user_password(
+        self, tenant_id: str, user_id: str, new_password: str
+    ) -> UserRecord | None:
+        pw_hash, pw_salt = hash_password(new_password)
+        ref = self._users_col(tenant_id).document(self._safe_id(user_id, "user_id"))
+        snap = ref.get()
+        if not snap.exists:
+            return None
+        ref.set(
+            {
+                "password_hash": pw_hash,
+                "password_salt": pw_salt,
+                "auth_provider": "password",
+                "updated_at": _utc_now(),
+            },
+            merge=True,
+        )
+        return self.get_user(tenant_id, user_id)
+
     def delete_user(self, tenant_id: str, user_id: str) -> bool:
         ref = self._users_col(tenant_id).document(self._safe_id(user_id, "user_id"))
         snap = ref.get()

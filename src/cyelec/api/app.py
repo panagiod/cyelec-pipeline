@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Annotated
 
 import anyio
-from ezdxf.lldxf.const import DXFError
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -25,8 +24,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
 from cyelec.ingest.dwg_bridge import is_dwg_converter_available
-from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf, inspect_dxf_layers
-from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
+from cyelec.models.building import (
+    BenchmarkTemplate,
+    BuildingModel,
+    BuildingType,
+    DxfLayerInfo,
+    DxfLayerMapping,
+)
 from cyelec.models.electrical import (
     BoqRateOverrides,
     DesignOverrides,
@@ -34,12 +38,8 @@ from cyelec.models.electrical import (
     TenantBranding,
 )
 from cyelec.models.spatial import Phase2DesignResult
-from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
-from cyelec.render.eac_pack import build_submission_zip
-from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.pdf_export import is_weasyprint_available
 from cyelec.render.qet_bridge import is_qelectrotech_available
-from cyelec.render.sld import render_sld_svg
 from cyelec.saas.auth import (
     AuthPrincipal,
     Role,
@@ -77,9 +77,8 @@ from cyelec.saas.store import (
     WorkspaceStoreProtocol,
 )
 from cyelec.standards_loader import load_standards
-from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 
-_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB hard cap per DXF/IFC upload
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB hard cap per DXF/DWG/IFC upload
 _MAX_MULTIFLOOR_FILES = 12
 _MAX_MULTIFLOOR_TOTAL_BYTES = 50 * 1024 * 1024  # 50 MB aggregate cap across floor uploads
 _MAX_RATE_BUCKETS = 4096
@@ -116,6 +115,14 @@ _API_CSP = "default-src 'none'; frame-ancestors 'none'"
 _PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), payment=()"
 
 
+def _is_cad_client_error(exc: Exception) -> bool:
+    """Return True if an exception represents an invalid uploaded CAD/BIM file error."""
+    return (
+        isinstance(exc, (ValueError, ImportError, OSError))
+        or type(exc).__name__ == "DXFError"
+    )
+
+
 class HealthResponse(BaseModel):
     """Health & runtime capability status."""
 
@@ -130,6 +137,8 @@ class HealthResponse(BaseModel):
     pdf_export_available: bool = False
     stripe_configured: bool = False
     google_sso_configured: bool = False
+    auth_required: bool = False
+    invite_code_required: bool = False
     store_backend: str = "sqlite"
 
 
@@ -241,6 +250,42 @@ class RegisterRequest(BaseModel):
     password: str
     display_name: str = ""
     tenant_id: str | None = None
+    invite_code: str = ""
+
+
+class ChangePasswordRequest(BaseModel):
+    """Authenticated user self-service password change request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str
+    new_password: str
+
+
+class ResetPasswordRequest(BaseModel):
+    """Firm Owner password reset request for a team member seat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    new_password: str
+
+
+class AdminResetPasswordRequest(BaseModel):
+    """Platform Admin password reset request for recovering a locked-out pilot account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str
+    new_password: str
+
+
+class PasswordUpdatedResponse(BaseModel):
+    """Confirmation envelope returned after a password change or reset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    updated: bool
+    email: str
 
 
 class LoginRequest(BaseModel):
@@ -392,10 +437,16 @@ async def _read_upload_bounded(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BY
     return data
 
 
-def _inspect_dxf_layers_sync(data: bytes) -> list[DxfLayerInfo]:
+def _inspect_dxf_layers_sync(data: bytes, suffix: str = ".dxf") -> list[DxfLayerInfo]:
+    from cyelec.ingest.dwg_bridge import convert_dwg_to_dxf
+    from cyelec.ingest.dxf_ingest import inspect_dxf_layers
+
     with tempfile.TemporaryDirectory(prefix="cyelec_layers_") as tmp_dir:
-        in_path = Path(tmp_dir) / "plan.dxf"
+        tmp = Path(tmp_dir)
+        in_path = tmp / f"plan{suffix}"
         in_path.write_bytes(data)
+        if suffix == ".dwg":
+            in_path, _ = convert_dwg_to_dxf(in_path, tmp / "dwg_conv")
         return inspect_dxf_layers(in_path)
 
 
@@ -406,6 +457,8 @@ def _solve_dxf_bytes_sync(
     building_type: BuildingType | None,
     layer_mapping: DxfLayerMapping | None = None,
 ) -> Phase2DesignResult:
+    from cyelec.pipeline import run_phase2_pipeline
+
     with tempfile.TemporaryDirectory(prefix="cyelec_req_") as tmp_dir:
         in_path = Path(tmp_dir) / f"plan{suffix}"
         in_path.write_bytes(data)
@@ -424,6 +477,9 @@ def _solve_dxf_bundle_sync(
     building_type: BuildingType | None,
     layer_mapping: DxfLayerMapping | None = None,
 ) -> tuple[Phase2DesignResult, bytes]:
+    from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
+    from cyelec.render.eac_pack import build_submission_zip
+
     with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
         tmp = Path(tmp_dir)
         in_path = tmp / f"plan{suffix}"
@@ -510,46 +566,78 @@ def is_ifc_available() -> bool:
     return importlib.util.find_spec("ifcopenshell") is not None
 
 
+def _run_multifloor_in_dir(
+    tmp: Path,
+    floor_blobs: list[tuple[str, bytes, str]],
+    submain_lengths_m: dict[str, float] | None,
+    overrides: DesignOverrides | None,
+    building_type: BuildingType | None,
+    layer_mapping: DxfLayerMapping | None = None,
+) -> Phase2DesignResult:
+    from cyelec.ingest.dwg_bridge import convert_dwg_to_dxf
+    from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf
+    from cyelec.pipeline import run_phase2_pipeline
+
+    floor_files: list[tuple[str, Path]] = []
+    dwg_flags = []
+    for idx, (label, data, suffix) in enumerate(floor_blobs):
+        safe_label = _SAFE_FLOOR_RE.sub("", label.upper())[:16] or f"F{idx}"
+        # Never interpolate user-supplied labels into filesystem paths
+        raw_p = tmp / f"floor_{idx:02d}{suffix}"
+        raw_p.write_bytes(data)
+        if suffix == ".dwg":
+            conv_p, dwg_flag = convert_dwg_to_dxf(raw_p, tmp / f"dwg_{idx:02d}")
+            dwg_flags.append(dwg_flag)
+            floor_files.append((safe_label, conv_p))
+        else:
+            floor_files.append((safe_label, raw_p))
+    model, mf_flags = ingest_multi_floor_dxf(
+        floor_files,
+        submain_lengths_m=submain_lengths_m,
+        building_type=building_type,
+        pv_capacity_kva=(
+            overrides.pv_capacity_kva
+            if (overrides is not None and overrides.pv_capacity_kva is not None)
+            else 0.0
+        ),
+        layer_mapping=layer_mapping,
+    )
+    return run_phase2_pipeline(model, overrides=overrides, extra_flags=[*dwg_flags, *mf_flags])
+
+
 def _solve_multifloor_dxf_sync(
-    floor_blobs: list[tuple[str, bytes]],
+    floor_blobs: list[tuple[str, bytes, str]],
     submain_lengths_m: dict[str, float] | None,
     overrides: DesignOverrides | None,
     building_type: BuildingType | None,
     layer_mapping: DxfLayerMapping | None = None,
 ) -> Phase2DesignResult:
     with tempfile.TemporaryDirectory(prefix="cyelec_mf_") as tmp_dir:
-        tmp = Path(tmp_dir)
-        floor_files: list[tuple[str, Path]] = []
-        for idx, (label, data) in enumerate(floor_blobs):
-            safe_label = _SAFE_FLOOR_RE.sub("", label.upper())[:16] or f"F{idx}"
-            # Never interpolate user-supplied labels into filesystem paths
-            p = tmp / f"floor_{idx:02d}.dxf"
-            p.write_bytes(data)
-            floor_files.append((safe_label, p))
-        model, mf_flags = ingest_multi_floor_dxf(
-            floor_files,
-            submain_lengths_m=submain_lengths_m,
-            building_type=building_type,
-            pv_capacity_kva=(
-                overrides.pv_capacity_kva
-                if (overrides is not None and overrides.pv_capacity_kva is not None)
-                else 0.0
-            ),
-            layer_mapping=layer_mapping,
+        return _run_multifloor_in_dir(
+            Path(tmp_dir),
+            floor_blobs,
+            submain_lengths_m,
+            overrides,
+            building_type,
+            layer_mapping,
         )
-        return run_phase2_pipeline(model, overrides=overrides, extra_flags=mf_flags)
 
 
 def _solve_multifloor_bundle_sync(
-    floor_blobs: list[tuple[str, bytes]],
+    floor_blobs: list[tuple[str, bytes, str]],
     submain_lengths_m: dict[str, float] | None,
     overrides: DesignOverrides | None,
     building_type: BuildingType | None,
     layer_mapping: DxfLayerMapping | None = None,
 ) -> tuple[Phase2DesignResult, bytes]:
+    from cyelec.pipeline import export_phase3_deliverables
+    from cyelec.render.eac_pack import build_submission_zip
+
+    # Keep floor DXF files alive inside the SAME temp dir so layout_dxf preserves real underlays!
     with tempfile.TemporaryDirectory(prefix="cyelec_mfb_") as tmp_dir:
         tmp = Path(tmp_dir)
-        p2 = _solve_multifloor_dxf_sync(
+        p2 = _run_multifloor_in_dir(
+            tmp,
             floor_blobs,
             submain_lengths_m,
             overrides,
@@ -767,11 +855,10 @@ def create_app(
 
             # Enforce Tenant RBAC for authenticated JWT firm seats (Owner / Engineer / Viewer)
             if principal is not None and principal.auth_method == "jwt":
-                if principal.role == Role.VIEWER and request.method in (
-                    "POST",
-                    "PUT",
-                    "PATCH",
-                    "DELETE",
+                if (
+                    principal.role == Role.VIEWER
+                    and path != "/v1/auth/change-password"
+                    and request.method in ("POST", "PUT", "PATCH", "DELETE")
                 ):
                     return JSONResponse(
                         status_code=403,
@@ -944,12 +1031,20 @@ def create_app(
 
     @api.get("/", response_class=HTMLResponse)
     def workbench_ui(request: Request) -> HTMLResponse:
+        auth_req = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ) or bool(os.environ.get("CYELEC_API_KEY", "").strip())
+        invite_req = bool(os.environ.get("CYELEC_PILOT_INVITE_CODE", "").strip())
         return HTMLResponse(
             content=render_etek_workbench_html(
                 base_url=_safe_base_url(request),
                 show_api_docs=not disable_openapi,
                 ifc_available=is_ifc_available(),
                 dwg_available=is_dwg_converter_available(),
+                auth_required=auth_req,
+                invite_code_required=invite_req,
             )
         )
 
@@ -1007,6 +1102,11 @@ def create_app(
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         std = load_standards()
+        auth_req = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ) or bool(os.environ.get("CYELEC_API_KEY", "").strip())
         return HealthResponse(
             status="ok",
             pipeline_version=__version__,
@@ -1017,6 +1117,8 @@ def create_app(
             pdf_export_available=is_weasyprint_available(),
             stripe_configured=is_stripe_configured(),
             google_sso_configured=bool(os.environ.get("CYELEC_GOOGLE_CLIENT_ID", "").strip()),
+            auth_required=auth_req,
+            invite_code_required=bool(os.environ.get("CYELEC_PILOT_INVITE_CODE", "").strip()),
             store_backend=store_backend,
         )
 
@@ -1047,6 +1149,8 @@ def create_app(
         payload: SolveBuildingRequest,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolveResponseEnvelope:
+        from cyelec.pipeline import run_phase2_pipeline
+
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
         eff_overrides = _merge_tenant_defaults(tid, payload.overrides)
@@ -1066,6 +1170,11 @@ def create_app(
         overrides: Annotated[DesignOverrides | None, Body()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
+        from cyelec.pipeline import run_phase2_pipeline
+        from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.sld import render_sld_svg
+        from cyelec.synth.benchmarks import generate_benchmark_dxf
+
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
         eff_overrides = _merge_tenant_defaults(tid, overrides)
@@ -1091,6 +1200,10 @@ def create_app(
         overrides: Annotated[DesignOverrides | None, Body()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> Response:
+        from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
+        from cyelec.render.eac_pack import build_submission_zip
+        from cyelec.synth.benchmarks import generate_benchmark_dxf
+
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
         eff_overrides = _merge_tenant_defaults(tid, overrides)
@@ -1122,20 +1235,25 @@ def create_app(
     @api.post("/v1/dxf/layers", response_model=DxfLayersResponse)
     async def inspect_dxf_layers_upload(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        file: Annotated[UploadFile, File(description="Architectural .dxf or .dwg floorplan")],
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> DxfLayersResponse:
-        """Inspect layers, entity counts, and inferred roles of an uploaded DXF."""
+        """Inspect layers, entity counts, and inferred roles of an uploaded DXF or DWG."""
         tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
-        if Path(filename).suffix.lower() != ".dxf":
-            raise HTTPException(status_code=400, detail="Only .dxf files support layer inspection.")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".dxf", ".dwg"):
+            raise HTTPException(
+                status_code=400, detail="Only .dxf or .dwg files support layer inspection."
+            )
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
         try:
-            layers = await anyio.to_thread.run_sync(_inspect_dxf_layers_sync, data)
-        except (ValueError, DXFError, OSError) as exc:
+            layers = await anyio.to_thread.run_sync(_inspect_dxf_layers_sync, data, suffix)
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(
@@ -1146,7 +1264,7 @@ def create_app(
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
     async def solve_dxf_upload(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
@@ -1168,7 +1286,9 @@ def create_app(
             p2 = await anyio.to_thread.run_sync(
                 _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
             )
-        except (ValueError, ImportError, DXFError, OSError) as exc:
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(tid, "solve_dxf", (time.perf_counter() - t0) * 1000.0, len(data))
@@ -1177,12 +1297,15 @@ def create_app(
     @api.post("/v1/solve/dxf/preview", response_model=SolvePreviewEnvelope)
     async def solve_dxf_preview(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
+        from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.sld import render_sld_svg
+
         envelope = await solve_dxf_upload(
             request=request,
             file=file,
@@ -1203,7 +1326,7 @@ def create_app(
     @api.post("/v1/solve/dxf/bundle")
     async def solve_dxf_bundle(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf floorplan")],
+        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
@@ -1226,7 +1349,9 @@ def create_app(
             p2, zip_bytes = await anyio.to_thread.run_sync(
                 _solve_dxf_bundle_sync, data, suffix, overrides, building_type, layer_mapping
             )
-        except (ValueError, ImportError, DXFError, OSError) as exc:
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(
@@ -1297,14 +1422,15 @@ def create_app(
             submain_lengths = {str(k).strip().upper(): float(v) for k, v in raw_sm.items()}
 
         t0 = time.perf_counter()
-        floor_blobs: list[tuple[str, bytes]] = []
+        floor_blobs: list[tuple[str, bytes, str]] = []
         total_bytes = 0
         for label, uf in zip(labels, files, strict=True):
             fname = uf.filename or f"{label}.dxf"
-            if Path(fname).suffix.lower() != ".dxf":
+            sfx = Path(fname).suffix.lower()
+            if sfx not in (".dxf", ".dwg"):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Multi-floor combiner only supports .dxf uploads (got '{fname}').",
+                    detail=f"Multi-floor combiner supports .dxf or .dwg uploads (got '{fname}').",
                 )
             blob = await _read_upload_bounded(uf)
             total_bytes += len(blob)
@@ -1316,7 +1442,7 @@ def create_app(
                         f"{_MAX_MULTIFLOOR_TOTAL_BYTES // (1024 * 1024)} MB."
                     ),
                 )
-            floor_blobs.append((label, blob))
+            floor_blobs.append((label, blob, sfx))
 
         overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
@@ -1329,8 +1455,13 @@ def create_app(
                 building_type,
                 layer_mapping,
             )
-        except (ValueError, DXFError, OSError) as exc:
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
+
+        from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.sld import render_sld_svg
 
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, p2)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
@@ -1349,7 +1480,7 @@ def create_app(
         request: Request,
         files: Annotated[
             list[UploadFile],
-            File(description="Two or more architectural .dxf floorplans (e.g., GF.dxf, 1F.dxf)"),
+            File(description="Two or more architectural .dxf or .dwg floorplans"),
         ],
         floors_json: Annotated[str | None, Form()] = None,
         submain_lengths_json: Annotated[str | None, Form()] = None,
@@ -1358,10 +1489,12 @@ def create_app(
         layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> Response:
-        """Combine multiple floor DXF files into a full MDB -> DB-<FLOOR> EAC ZIP pack."""
+        """Combine multiple floor DXF/DWG files into a full MDB -> DB-<FLOOR> EAC ZIP pack."""
         tid = _effective_tenant(request, x_tenant_id)
         if not files:
-            raise HTTPException(status_code=400, detail="At least one .dxf floor file is required.")
+            raise HTTPException(
+                status_code=400, detail="At least one .dxf or .dwg floor file is required."
+            )
         if len(files) > _MAX_MULTIFLOOR_FILES:
             raise HTTPException(
                 status_code=400,
@@ -1399,14 +1532,15 @@ def create_app(
             submain_lengths = {str(k).strip().upper(): float(v) for k, v in raw_sm.items()}
 
         t0 = time.perf_counter()
-        floor_blobs: list[tuple[str, bytes]] = []
+        floor_blobs: list[tuple[str, bytes, str]] = []
         total_bytes = 0
         for label, uf in zip(labels, files, strict=True):
             fname = uf.filename or f"{label}.dxf"
-            if Path(fname).suffix.lower() != ".dxf":
+            sfx = Path(fname).suffix.lower()
+            if sfx not in (".dxf", ".dwg"):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Multi-floor combiner only supports .dxf uploads (got '{fname}').",
+                    detail=f"Multi-floor combiner supports .dxf or .dwg uploads (got '{fname}').",
                 )
             blob = await _read_upload_bounded(uf)
             total_bytes += len(blob)
@@ -1418,7 +1552,7 @@ def create_app(
                         f"{_MAX_MULTIFLOOR_TOTAL_BYTES // (1024 * 1024)} MB."
                     ),
                 )
-            floor_blobs.append((label, blob))
+            floor_blobs.append((label, blob, sfx))
 
         overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
@@ -1431,7 +1565,9 @@ def create_app(
                 building_type,
                 layer_mapping,
             )
-        except (ValueError, DXFError, OSError) as exc:
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(
@@ -1578,6 +1714,9 @@ def create_app(
                 eff_overrides = carry_forward_overrides(prev.overrides, eff_overrides)
         eff_overrides = _merge_tenant_defaults(tid, eff_overrides)
 
+        from cyelec.pipeline import run_phase2_pipeline
+        from cyelec.synth.benchmarks import generate_benchmark_dxf
+
         building = (
             payload.building
             if payload.building is not None
@@ -1603,7 +1742,7 @@ def create_app(
     async def create_project_revision_dxf(
         request: Request,
         project_id: str,
-        file: Annotated[UploadFile, File(description="Architectural R12-R2018 .dxf or .ifc")],
+        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
         overrides_json: Annotated[str | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
@@ -1611,7 +1750,7 @@ def create_app(
         notes: Annotated[str, Form()] = "",
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> RevisionRecord:
-        """Upload a DXF/IFC revision, carry forward Pass-2 engineer overrides, and persist."""
+        """Upload a DXF/DWG/IFC revision, carry forward Pass-2 engineer overrides, and persist."""
         tid = _effective_tenant(request, x_tenant_id)
         safe_pid = _validate_safe_id(project_id, "project_id")
         if store.get_project(tid, safe_pid) is None:
@@ -1639,7 +1778,9 @@ def create_app(
             p2 = await anyio.to_thread.run_sync(
                 _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
             )
-        except (ValueError, ImportError, DXFError, OSError) as exc:
+        except Exception as exc:
+            if not _is_cad_client_error(exc):
+                raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         rec = store.save_revision(tid, safe_pid, p2, overrides=overrides, notes=notes)
@@ -1737,6 +1878,17 @@ def create_app(
             "yes",
         ):
             raise HTTPException(status_code=403, detail="Self-serve registration is disabled.")
+
+        expected_invite = os.environ.get("CYELEC_PILOT_INVITE_CODE", "").strip()
+        initial_plan = "free"
+        if expected_invite:
+            if not hmac.compare_digest(payload.invite_code.strip(), expected_invite):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Closed pilot registration requires a valid pilot invite code.",
+                )
+            initial_plan = "pilot"
+
         firm = payload.firm_name.strip()
         if len(firm) < 2:
             raise HTTPException(status_code=422, detail="firm_name must be at least 2 characters.")
@@ -1746,7 +1898,9 @@ def create_app(
         def _do_register() -> tuple[TenantProfile, UserRecord, QuotaStatus]:
             store.get_or_create_tenant(tid)
             tenant = store.update_tenant_profile(tid, display_name=firm)
-            tenant = store.update_tenant_billing(tid, plan="free", subscription_status="active")
+            tenant = store.update_tenant_billing(
+                tid, plan=initial_plan, subscription_status="active"
+            )
             user = store.create_user(
                 tid,
                 payload.email,
@@ -1775,6 +1929,36 @@ def create_app(
             tenant=tenant,
             quota=quota,
         )
+
+    @api.post("/v1/auth/change-password", response_model=PasswordUpdatedResponse)
+    async def auth_change_password(
+        request: Request,
+        payload: ChangePasswordRequest,
+    ) -> PasswordUpdatedResponse:
+        """Allow an authenticated JWT firm user to change their own password."""
+        principal = getattr(request.state, "principal", None)
+        if not isinstance(principal, AuthPrincipal) or not principal.user_id or not principal.email:
+            raise HTTPException(
+                status_code=401,
+                detail="Changing password requires an active signed-in user session.",
+            )
+        verified = await anyio.to_thread.run_sync(
+            store.authenticate_user, principal.email, payload.current_password
+        )
+        if verified is None or verified.user_id != principal.user_id:
+            raise HTTPException(status_code=401, detail="Current password is incorrect.")
+        try:
+            updated = await anyio.to_thread.run_sync(
+                store.update_user_password,
+                principal.tenant_id,
+                principal.user_id,
+                payload.new_password,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="User account not found.")
+        return PasswordUpdatedResponse(updated=True, email=updated.email)
 
     @api.post("/v1/auth/login", response_model=AuthTokenResponse)
     async def auth_login(payload: LoginRequest) -> AuthTokenResponse:
@@ -2051,6 +2235,50 @@ def create_app(
             monthly_quota_override=payload.monthly_quota_override,
             clear_quota_override=payload.clear_quota_override,
         )
+
+    @api.post(
+        "/v1/team/members/{user_id}/reset-password",
+        response_model=PasswordUpdatedResponse,
+    )
+    async def owner_reset_member_password(
+        request: Request,
+        user_id: str,
+        payload: ResetPasswordRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> PasswordUpdatedResponse:
+        """Firm Owner password reset for a colleague in the same tenant workspace."""
+        tid = _effective_tenant(request, x_tenant_id)
+        safe_uid = _validate_safe_id(user_id, "user_id")
+        try:
+            updated = await anyio.to_thread.run_sync(
+                store.update_user_password, tid, safe_uid, payload.new_password
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Team member not found.")
+        return PasswordUpdatedResponse(updated=True, email=updated.email)
+
+    @api.post("/v1/admin/users/reset-password", response_model=PasswordUpdatedResponse)
+    async def admin_reset_user_password(
+        payload: AdminResetPasswordRequest,
+    ) -> PasswordUpdatedResponse:
+        """Admin-only password recovery by email for locked-out pilot owners (X-Admin-Key)."""
+        user = await anyio.to_thread.run_sync(store.get_user_by_email, payload.email)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User account not found.")
+        try:
+            updated = await anyio.to_thread.run_sync(
+                store.update_user_password,
+                user.tenant_id,
+                user.user_id,
+                payload.new_password,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="User account not found.")
+        return PasswordUpdatedResponse(updated=True, email=updated.email)
 
     return api
 

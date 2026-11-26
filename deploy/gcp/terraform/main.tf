@@ -120,6 +120,7 @@ locals {
     var.stripe_price_pilot != "" ? { "STRIPE_PRICE_PILOT" = var.stripe_price_pilot } : {},
     var.stripe_price_pro != "" ? { "STRIPE_PRICE_PRO" = var.stripe_price_pro } : {},
     var.stripe_price_enterprise != "" ? { "STRIPE_PRICE_ENTERPRISE" = var.stripe_price_enterprise } : {},
+    local.is_prod && var.pilot_invite_code != "" ? { "CYELEC_PILOT_INVITE_CODE" = var.pilot_invite_code } : {},
   )
 }
 

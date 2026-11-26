@@ -49,6 +49,15 @@ class RoomType(StrEnum):
     LIFT_SHAFT = "lift_shaft"
 
 
+class BenchmarkTemplate(StrEnum):
+    """Named Cyprus architectural benchmark templates."""
+
+    APARTMENT_3BED = "apartment_3bed"
+    VILLA_PV_EV = "villa_pv_ev"
+    VILLA_2STOREY = "villa_2storey"
+    COMMERCIAL_OFFICE = "commercial_office"
+
+
 class Point2D(BaseModel):
     """2D Cartesian coordinate in millimetres."""
 
@@ -157,6 +166,17 @@ class SubBoardSpec(BaseModel):
     ambient_temp_c: int = Field(default=40, ge=10, le=70)
 
 
+class FloorUnderlayRef(BaseModel):
+    """Per-floor source DXF underlay metadata for multi-floor CAD overlay preservation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    floor: str
+    source_file: str
+    dx_mm: float = 0.0
+    unit_scale_to_mm: float = Field(default=1.0, gt=0.0)
+
+
 class BuildingModel(BaseModel):
     """Canonical architectural input contract consumed by electrical solvers."""
 
@@ -178,6 +198,7 @@ class BuildingModel(BaseModel):
     source_file: str | None = None
     source_sha256: str | None = None
     source_unit_scale_to_mm: float = Field(default=1.0, gt=0.0)
+    floor_underlays: list[FloorUnderlayRef] = Field(default_factory=list)
 
 
 class DxfLayerMapping(BaseModel):

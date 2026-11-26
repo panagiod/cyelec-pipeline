@@ -92,7 +92,8 @@ def test_cyprus_boq_excel_formulas_and_vat_math(tmp_path: Path) -> None:
     dxf_doc = read_dxf(str(outputs["layout_dxf"]))
     title_texts = [
         str(e.dxf.text)
-        for e in dxf_doc.modelspace()
+        for layout in dxf_doc.layouts
+        for e in layout
         if e.dxftype() == "TEXT" and e.dxf.layer == "E-TITLE"
     ]
     assert any("Kypros MEP Consulting Ltd" in t for t in title_texts)

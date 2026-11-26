@@ -144,3 +144,11 @@ variable "jwt_secret_id" {
   default     = ""
 }
 
+variable "pilot_invite_code" {
+  description = "Optional closed-pilot registration invite code on prod (auto-grants pilot tier: 100 solves/mo, 3 seats)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+

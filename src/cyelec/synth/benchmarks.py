@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-from enum import StrEnum
 from pathlib import Path
 
 from cyelec.models.building import (
+    BenchmarkTemplate,
     BuildingModel,
     BuildingType,
     DistributionBoardAnchor,
@@ -25,14 +25,7 @@ from cyelec.synth.sample_plan import (
     render_building_to_dxf,
 )
 
-
-class BenchmarkTemplate(StrEnum):
-    """Named Cyprus architectural benchmark templates."""
-
-    APARTMENT_3BED = "apartment_3bed"
-    VILLA_PV_EV = "villa_pv_ev"
-    VILLA_2STOREY = "villa_2storey"
-    COMMERCIAL_OFFICE = "commercial_office"
+__all__ = ["BenchmarkTemplate"]
 
 
 def _rect_poly(x0: float, y0: float, x1: float, y1: float) -> list[Point2D]:
