@@ -466,10 +466,10 @@ def test_w6_real_world_dwg_underlay_preservation_aliases_and_fallback_door_arcs(
         )
         assert res.flag is None, f"Unexpected ambiguity flag on {raw_lbl!r}"
 
-    # 2. Architectural DXF with open doorway sealed ONLY by a 90-deg ARC on Window layer
-    #    plus custom furniture layer to verify single-floor .dwg underlay preservation!
+    # 2. Architectural R2000 DXF (matching LibreDWG dwg2dxf output) with open doorway
+    #    sealed ONLY by a 90-deg ARC on Window layer + custom architect layer!
     src_dxf = tmp_path / "real_dwg_converted.dxf"
-    doc = ezdxf.new("R2018")
+    doc = ezdxf.new("R2000")
     doc.header["$INSUNITS"] = 4  # mm
     msp = doc.modelspace()
     # Outer perimeter 8000 x 5000 mm
@@ -540,7 +540,7 @@ def test_w6_real_world_dwg_underlay_preservation_aliases_and_fallback_door_arcs(
     room_types = {r["normalized_type"] for r in ds["building"]["rooms"]}
     assert room_types == {"living_room", "utility"}
 
-    # Original architect .dwg layer MUST be preserved in Master, E-101, AND E-102 DXFs!
+    # Original architect .dwg layer MUST be preserved in pristine AC1032 R2018 DXFs!
     for dxf_name in (
         "electrical_layout.dxf",
         "E101_lighting_layout.dxf",
@@ -549,6 +549,7 @@ def test_w6_real_world_dwg_underlay_preservation_aliases_and_fallback_door_arcs(
         p = tmp_path / dxf_name
         p.write_bytes(zf.read(dxf_name))
         out_doc = ezdxf.readfile(str(p))
+        assert out_doc.dxfversion == "AC1032"
         assert len(out_doc.audit().errors) == 0
         layers_in_msp = {e.dxf.layer for e in out_doc.modelspace()}
         assert "A-CUSTOM-DWG-STAIRS" in layers_in_msp, (

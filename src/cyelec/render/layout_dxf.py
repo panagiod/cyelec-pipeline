@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
@@ -31,6 +32,34 @@ def _read_dxf_safe(path: str | Path) -> Drawing:
     except DXFError:
         doc, _auditor = ezdxf_recover.readfile(str(path))
         return doc
+
+
+def _clone_underlay_to_r2018(src_doc: Drawing) -> Drawing:
+    """Clone architect modelspace into a pristine R2018 Drawing for reliable Paper Space export."""
+    target = new_dxf("R2018", setup=True)
+    try:
+        target.header["$INSUNITS"] = int(src_doc.header.get("$INSUNITS", 4))
+        target.header["$MEASUREMENT"] = int(src_doc.header.get("$MEASUREMENT", 1))
+    except Exception:
+        target.header["$INSUNITS"] = 4
+        target.header["$MEASUREMENT"] = 1
+    for lyr in src_doc.layers:
+        lname = str(lyr.dxf.name)
+        if lname and lname not in target.layers:
+            try:
+                target.layers.add(lname, color=int(getattr(lyr.dxf, "color", 7)))
+            except Exception:
+                continue
+    t_msp = target.modelspace()
+    importer = Importer(src_doc, target)
+    for ent in list(src_doc.modelspace()):
+        try:
+            importer.import_entity(ent, t_msp)
+        except Exception:
+            continue
+    with suppress(Exception):
+        importer.finalize()
+    return target
 
 ELECTRICAL_LAYERS: dict[str, int] = {
     "E-WETZONE-Z0": 1,     # Red: Section 701 Zone 0/1
@@ -438,6 +467,7 @@ def render_electrical_layout_dxf(
     *,
     source_dxf_path: Path | None = None,
     discipline: LayoutDiscipline = "combined",
+    force_clean_r2018: bool = False,
 ) -> Drawing:
     """Overlay IEC 60617 electrical blocks, offset conduits & true-scale ISO sheets onto DXF."""
     orig_path = _resolve_original_dxf_path(result, source_dxf_path)
@@ -451,7 +481,14 @@ def render_electrical_layout_dxf(
         inv_scale = 1.0
     elif orig_path is not None:
         try:
-            doc = _read_dxf_safe(orig_path)
+            raw_doc = _read_dxf_safe(orig_path)
+            needs_clone = force_clean_r2018 or (raw_doc.dxfversion != "AC1032")
+            if not needs_clone:
+                try:
+                    needs_clone = len(raw_doc.audit().errors) > 0
+                except Exception:
+                    needs_clone = True
+            doc = _clone_underlay_to_r2018(raw_doc) if needs_clone else raw_doc
             preserved_underlay = True
             unit_scale = result.design.building.source_unit_scale_to_mm
             inv_scale = 1.0 / unit_scale if unit_scale > 0 else 1.0
@@ -1045,12 +1082,21 @@ def export_electrical_layout_dxf(
 ) -> Path:
     """Write stampable Phase 2 electrical overlay R2018 DXF with IEC blocks & true-scale sheets."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = render_electrical_layout_dxf(
-        result,
-        source_dxf_path=source_dxf_path,
-        discipline=discipline,
-    )
-    doc.saveas(str(out_path))
+    try:
+        doc = render_electrical_layout_dxf(
+            result,
+            source_dxf_path=source_dxf_path,
+            discipline=discipline,
+        )
+        doc.saveas(str(out_path))
+    except Exception:
+        doc = render_electrical_layout_dxf(
+            result,
+            source_dxf_path=source_dxf_path,
+            discipline=discipline,
+            force_clean_r2018=True,
+        )
+        doc.saveas(str(out_path))
     return out_path
 
 
