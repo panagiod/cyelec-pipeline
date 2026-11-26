@@ -50,17 +50,23 @@ jobs:
       - name: Configure Docker for EU Artifact Registry
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Enforce Artifact Registry retention policy (€0.00/mo free-tier cap)
-        run: |
-          gcloud artifacts repositories set-cleanup-policies "${AR_REPO}" \
-            --project="${{ vars.GCP_PROJECT_ID }}" \
-            --location="${GCP_REGION}" \
-            --policy=deploy/gcp/ar_cleanup_policy.json
-
       - name: Build and push immutable SHA-pinned container image
         run: |
           docker build -t "${{ steps.target.outputs.image_uri }}" .
           docker push "${{ steps.target.outputs.image_uri }}"
+
+      - name: Prune older Artifact Registry images (keep newest 4 for €0.00/mo free tier)
+        run: |
+          REPO_PATH="${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}"
+          OLD_DIGESTS="$(gcloud artifacts docker images list "${REPO_PATH}" \
+            --include-tags \
+            --sort-by="~UPDATE_TIME" \
+            --format="value(version)" | tail -n +5 || true)"
+          for digest in ${OLD_DIGESTS}; do
+            echo "Pruning old image digest: ${digest}"
+            gcloud artifacts docker images delete "${REPO_PATH}@${digest}" \
+              --delete-tags --quiet || true
+          done
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3

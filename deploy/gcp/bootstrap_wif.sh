@@ -44,6 +44,12 @@ if ! gcloud artifacts repositories describe "${AR_REPO}" --location="${REGION}" 
     --location="${REGION}" \
     --description="cyelec-pipeline EU container images"
 fi
+if [[ -f "deploy/gcp/ar_cleanup_policy.json" ]]; then
+  gcloud artifacts repositories set-cleanup-policies "${AR_REPO}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --policy="deploy/gcp/ar_cleanup_policy.json"
+fi
 
 echo "==> 3/6 Creating EU Terraform remote state bucket (gs://${TF_STATE_BUCKET})..."
 if ! gcloud storage buckets describe "gs://${TF_STATE_BUCKET}" >/dev/null 2>&1; then
