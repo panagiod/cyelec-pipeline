@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 from cyelec.models.building import SubBoardSpec
 from cyelec.models.electrical import (
@@ -17,7 +18,23 @@ from cyelec.models.electrical import (
 )
 from cyelec.standards_loader import CableEntry, StandardsBundle
 
-_SUBMAIN_STANDARD_RATINGS_A: tuple[int, ...] = (16, 20, 25, 32, 40, 50, 63, 80, 100, 125)
+_SUBMAIN_STANDARD_RATINGS_A: tuple[int, ...] = (
+    16,
+    20,
+    25,
+    32,
+    40,
+    50,
+    63,
+    80,
+    100,
+    125,
+    160,
+    200,
+    250,
+    315,
+    400,
+)
 
 
 def _select_submain_rating_a(ib_a: float, *, min_rating_a: int = 32) -> int:
@@ -28,16 +45,25 @@ def _select_submain_rating_a(ib_a: float, *, min_rating_a: int = 32) -> int:
     return _SUBMAIN_STANDARD_RATINGS_A[-1]
 
 
-def _submain_cpc_mm2(phase_mm2: float) -> float:
-    """BS 7671 Table 54.7 minimum protective conductor cross-sectional area."""
+def _submain_cpc_mm2(phase_mm2: float, entry: CableEntry) -> float:
+    """BS 7671 Table 54.7 protective conductor cross-sectional area."""
     if phase_mm2 <= 16.0:
         return phase_mm2
     if phase_mm2 <= 35.0:
         return 16.0
-    return phase_mm2 / 2.0
+    return entry.default_cpc_mm2
 
 
-def _tabulated_current(entry: CableEntry, sub_board: SubBoardSpec) -> float:
+def _tabulated_current(entry: CableEntry, sub_board: SubBoardSpec, *, use_xlpe: bool) -> float:
+    if use_xlpe:
+        if sub_board.installation_method == "B":
+            val = entry.xlpe_method_b_3p_a if sub_board.is_three_phase else entry.xlpe_method_b_1p_a
+            if val is not None:
+                return val
+        else:
+            val = entry.xlpe_method_c_3p_a if sub_board.is_three_phase else entry.xlpe_method_c_1p_a
+            if val is not None:
+                return val
     if sub_board.installation_method == "B":
         return entry.method_b_3p_a if sub_board.is_three_phase else entry.method_b_1p_a
     return entry.method_c_3p_a if sub_board.is_three_phase else entry.method_c_1p_a
@@ -51,6 +77,7 @@ def solve_submain(
     earthing_system: EarthingSystem = EarthingSystem.TT,
     ze_or_ra_ohm: float | None = None,
     target_submain_vd_pct: float = 1.0,
+    origin_ipf_ka: float = 10.0,
 ) -> SolvedSubMain:
     """Size and verify a BS 7671 sub-main feeder from MDB to a floor sub-distribution board."""
     cables_std = standards.cables
@@ -83,12 +110,16 @@ def solve_submain(
     # Preserve discrimination above 32 A socket rings (min 40 A for residential sub-boards)
     min_submain_in = 40 if any((s.min_breaker_in_a or 0) >= 32 for s in board_specs) else 32
     breaker_in_a = _select_submain_rating_a(ib_a, min_rating_a=min_submain_in)
-    curve = BreakerCurve.C if sub_board.is_three_phase else BreakerCurve.B
+    use_mccb = breaker_in_a > max(devices_std.standard_ratings_a)
+    curve = (
+        BreakerCurve.MCCB
+        if use_mccb
+        else (BreakerCurve.C if sub_board.is_three_phase else BreakerCurve.B)
+    )
 
     flags: list[ReviewFlag] = []
-    if breaker_in_a > max(devices_std.standard_ratings_a):
-        # BS 7671 5-second distribution circuit MCCB fallback (Table 41.4/manufacturer data)
-        zs_max_ohm = round((u0 * 0.95) / (breaker_in_a * 5.0), 3)
+    if use_mccb:
+        zs_max_ohm = devices_std.get_device(BreakerCurve.MCCB, breaker_in_a).zs_max_ohm
         flags.append(
             ReviewFlag(
                 code="SUBMAIN_MCCB_SELECTIVITY_VERIFY",
@@ -96,9 +127,9 @@ def solve_submain(
                 category="bs7671",
                 regulation_ref="BS 7671 Reg 536.4 / Table 41.4",
                 message=(
-                    f"Sub-main {sub_board.parent_board_id}->{sub_board.board_id} requires "
-                    f"{breaker_in_a} A MCCB/switch-fuse (>63 A MCB range); ETEK engineer to "
-                    "confirm manufacturer time-current selectivity curve."
+                    f"Sub-main {sub_board.parent_board_id}->{sub_board.board_id} uses "
+                    f"{breaker_in_a} A MCCB + 90°C XLPE/SWA cable (>63 A MCB range); ETEK "
+                    "engineer to confirm manufacturer time-current selectivity curve."
                 ),
             )
         )
@@ -109,26 +140,32 @@ def solve_submain(
     rcd_selective_type_s = earthing_system == EarthingSystem.TT
     rcd_idn_ma: int | None = 100 if rcd_selective_type_s else None
     poles = "4P" if sub_board.is_three_phase else "2P"
+    breaker_kind = "MCCB" if use_mccb else f"Type {curve.value} MCB/MCCB"
     if rcd_selective_type_s:
         device_label = (
-            f"{breaker_in_a}A {poles} Type {curve.value} MCB/MCCB + "
+            f"{breaker_in_a}A {poles} {breaker_kind} + "
             f"{rcd_idn_ma}mA Type S Selective RCD"
         )
     else:
-        device_label = f"{breaker_in_a}A {poles} Type {curve.value} MCB/MCCB"
+        device_label = f"{breaker_in_a}A {poles} {breaker_kind}"
 
-    ca = cables_std.get_ca(sub_board.ambient_temp_c, "pvc_70c")
+    insulation: Literal["pvc_70c", "xlpe_90c"] = "xlpe_90c" if use_mccb else "pvc_70c"
+    ca = cables_std.get_ca(sub_board.ambient_temp_c, insulation)
     cg = 1.0
     ci = 1.0
     eff_derating = ca * cg * ci
-    temp_mult = cables_std.constants.temp_resistance_multiplier_70c
+    temp_mult = (
+        cables_std.constants.temp_resistance_multiplier_90c
+        if use_mccb
+        else cables_std.constants.temp_resistance_multiplier_70c
+    )
 
-    candidates = [c for c in cables_std.cables if c.size_mm2 >= 6.0]
+    candidates = [c for c in cables_std.sorted_cables() if c.size_mm2 >= 6.0]
     chosen: CableEntry | None = None
     best_eval: tuple[float, float, bool, float, float, float, float, bool] | None = None
 
     for entry in candidates:
-        it_a = _tabulated_current(entry, sub_board)
+        it_a = _tabulated_current(entry, sub_board, use_xlpe=use_mccb)
         iz_a = it_a * eff_derating
         thermal_ok = iz_a >= breaker_in_a - 1e-9
 
@@ -137,7 +174,7 @@ def solve_submain(
         vd_pct = (vd_v / v_nom) * 100.0
         vd_ok = vd_pct <= target_submain_vd_pct + 1e-9
 
-        cpc_mm2 = _submain_cpc_mm2(entry.size_mm2)
+        cpc_mm2 = _submain_cpc_mm2(entry.size_mm2, entry)
         r1 = entry.r20_mohm_per_m
         r2 = cables_std.get_r20_mohm_per_m(cpc_mm2)
         r1_r2 = ((r1 + r2) * sub_board.submain_length_m / 1000.0) * temp_mult
@@ -158,7 +195,12 @@ def solve_submain(
 
     assert chosen is not None and best_eval is not None
     it_a, iz_a, thermal_ok, vd_v, vd_pct, r1_r2, zs_ohm, ef_ok = best_eval
-    cpc_mm2 = _submain_cpc_mm2(chosen.size_mm2)
+    cpc_mm2 = _submain_cpc_mm2(chosen.size_mm2, chosen)
+
+    # Conservative 20°C attenuated downstream prospective short-circuit current Ipf at sub-board
+    z_origin_ohm = u0 / max(origin_ipf_ka * 1000.0, 1.0)
+    z_sub_pn_ohm = (2.0 * chosen.r20_mohm_per_m * sub_board.submain_length_m) / 1000.0
+    downstream_ipf_ka = round(u0 / ((z_origin_ohm + z_sub_pn_ohm) * 1000.0), 2)
 
     if rcd_selective_type_s:
         if ef_ok:
@@ -172,7 +214,7 @@ def solve_submain(
                         f"TT sub-main {sub_board.parent_board_id}->{sub_board.board_id} "
                         f"protected by {rcd_idn_ma} mA Type S time-delayed RCD for vertical "
                         f"selectivity with downstream 30 mA final-circuit RCBOs "
-                        f"(Ra={resolved_ze_ra:.1f} Ω)."
+                        f"(Ra={resolved_ze_ra:.1f} Ω, sub-board Ipf={downstream_ipf_ka:.2f} kA)."
                     ),
                 )
             )
@@ -200,7 +242,8 @@ def solve_submain(
                 regulation_ref="BS 7671 Appendix 4",
                 message=(
                     f"Sub-main {sub_board.board_id} ({breaker_in_a} A) exceeds max standard "
-                    f"PVC table size ({chosen.size_mm2:g} mm², Iz={iz_a:.1f} A); use SWA/XLPE."
+                    f"cable table size ({chosen.size_mm2:g} mm², Iz={iz_a:.1f} A); use parallel "
+                    "XLPE/SWA feeders or busbar trunking."
                 ),
             )
         )
@@ -249,6 +292,7 @@ def solve_submain(
         zs_ohm=round(zs_ohm, 4),
         zs_max_ohm=round(zs_max_ohm, 3),
         earth_fault_pass=ef_ok,
+        downstream_ipf_ka=downstream_ipf_ka,
         overall_pass=thermal_ok and ef_ok,
         flags=flags,
     )

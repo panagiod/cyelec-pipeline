@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -22,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from cyelec import __version__
 from cyelec.api.ui import render_etek_workbench_html
+from cyelec.ingest.dwg_bridge import is_dwg_converter_available
 from cyelec.ingest.dxf_ingest import ingest_multi_floor_dxf, inspect_dxf_layers
 from cyelec.models.building import BuildingModel, BuildingType, DxfLayerInfo, DxfLayerMapping
 from cyelec.models.electrical import (
@@ -34,6 +37,7 @@ from cyelec.models.spatial import Phase2DesignResult
 from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
 from cyelec.render.eac_pack import build_submission_zip
 from cyelec.render.floorplan_svg import render_floorplan_svg
+from cyelec.render.pdf_export import is_weasyprint_available
 from cyelec.render.qet_bridge import is_qelectrotech_available
 from cyelec.render.sld import render_sld_svg
 from cyelec.saas.firestore_store import (
@@ -90,6 +94,9 @@ class HealthResponse(BaseModel):
     pipeline_version: str
     standards_versions: dict[str, str]
     qelectrotech_available: bool
+    ifc_available: bool = False
+    dwg_available: bool = False
+    pdf_export_available: bool = False
     store_backend: str = "sqlite"
 
 
@@ -276,7 +283,9 @@ def _solve_dxf_bundle_sync(
             building_type=building_type,
             layer_mapping=layer_mapping,
         )
-        outputs = export_phase3_deliverables(p2, tmp / "pack")
+        outputs = export_phase3_deliverables(
+            p2, tmp / "pack", export_pdf=is_weasyprint_available()
+        )
         zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
         return p2, zip_path.read_bytes()
 
@@ -341,6 +350,15 @@ def _security_headers(
     return headers
 
 
+_AUTH_CACHE_TTL_S = 60.0
+_MAX_AUTH_CACHE = 512
+
+
+def is_ifc_available() -> bool:
+    """Return True when the optional LGPLv3 ifcopenshell BIM dependency is installed."""
+    return importlib.util.find_spec("ifcopenshell") is not None
+
+
 def _solve_multifloor_dxf_sync(
     floor_blobs: list[tuple[str, bytes]],
     submain_lengths_m: dict[str, float] | None,
@@ -369,6 +387,29 @@ def _solve_multifloor_dxf_sync(
             layer_mapping=layer_mapping,
         )
         return run_phase2_pipeline(model, overrides=overrides, extra_flags=mf_flags)
+
+
+def _solve_multifloor_bundle_sync(
+    floor_blobs: list[tuple[str, bytes]],
+    submain_lengths_m: dict[str, float] | None,
+    overrides: DesignOverrides | None,
+    building_type: BuildingType | None,
+    layer_mapping: DxfLayerMapping | None = None,
+) -> tuple[Phase2DesignResult, bytes]:
+    with tempfile.TemporaryDirectory(prefix="cyelec_mfb_") as tmp_dir:
+        tmp = Path(tmp_dir)
+        p2 = _solve_multifloor_dxf_sync(
+            floor_blobs,
+            submain_lengths_m,
+            overrides,
+            building_type,
+            layer_mapping,
+        )
+        outputs = export_phase3_deliverables(
+            p2, tmp / "pack", export_pdf=is_weasyprint_available()
+        )
+        zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+        return p2, zip_path.read_bytes()
 
 
 def create_app(
@@ -449,6 +490,35 @@ def create_app(
         return overrides.model_copy(update=updates) if updates else overrides
 
     rate_buckets: dict[str, deque[float]] = defaultdict(deque)
+    # Bounded 60s TTL cache mapping SHA-256(api_key) -> (tenant_id, expires_monotonic)
+    auth_cache: dict[str, tuple[str, float]] = {}
+
+    def _evict_auth_cache(tenant_id: str) -> None:
+        stale_keys = [k for k, (tid, _) in auth_cache.items() if tid == tenant_id]
+        for k in stale_keys:
+            auth_cache.pop(k, None)
+
+    async def _resolve_api_key_nonblocking(supplied_key: str) -> str | None:
+        now_m = time.monotonic()
+        key_sha = hashlib.sha256(supplied_key.encode("utf-8")).hexdigest()
+        cached = auth_cache.get(key_sha)
+        if cached is not None:
+            tid, exp = cached
+            if now_m < exp:
+                return tid
+            auth_cache.pop(key_sha, None)
+
+        resolved = await anyio.to_thread.run_sync(store.resolve_tenant_by_api_key, supplied_key)
+        if resolved is not None:
+            if len(auth_cache) >= _MAX_AUTH_CACHE:
+                expired = [k for k, (_, exp) in auth_cache.items() if now_m >= exp]
+                for k in expired:
+                    auth_cache.pop(k, None)
+                if len(auth_cache) >= _MAX_AUTH_CACHE:
+                    oldest_k = min(auth_cache, key=lambda k: auth_cache[k][1])
+                    auth_cache.pop(oldest_k, None)
+            auth_cache[key_sha] = (resolved, now_m + _AUTH_CACHE_TTL_S)
+        return resolved
 
     @api.middleware("http")
     async def security_and_observability_middleware(
@@ -474,7 +544,7 @@ def create_app(
         supplied = request.headers.get("X-API-Key", "").strip()
         auth_tenant: str | None = None
         if supplied:
-            auth_tenant = store.resolve_tenant_by_api_key(supplied)
+            auth_tenant = await _resolve_api_key_nonblocking(supplied)
             if auth_tenant is not None:
                 request.state.auth_tenant_id = auth_tenant
 
@@ -600,13 +670,25 @@ def create_app(
 
     @api.get("/", response_class=HTMLResponse)
     def workbench_ui(request: Request) -> HTMLResponse:
-        return HTMLResponse(content=render_etek_workbench_html(base_url=_safe_base_url(request)))
+        return HTMLResponse(
+            content=render_etek_workbench_html(
+                base_url=_safe_base_url(request),
+                show_api_docs=not disable_openapi,
+                ifc_available=is_ifc_available(),
+                dwg_available=is_dwg_converter_available(),
+            )
+        )
 
     @api.get("/guide", response_class=HTMLResponse)
     def user_guide_ui(request: Request) -> HTMLResponse:
         from cyelec.api.docs_ui import render_user_guide_html
 
-        return HTMLResponse(content=render_user_guide_html(base_url=_safe_base_url(request)))
+        return HTMLResponse(
+            content=render_user_guide_html(
+                base_url=_safe_base_url(request),
+                show_api_docs=not disable_openapi,
+            )
+        )
 
     @api.get("/favicon.ico", include_in_schema=False)
     def favicon_ico() -> Response:
@@ -656,6 +738,9 @@ def create_app(
             pipeline_version=__version__,
             standards_versions=std.versions_map(),
             qelectrotech_available=is_qelectrotech_available(),
+            ifc_available=is_ifc_available(),
+            dwg_available=is_dwg_converter_available(),
+            pdf_export_available=is_weasyprint_available(),
             store_backend=store_backend,
         )
 
@@ -677,6 +762,7 @@ def create_app(
         """Provision or rotate a tenant API key using CYELEC_ADMIN_KEY (X-Admin-Key)."""
         safe_tid = _validate_safe_id(tenant_id, "tenant_id")
         raw_key = store.issue_tenant_api_key(safe_tid)
+        _evict_auth_cache(safe_tid)
         return ApiKeyIssuedResponse(tenant_id=safe_tid, api_key=raw_key)
 
     @api.post("/v1/solve/building", response_model=SolveResponseEnvelope)
@@ -736,7 +822,9 @@ def create_app(
             tmp = Path(tmp_dir)
             building = generate_benchmark_dxf(template, out_dxf=tmp / f"{template.value}.dxf")
             p2 = run_phase2_pipeline(building, overrides=eff_overrides)
-            outputs = export_phase3_deliverables(p2, tmp / "pack")
+            outputs = export_phase3_deliverables(
+                p2, tmp / "pack", export_pdf=is_weasyprint_available()
+            )
             zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
             zip_bytes = zip_path.read_bytes()
         store.record_usage(
@@ -791,8 +879,10 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".ifc"):
-            raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
+        if suffix not in (".dxf", ".dwg", ".ifc"):
+            raise HTTPException(
+                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+            )
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
@@ -847,8 +937,10 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".ifc"):
-            raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
+        if suffix not in (".dxf", ".dwg", ".ifc"):
+            raise HTTPException(
+                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+            )
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)
@@ -976,6 +1068,109 @@ def create_app(
             sld_svg=sld_svg,
         )
 
+    @api.post("/v1/solve/dxf/multifloor/bundle")
+    async def solve_dxf_multifloor_bundle(
+        request: Request,
+        files: Annotated[
+            list[UploadFile],
+            File(description="Two or more architectural .dxf floorplans (e.g., GF.dxf, 1F.dxf)"),
+        ],
+        floors_json: Annotated[str | None, Form()] = None,
+        submain_lengths_json: Annotated[str | None, Form()] = None,
+        overrides_json: Annotated[str | None, Form()] = None,
+        building_type: Annotated[BuildingType | None, Form()] = None,
+        layer_mapping_json: Annotated[str | None, Form()] = None,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> Response:
+        """Combine multiple floor DXF files into a full MDB -> DB-<FLOOR> EAC ZIP pack."""
+        tid = _effective_tenant(request, x_tenant_id)
+        if not files:
+            raise HTTPException(status_code=400, detail="At least one .dxf floor file is required.")
+        if len(files) > _MAX_MULTIFLOOR_FILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Multi-floor upload supports at most {_MAX_MULTIFLOOR_FILES} floor files.",
+            )
+
+        default_labels = ["GF"] + [f"{i}F" for i in range(1, len(files))]
+        labels: list[str] = default_labels[: len(files)]
+        if floors_json and floors_json.strip():
+            try:
+                parsed_labels = json.loads(floors_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid floors_json: {exc}"
+                ) from exc
+            if not isinstance(parsed_labels, list) or len(parsed_labels) != len(files):
+                raise HTTPException(
+                    status_code=422,
+                    detail="floors_json must be a JSON array matching uploaded files count.",
+                )
+            labels = [str(lbl).strip().upper() or f"F{i}" for i, lbl in enumerate(parsed_labels)]
+
+        submain_lengths: dict[str, float] | None = None
+        if submain_lengths_json and submain_lengths_json.strip():
+            try:
+                raw_sm = json.loads(submain_lengths_json)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid submain_lengths_json: {exc}"
+                ) from exc
+            if not isinstance(raw_sm, dict):
+                raise HTTPException(
+                    status_code=422, detail="submain_lengths_json must be a JSON object."
+                )
+            submain_lengths = {str(k).strip().upper(): float(v) for k, v in raw_sm.items()}
+
+        t0 = time.perf_counter()
+        floor_blobs: list[tuple[str, bytes]] = []
+        total_bytes = 0
+        for label, uf in zip(labels, files, strict=True):
+            fname = uf.filename or f"{label}.dxf"
+            if Path(fname).suffix.lower() != ".dxf":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Multi-floor combiner only supports .dxf uploads (got '{fname}').",
+                )
+            blob = await _read_upload_bounded(uf)
+            total_bytes += len(blob)
+            if total_bytes > _MAX_MULTIFLOOR_TOTAL_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "Combined multi-floor upload exceeds maximum allowed size of "
+                        f"{_MAX_MULTIFLOOR_TOTAL_BYTES // (1024 * 1024)} MB."
+                    ),
+                )
+            floor_blobs.append((label, blob))
+
+        overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
+        layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
+        try:
+            p2, zip_bytes = await anyio.to_thread.run_sync(
+                _solve_multifloor_bundle_sync,
+                floor_blobs,
+                submain_lengths,
+                overrides,
+                building_type,
+                layer_mapping,
+            )
+        except (ValueError, DXFError, OSError) as exc:
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
+
+        store.record_usage(
+            tid, "solve_dxf_multifloor_bundle", (time.perf_counter() - t0) * 1000.0, len(zip_bytes)
+        )
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="eac_submission_pack_multifloor.zip"',
+                "X-Tenant-ID": tid,
+                "X-Input-SHA256": p2.design.provenance.input_sha256,
+            },
+        )
+
     # ==================================================================
     # Multi-Tenant B2B SaaS Workspace, Branding, Revisions, Diff & Usage
     # ==================================================================
@@ -1009,6 +1204,7 @@ def create_app(
     ) -> ApiKeyIssuedResponse:
         tid = _effective_tenant(request, x_tenant_id)
         raw_key = store.issue_tenant_api_key(tid)
+        _evict_auth_cache(tid)
         return ApiKeyIssuedResponse(tenant_id=tid, api_key=raw_key)
 
     @api.get("/v1/tenants/me/export", response_model=TenantExportBundle)
@@ -1028,6 +1224,7 @@ def create_app(
         """EU GDPR Article 17 right to erasure: cascade-delete tenant and all owned records."""
         tid = _effective_tenant(request, x_tenant_id)
         deleted = store.delete_tenant_cascade(tid)
+        _evict_auth_cache(tid)
         return TenantDeletedResponse(deleted=deleted, tenant_id=tid)
 
     @api.post("/v1/projects", response_model=ProjectSummary, status_code=201)
@@ -1146,8 +1343,10 @@ def create_app(
 
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".ifc"):
-            raise HTTPException(status_code=400, detail="Only .dxf or .ifc uploads are supported.")
+        if suffix not in (".dxf", ".dwg", ".ifc"):
+            raise HTTPException(
+                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+            )
 
         t0 = time.perf_counter()
         data = await _read_upload_bounded(file)

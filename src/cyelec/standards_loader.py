@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unicodedata
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -39,6 +40,10 @@ class CableEntry(BaseModel):
     method_b_3p_a: float = Field(gt=0.0)
     method_c_1p_a: float = Field(gt=0.0)
     method_c_3p_a: float = Field(gt=0.0)
+    xlpe_method_b_1p_a: float | None = Field(default=None, gt=0.0)
+    xlpe_method_b_3p_a: float | None = Field(default=None, gt=0.0)
+    xlpe_method_c_1p_a: float | None = Field(default=None, gt=0.0)
+    xlpe_method_c_3p_a: float | None = Field(default=None, gt=0.0)
     mv_per_a_per_m_1p: float = Field(gt=0.0)
     mv_per_a_per_m_3p: float = Field(gt=0.0)
     r20_mohm_per_m: float = Field(gt=0.0)
@@ -131,7 +136,7 @@ class DeviceSpec(BaseModel):
 
 
 class DeviceStandards(BaseModel):
-    """Validated BS 7671 protective device table."""
+    """Validated BS 7671 protective device table (MCB B/C/D, MCCB, BS 88-2)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -141,24 +146,39 @@ class DeviceStandards(BaseModel):
     u0_v: float
     cmin: float
     standard_ratings_a: list[int] = Field(min_length=1)
+    mccb_ratings_a: list[int] = Field(default_factory=list)
     devices: dict[BreakerCurve, dict[int, DeviceSpec]]
 
     def get_device(self, curve: BreakerCurve, rating_a: int) -> DeviceSpec:
         """Return Zs_max and I²t for the requested breaker curve and rating."""
-        curve_table = self.devices[curve]
-        if rating_a not in curve_table:
-            raise KeyError(f"Unsupported protective device rating: Type {curve.value} {rating_a}A")
-        return curve_table[rating_a]
+        curve_table = self.devices.get(curve)
+        if curve_table is not None and rating_a in curve_table:
+            return curve_table[rating_a]
+        # Seamlessly promote >63A thermal-magnetic ratings onto MCCB table when available
+        if rating_a > max(self.standard_ratings_a) and BreakerCurve.MCCB in self.devices:
+            mccb_table = self.devices[BreakerCurve.MCCB]
+            if rating_a in mccb_table:
+                return mccb_table[rating_a]
+        raise KeyError(f"Unsupported protective device rating: Type {curve.value} {rating_a}A")
 
-    def select_rating(self, required_amps: float, min_rating_a: int | None = None) -> int:
+    def select_rating(
+        self,
+        required_amps: float,
+        min_rating_a: int | None = None,
+        *,
+        allow_mccb: bool = False,
+    ) -> int:
         """Select smallest standard rating >= max(required_amps, min_rating_a)."""
         floor_a = max(required_amps, float(min_rating_a or 0))
-        for rating in sorted(self.standard_ratings_a):
+        pool = list(self.standard_ratings_a)
+        if allow_mccb and self.mccb_ratings_a:
+            pool.extend(self.mccb_ratings_a)
+        for rating in sorted(set(pool)):
             if float(rating) >= floor_a - 1e-9:
                 return rating
         raise ValueError(
-            f"Design current {required_amps:.2f} A exceeds largest standard MCB rating "
-            f"({max(self.standard_ratings_a)} A)"
+            f"Design current {required_amps:.2f} A exceeds largest standard device rating "
+            f"({max(pool)} A)"
         )
 
 
@@ -281,6 +301,7 @@ class DedicatedApplianceTemplate(BaseModel):
     min_breaker_in_a: int = Field(gt=0)
     min_cable_mm2: float = Field(gt=0.0)
     curve: BreakerCurve
+    is_three_phase: bool = False
 
 
 class RoomTemplate(BaseModel):
@@ -427,13 +448,14 @@ def resolve_standards_dir(standards_dir: Path | None = None) -> Path:
 def _read_yaml(path: Path) -> object:
     if not path.is_file():
         raise FileNotFoundError(f"Missing standards table: {path}")
+    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
     with path.open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.load(fh, Loader=loader)  # nosec B506
 
 
-def load_standards(standards_dir: Path | None = None) -> StandardsBundle:
-    """Load and strictly validate all BS 7671, Cyprus EAC & BOQ YAML tables."""
-    root = resolve_standards_dir(standards_dir)
+@lru_cache(maxsize=8)
+def _load_standards_cached(resolved_root: str) -> StandardsBundle:
+    root = Path(resolved_root)
     cables = CableStandards.model_validate(_read_yaml(root / "bs7671_cables.yaml"))
     devices = DeviceStandards.model_validate(_read_yaml(root / "bs7671_devices.yaml"))
     eac_rules = EacCyprusRules.model_validate(_read_yaml(root / "eac_cyprus_rules.yaml"))
@@ -448,3 +470,14 @@ def load_standards(standards_dir: Path | None = None) -> StandardsBundle:
         room_templates=room_templates,
         boq_rates=boq_rates,
     )
+
+
+def clear_standards_cache() -> None:
+    """Clear the cached standards bundle (useful when overriding tables in tests)."""
+    _load_standards_cached.cache_clear()
+
+
+def load_standards(standards_dir: Path | None = None) -> StandardsBundle:
+    """Load and strictly validate all BS 7671, Cyprus EAC & BOQ YAML tables (cached)."""
+    root = resolve_standards_dir(standards_dir).resolve()
+    return _load_standards_cached(str(root))

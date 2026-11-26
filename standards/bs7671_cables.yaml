@@ -87,9 +87,104 @@ cables:
     method_b_3p_a: 110.0
     method_c_1p_a: 137.0
     method_c_3p_a: 119.0
+    xlpe_method_b_1p_a: 158.0
+    xlpe_method_b_3p_a: 141.0
+    xlpe_method_c_1p_a: 178.0
+    xlpe_method_c_3p_a: 154.0
     mv_per_a_per_m_1p: 1.25
     mv_per_a_per_m_3p: 1.10
     r20_mohm_per_m: 0.524
+  - size_mm2: 50.0
+    default_cpc_mm2: 25.0
+    method_b_1p_a: 151.0
+    method_b_3p_a: 134.0
+    method_c_1p_a: 168.0
+    method_c_3p_a: 147.0
+    xlpe_method_b_1p_a: 192.0
+    xlpe_method_b_3p_a: 171.0
+    xlpe_method_c_1p_a: 219.0
+    xlpe_method_c_3p_a: 192.0
+    mv_per_a_per_m_1p: 0.93
+    mv_per_a_per_m_3p: 0.81
+    r20_mohm_per_m: 0.387
+  - size_mm2: 70.0
+    default_cpc_mm2: 35.0
+    method_b_1p_a: 192.0
+    method_b_3p_a: 171.0
+    method_c_1p_a: 213.0
+    method_c_3p_a: 188.0
+    xlpe_method_b_1p_a: 246.0
+    xlpe_method_b_3p_a: 218.0
+    xlpe_method_c_1p_a: 277.0
+    xlpe_method_c_3p_a: 244.0
+    mv_per_a_per_m_1p: 0.65
+    mv_per_a_per_m_3p: 0.57
+    r20_mohm_per_m: 0.268
+  - size_mm2: 95.0
+    default_cpc_mm2: 50.0
+    method_b_1p_a: 232.0
+    method_b_3p_a: 207.0
+    method_c_1p_a: 258.0
+    method_c_3p_a: 229.0
+    xlpe_method_b_1p_a: 298.0
+    xlpe_method_b_3p_a: 264.0
+    xlpe_method_c_1p_a: 334.0
+    xlpe_method_c_3p_a: 296.0
+    mv_per_a_per_m_1p: 0.49
+    mv_per_a_per_m_3p: 0.43
+    r20_mohm_per_m: 0.193
+  - size_mm2: 120.0
+    default_cpc_mm2: 70.0
+    method_b_1p_a: 269.0
+    method_b_3p_a: 239.0
+    method_c_1p_a: 299.0
+    method_c_3p_a: 266.0
+    xlpe_method_b_1p_a: 346.0
+    xlpe_method_b_3p_a: 306.0
+    xlpe_method_c_1p_a: 385.0
+    xlpe_method_c_3p_a: 343.0
+    mv_per_a_per_m_1p: 0.41
+    mv_per_a_per_m_3p: 0.36
+    r20_mohm_per_m: 0.153
+  - size_mm2: 150.0
+    default_cpc_mm2: 70.0
+    method_b_1p_a: 300.0
+    method_b_3p_a: 268.0
+    method_c_1p_a: 344.0
+    method_c_3p_a: 306.0
+    xlpe_method_b_1p_a: 395.0
+    xlpe_method_b_3p_a: 350.0
+    xlpe_method_c_1p_a: 441.0
+    xlpe_method_c_3p_a: 395.0
+    mv_per_a_per_m_1p: 0.35
+    mv_per_a_per_m_3p: 0.30
+    r20_mohm_per_m: 0.124
+  - size_mm2: 185.0
+    default_cpc_mm2: 95.0
+    method_b_1p_a: 341.0
+    method_b_3p_a: 304.0
+    method_c_1p_a: 392.0
+    method_c_3p_a: 349.0
+    xlpe_method_b_1p_a: 450.0
+    xlpe_method_b_3p_a: 398.0
+    xlpe_method_c_1p_a: 502.0
+    xlpe_method_c_3p_a: 450.0
+    mv_per_a_per_m_1p: 0.31
+    mv_per_a_per_m_3p: 0.27
+    r20_mohm_per_m: 0.0991
+  - size_mm2: 240.0
+    default_cpc_mm2: 120.0
+    method_b_1p_a: 400.0
+    method_b_3p_a: 356.0
+    method_c_1p_a: 461.0
+    method_c_3p_a: 410.0
+    xlpe_method_b_1p_a: 528.0
+    xlpe_method_b_3p_a: 468.0
+    xlpe_method_c_1p_a: 590.0
+    xlpe_method_c_3p_a: 530.0
+    mv_per_a_per_m_1p: 0.27
+    mv_per_a_per_m_3p: 0.24
+    r20_mohm_per_m: 0.0754
 
 # Supplementary resistance values for smaller CPC conductors (mΩ/m at 20°C)
 extra_cpc_r20_mohm_per_m:

@@ -304,6 +304,14 @@ def _classify_fixture_type(
 
 
 def _infer_building_type(rooms: list[Room]) -> BuildingType:
+    types = [r.normalized_type for r in rooms]
+    if any(t in (RoomType.WAREHOUSE, RoomType.PLANT_ROOM) for t in types):
+        return BuildingType.WORKSHOP
+    if any(t == RoomType.RETAIL_FLOOR for t in types):
+        return BuildingType.SHOP
+    if any(t in (RoomType.OPEN_OFFICE, RoomType.MEETING_ROOM, RoomType.SERVER_ROOM) for t in types):
+        return BuildingType.OFFICE
+
     bed_count = sum(
         1 for r in rooms if r.normalized_type in (RoomType.MASTER_BEDROOM, RoomType.BEDROOM)
     )
@@ -1040,9 +1048,12 @@ def ingest_dxf(
         # BS 7671 Section 701: NEVER place an inferred DB1 inside a wet room or outdoors!
         dry_indoor = [r for r in rooms if not r.is_wet_room and not r.is_outdoor]
         pref_order = (
+            RoomType.PLANT_ROOM,
             RoomType.CORRIDOR,
             RoomType.UTILITY,
             RoomType.STORAGE,
+            RoomType.STAIRWELL,
+            RoomType.OPEN_OFFICE,
             RoomType.LIVING_ROOM,
             RoomType.KITCHEN_LIVING,
         )
@@ -1084,6 +1095,7 @@ def ingest_dxf(
         pv_capacity_kva=pv_capacity_kva,
         source_file=str(dxf_path),
         source_sha256=sha256,
+        source_unit_scale_to_mm=scale,
     )
     return model, flags
 
@@ -1215,7 +1227,12 @@ def ingest_multi_floor_dxf(
         )
         cursor_x = (max_x + dx) + floor_gap_mm
 
-    resolved_type = building_type or BuildingType.INDEPENDENT_HOUSE
+    inferred_mf = _infer_building_type(combined_rooms)
+    resolved_type = building_type or (
+        inferred_mf
+        if inferred_mf in (BuildingType.OFFICE, BuildingType.SHOP, BuildingType.WORKSHOP)
+        else BuildingType.INDEPENDENT_HOUSE
+    )
     total_area = round(sum(r.area_m2 for r in combined_rooms), 4)
     floor_list = ", ".join(sb.floor for sb in sub_boards)
 

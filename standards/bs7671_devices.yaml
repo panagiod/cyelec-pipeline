@@ -11,6 +11,7 @@ u0_v: 230.0
 cmin: 0.95
 
 standard_ratings_a: [6, 10, 16, 20, 25, 32, 40, 50, 63]
+mccb_ratings_a: [80, 100, 125, 160, 200, 250, 315, 400]
 
 devices:
   B:
@@ -70,3 +71,93 @@ devices:
     63:
       zs_max_ohm: 0.35
       i2t_a2s: 78000.0
+
+  # BS EN 60898 Type D (0.4 s disconnection: Ia = 20 * In for high-inrush motors/lifts/chillers)
+  D:
+    6:
+      zs_max_ohm: 1.82
+      i2t_a2s: 14000.0
+    10:
+      zs_max_ohm: 1.09
+      i2t_a2s: 19000.0
+    16:
+      zs_max_ohm: 0.68
+      i2t_a2s: 26000.0
+    20:
+      zs_max_ohm: 0.55
+      i2t_a2s: 32000.0
+    25:
+      zs_max_ohm: 0.44
+      i2t_a2s: 40000.0
+    32:
+      zs_max_ohm: 0.34
+      i2t_a2s: 52000.0
+    40:
+      zs_max_ohm: 0.27
+      i2t_a2s: 68000.0
+    50:
+      zs_max_ohm: 0.22
+      i2t_a2s: 88000.0
+    63:
+      zs_max_ohm: 0.17
+      i2t_a2s: 120000.0
+
+  # BS EN 60947-2 Thermal-Magnetic MCCBs (5 s distribution / feeder protection, Im = 10 * In)
+  MCCB:
+    63:
+      zs_max_ohm: 0.35
+      i2t_a2s: 90000.0
+    80:
+      zs_max_ohm: 0.27
+      i2t_a2s: 140000.0
+    100:
+      zs_max_ohm: 0.22
+      i2t_a2s: 210000.0
+    125:
+      zs_max_ohm: 0.17
+      i2t_a2s: 320000.0
+    160:
+      zs_max_ohm: 0.14
+      i2t_a2s: 520000.0
+    200:
+      zs_max_ohm: 0.11
+      i2t_a2s: 820000.0
+    250:
+      zs_max_ohm: 0.09
+      i2t_a2s: 1300000.0
+    315:
+      zs_max_ohm: 0.07
+      i2t_a2s: 2100000.0
+    400:
+      zs_max_ohm: 0.055
+      i2t_a2s: 3400000.0
+
+  # BS 88-2 System E/G gG HRC Fuses (BS 7671 Table 41.4, 5 s distribution circuits)
+  BS88:
+    63:
+      zs_max_ohm: 0.82
+      i2t_a2s: 35000.0
+    80:
+      zs_max_ohm: 0.60
+      i2t_a2s: 60000.0
+    100:
+      zs_max_ohm: 0.44
+      i2t_a2s: 95000.0
+    125:
+      zs_max_ohm: 0.35
+      i2t_a2s: 155000.0
+    160:
+      zs_max_ohm: 0.27
+      i2t_a2s: 260000.0
+    200:
+      zs_max_ohm: 0.20
+      i2t_a2s: 420000.0
+    250:
+      zs_max_ohm: 0.15
+      i2t_a2s: 680000.0
+    315:
+      zs_max_ohm: 0.11
+      i2t_a2s: 1100000.0
+    400:
+      zs_max_ohm: 0.09
+      i2t_a2s: 1850000.0

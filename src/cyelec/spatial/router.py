@@ -212,8 +212,19 @@ def assign_devices_to_circuits(
         ):
             app_by_category.setdefault(c.category.value, c.circuit_id)
 
-    # Distinguish dishwasher vs washing machine both using category='appliance'
-    appliance_circuits = [c for c in circuits if c.category == CircuitCategory.APPLIANCE]
+    # Distinguish dedicated appliance / commercial plant / UPS / lift outlets
+    appliance_circuits = [
+        c
+        for c in circuits
+        if c.category
+        in (
+            CircuitCategory.APPLIANCE,
+            CircuitCategory.UPS_SERVER,
+            CircuitCategory.HVAC_3P,
+            CircuitCategory.LIFT,
+            CircuitCategory.SOCKET_RADIAL,
+        )
+    ]
 
     for dev in devices:
         cid: str | None = None
@@ -245,6 +256,11 @@ def assign_devices_to_circuits(
             if cid is None:
                 cid = app_by_category_room.get(("appliance", dev.room_id)) or app_by_category.get(
                     "appliance"
+                )
+            if cid is None:
+                cid = next(
+                    (ac.circuit_id for ac in appliance_circuits if dev.room_id in ac.room_ids),
+                    None,
                 )
 
         bound = dev.model_copy(update={"circuit_id": cid})

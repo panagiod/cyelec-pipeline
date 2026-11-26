@@ -15,10 +15,19 @@ cable_eur_per_m:
   "16.0": 15.80
   "25.0": 23.50
   "35.0": 32.00
+  "50.0": 46.00
+  "70.0": 64.00
+  "95.0": 86.00
+  "120.0": 108.00
+  "150.0": 135.00
+  "185.0": 168.00
+  "240.0": 218.00
 
 conduit_eur_per_m:
   "20mm": 2.80
   "25mm": 3.60
+  "32mm": 5.40
+  "cable_tray": 24.00
 
 switchgear_eur:
   main_board_1p: 190.00
@@ -33,6 +42,9 @@ switchgear_eur:
   rcbo_ev_type_a_dc: 165.00
   mcb_1p: 14.00
   mcb_3p: 42.00
+  mccb_3p_100a: 245.00
+  mccb_3p_250a: 460.00
+  mccb_3p_400a: 780.00
   rcd_type_s_100ma_4p: 135.00
   rcd_type_s_100ma_2p: 85.00
   ct_metering_enclosure: 650.00
@@ -46,3 +58,5 @@ accessories_eur:
   tt_earth_rod_kit: 160.00
   ev_charger_7kw: 890.00
   ev_charger_22kw: 1290.00
+  emergency_luminaire: 85.00
+  fire_alarm_spur: 95.00

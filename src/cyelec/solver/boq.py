@@ -106,20 +106,29 @@ def generate_boq(
     cable_m: dict[tuple[float, bool], float] = defaultdict(float)
     conduit_20_m = 0.0
     conduit_25_m = 0.0
+    conduit_32_m = 0.0
+    cable_tray_m = 0.0
 
     for circ in design.circuits:
         s = circ.spec
         key = (circ.cable_mm2, s.is_three_phase)
         cable_m[key] += s.length_m * rates.wastage_factor
-        if circ.cable_mm2 <= 4.0 and not s.is_three_phase:
+        if circ.recommended_containment == "20mm PVC":
             conduit_20_m += s.length_m
-        else:
+        elif circ.recommended_containment == "25mm PVC":
             conduit_25_m += s.length_m
+        elif circ.recommended_containment == "32mm PVC":
+            conduit_32_m += s.length_m
+        else:
+            cable_tray_m += s.length_m
 
     for sm in design.sub_mains:
         key = (sm.cable_mm2, sm.is_three_phase)
         cable_m[key] += sm.length_m * rates.wastage_factor
-        conduit_25_m += sm.length_m
+        if sm.cable_mm2 >= 25.0 or (sm.is_three_phase and sm.cable_mm2 >= 16.0):
+            cable_tray_m += sm.length_m
+        else:
+            conduit_25_m += sm.length_m
 
     for (size_mm2, is_3p), length_m in sorted(cable_m.items()):
         base_rate = rates.get_cable_rate(size_mm2)
@@ -128,17 +137,19 @@ def generate_boq(
         )
         cores = "5-core (3P+N+PE)" if is_3p else "3-core (L+N+PE)"
         cores_el = "5-κλωνο (3Φ+N+PE)" if is_3p else "3-κλωνο (L+N+PE)"
+        insul_en = "Cu XLPE/SWA Cable" if size_mm2 >= 50.0 else "Cu PVC Cable"
+        insul_el = "Καλώδιο Χαλκού XLPE/SWA" if size_mm2 >= 50.0 else "Καλώδιο Χαλκού"
         _add(
             "Cables",
-            f"Cu PVC Cable {size_mm2:g} mm² {cores}, incl. 10% termination wastage",
-            f"Καλώδιο Χαλκού {size_mm2:g} mm² {cores_el} (+10% φύρα)",
+            f"{insul_en} {size_mm2:g} mm² {cores}, incl. 10% termination wastage",
+            f"{insul_el} {size_mm2:g} mm² {cores_el} (+10% φύρα)",
             "m",
             length_m,
             unit_rate,
         )
 
     # ------------------------------------------------------------------
-    # 2. PVC Conduits in masonry / slab (Method B)
+    # 2. PVC Conduits & Galvanized Cable Tray (BS 7671 45% fill sizing)
     # ------------------------------------------------------------------
     _add(
         "Conduits",
@@ -155,6 +166,22 @@ def generate_boq(
         "m",
         conduit_25_m,
         rates.conduit_eur_per_m["25mm"],
+    )
+    _add(
+        "Conduits",
+        "Heavy-duty 32 mm PVC Conduit for grouped/heavy power circuits (Method B)",
+        "Σωλήνας PVC Φ32 βαρέως τύπου για ομαδοποιημένα/ισχυρά κυκλώματα",
+        "m",
+        conduit_32_m,
+        rates.conduit_eur_per_m.get("32mm", 5.40),
+    )
+    _add(
+        "Conduits",
+        "Perforated Galvanized Steel Cable Tray (150–300 mm) for heavy feeders/sub-mains",
+        "Διάτρητη Γαλβανισμένη Σχάρα Καλωδίων (150–300 mm) για κύριες παροχές",
+        "m",
+        cable_tray_m,
+        rates.conduit_eur_per_m.get("cable_tray", 24.00),
     )
 
     # ------------------------------------------------------------------
@@ -218,9 +245,19 @@ def generate_boq(
     rcbo_ev = 0
     mcb_1p = 0
     mcb_3p = 0
+    mccb_100 = 0
+    mccb_250 = 0
+    mccb_400 = 0
     for circ in design.circuits:
         s = circ.spec
-        if s.category == CircuitCategory.EV_CHARGER:
+        if circ.breaker_in_a > 63:
+            if circ.breaker_in_a <= 125:
+                mccb_100 += 1
+            elif circ.breaker_in_a <= 250:
+                mccb_250 += 1
+            else:
+                mccb_400 += 1
+        elif s.category == CircuitCategory.EV_CHARGER:
             rcbo_ev += 1
         elif s.rcd_protected:
             if s.is_three_phase:
@@ -232,6 +269,15 @@ def generate_boq(
                 mcb_3p += 1
             else:
                 mcb_1p += 1
+
+    for sm in design.sub_mains:
+        if sm.breaker_in_a > 63:
+            if sm.breaker_in_a <= 125:
+                mccb_100 += 1
+            elif sm.breaker_in_a <= 250:
+                mccb_250 += 1
+            else:
+                mccb_400 += 1
 
     _add(
         "Switchgear",
@@ -272,6 +318,30 @@ def generate_boq(
         "no.",
         mcb_3p,
         sw["mcb_3p"],
+    )
+    _add(
+        "Switchgear",
+        "MCCB 3P/4P 80–125 A (BS EN 60947-2, 25–36 kA)",
+        "Διακόπτης Ισχύος MCCB 3P/4P 80–125 A (25–36 kA)",
+        "no.",
+        mccb_100,
+        sw.get("mccb_3p_100a", 245.0),
+    )
+    _add(
+        "Switchgear",
+        "MCCB 3P/4P 160–250 A (BS EN 60947-2, 36 kA)",
+        "Διακόπτης Ισχύος MCCB 3P/4P 160–250 A (36 kA)",
+        "no.",
+        mccb_250,
+        sw.get("mccb_3p_250a", 460.0),
+    )
+    _add(
+        "Switchgear",
+        "MCCB 3P/4P 315–400 A (BS EN 60947-2, 50 kA)",
+        "Διακόπτης Ισχύος MCCB 3P/4P 315–400 A (50 kA)",
+        "no.",
+        mccb_400,
+        sw.get("mccb_3p_400a", 780.0),
     )
 
     type_s_4p = sum(1 for sm in design.sub_mains if sm.rcd_selective_type_s and sm.is_three_phase)
@@ -371,6 +441,31 @@ def generate_boq(
         n_appl,
         acc["appliance_outlet_45a"],
     )
+
+    n_emg_circ = sum(
+        1 for c in design.circuits if c.spec.category == CircuitCategory.EMERGENCY_LIGHTING
+    )
+    if n_emg_circ > 0:
+        n_emg_pts = max(4, len(design.building.rooms))
+        _add(
+            "Accessories",
+            "BS 5266 Self-Contained 3h LED Emergency Exit / Bulkhead Luminaire",
+            "Φωτιστικό Ασφαλείας LED 3 ωρών (BS 5266 / EN 1838)",
+            "no.",
+            n_emg_pts,
+            acc.get("emergency_luminaire", 115.0),
+        )
+
+    n_fa_circ = sum(1 for c in design.circuits if c.spec.category == CircuitCategory.FIRE_ALARM)
+    if n_fa_circ > 0:
+        _add(
+            "Accessories",
+            "BS 5839 Fire Alarm Panel Lockable Red Fused Connection Unit (3 A)",
+            "Ασφαλειοδιακόπτης Πυρανίχνευσης (BS 5839, κλειδωμένος, κόκκινος)",
+            "no.",
+            n_fa_circ,
+            acc.get("fire_alarm_spur", 95.0),
+        )
 
     # ------------------------------------------------------------------
     # 5. Earthing & EV Specialist Equipment

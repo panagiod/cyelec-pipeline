@@ -38,6 +38,15 @@ class RoomType(StrEnum):
     UTILITY = "utility"
     VERANDA = "veranda"
     STORAGE = "storage"
+    # Commercial & Multi-Storey MEP Room Types
+    OPEN_OFFICE = "open_office"
+    MEETING_ROOM = "meeting_room"
+    SERVER_ROOM = "server_room"
+    RETAIL_FLOOR = "retail_floor"
+    WAREHOUSE = "warehouse"
+    PLANT_ROOM = "plant_room"
+    STAIRWELL = "stairwell"
+    LIFT_SHAFT = "lift_shaft"
 
 
 class Point2D(BaseModel):
@@ -168,6 +177,7 @@ class BuildingModel(BaseModel):
     extra_three_phase_load_kva: float = Field(default=0.0, ge=0.0)
     source_file: str | None = None
     source_sha256: str | None = None
+    source_unit_scale_to_mm: float = Field(default=1.0, gt=0.0)
 
 
 class DxfLayerMapping(BaseModel):

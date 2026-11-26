@@ -39,6 +39,7 @@ class _CandidateEval:
     tt_touch_voltage_v: float | None
     cpc_min_mm2: float
     cpc_adiabatic_pass: bool
+    live_adiabatic_pass: bool
 
     @property
     def all_pass(self) -> bool:
@@ -47,14 +48,67 @@ class _CandidateEval:
             and self.vd_pass
             and self.earth_fault_pass
             and self.cpc_adiabatic_pass
+            and self.live_adiabatic_pass
         )
+
+
+# BS 7671 Appendix 5 / OSG Table 5E approximate insulated conductor cross-sectional area (mm²)
+_CONDUCTOR_OUTER_AREA_MM2: dict[float, float] = {
+    1.5: 9.6,
+    2.5: 13.8,
+    4.0: 18.8,
+    6.0: 25.5,
+    10.0: 40.7,
+    16.0: 58.1,
+    25.0: 88.2,
+    35.0: 116.9,
+    50.0: 162.9,
+    70.0: 216.4,
+    95.0: 289.5,
+    120.0: 356.3,
+    150.0: 441.2,
+    185.0: 547.4,
+    240.0: 706.9,
+}
+
+
+def size_conduit_or_tray(
+    cable_mm2: float,
+    *,
+    is_three_phase: bool,
+    grouping_count: int = 1,
+) -> str:
+    """Size PVC conduit (20/25/32 mm) or galvanized cable tray per BS 7671 45% space factor."""
+    if cable_mm2 >= 25.0 or (is_three_phase and cable_mm2 >= 16.0):
+        return "Galv. Cable Tray"
+    cores = 5 if is_three_phase else 3
+    per_core = _CONDUCTOR_OUTER_AREA_MM2.get(cable_mm2, cable_mm2 * 3.2)
+    total_fill_mm2 = per_core * cores * max(1, grouping_count)
+    # 45% usable internal bore area of heavy-duty PVC conduit (ID 16.4 / 21.0 / 27.6 mm)
+    if total_fill_mm2 <= 95.0:
+        return "20mm PVC"
+    if total_fill_mm2 <= 155.0:
+        return "25mm PVC"
+    if total_fill_mm2 <= 265.0:
+        return "32mm PVC"
+    return "Galv. Cable Tray"
 
 
 def _tabulated_current(
     entry: CableEntry,
     method: Literal["B", "C"],
     is_three_phase: bool,
+    insulation_type: Literal["pvc_70c", "xlpe_90c"] = "pvc_70c",
 ) -> float:
+    if insulation_type == "xlpe_90c":
+        if method == "B":
+            val = entry.xlpe_method_b_3p_a if is_three_phase else entry.xlpe_method_b_1p_a
+            if val is not None:
+                return val
+        else:
+            val = entry.xlpe_method_c_3p_a if is_three_phase else entry.xlpe_method_c_1p_a
+            if val is not None:
+                return val
     if method == "B":
         return entry.method_b_3p_a if is_three_phase else entry.method_b_1p_a
     return entry.method_c_3p_a if is_three_phase else entry.method_c_1p_a
@@ -80,7 +134,9 @@ def _evaluate_cable(
     cables_std = standards.cables
     eac_std = standards.eac_rules
 
-    it_a = _tabulated_current(entry, spec.installation_method, spec.is_three_phase)
+    it_a = _tabulated_current(
+        entry, spec.installation_method, spec.is_three_phase, spec.insulation_type
+    )
     iz_a = it_a * effective_derating
     thermal_pass = iz_a >= required_iz_a - 1e-9
 
@@ -122,6 +178,8 @@ def _evaluate_cable(
     )
     cpc_min_mm2 = math.sqrt(i2t_a2s) / k_val
     cpc_adiabatic_pass = cpc_mm2 >= cpc_min_mm2 - 1e-9
+    # BS 7671 Reg 434.5.2: live phase conductor short-circuit adiabatic withstand (k²·S² >= I²t)
+    live_adiabatic_pass = entry.size_mm2 >= cpc_min_mm2 - 1e-9
 
     return _CandidateEval(
         cable_mm2=entry.size_mm2,
@@ -140,6 +198,7 @@ def _evaluate_cable(
         tt_touch_voltage_v=tt_touch_v,
         cpc_min_mm2=cpc_min_mm2,
         cpc_adiabatic_pass=cpc_adiabatic_pass,
+        live_adiabatic_pass=live_adiabatic_pass,
     )
 
 
@@ -225,8 +284,13 @@ def solve_circuit(
             )
         )
 
-    # 2. Protective device selection
+    # 2. Protective device selection (MCB B/C/D <= 63 A, MCCB / BS 88-2 > 63 A)
     curve: BreakerCurve = eff_spec.preferred_curve
+    allow_mccb = (
+        eff_spec.is_three_phase
+        or curve in (BreakerCurve.MCCB, BreakerCurve.BS88)
+        or eff_spec.design_current_ib_a > max(devices_std.standard_ratings_a)
+    )
     if override is not None and override.breaker_in_a is not None:
         breaker_in_a = override.breaker_in_a
     elif eff_spec.topology == CircuitTopology.RING_FINAL:
@@ -235,13 +299,30 @@ def solve_circuit(
         breaker_in_a = devices_std.select_rating(
             eff_spec.design_current_ib_a,
             min_rating_a=eff_spec.min_breaker_in_a,
+            allow_mccb=allow_mccb,
         )
+
+    if breaker_in_a > max(devices_std.standard_ratings_a) and curve not in (
+        BreakerCurve.MCCB,
+        BreakerCurve.BS88,
+    ):
+        curve = BreakerCurve.MCCB
 
     device_spec = devices_std.get_device(curve, breaker_in_a)
     zs_max_ohm = device_spec.zs_max_ohm
     i2t_a2s = device_spec.i2t_a2s
 
-    if eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None:
+    if curve == BreakerCurve.BS88:
+        rcd_suffix = f" + {eff_spec.rcd_idn_ma}mA RCD" if (
+            eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None
+        ) else ""
+        device_label = f"{breaker_in_a}A BS 88-2 gG Fuse{rcd_suffix}"
+    elif curve == BreakerCurve.MCCB or breaker_in_a > max(devices_std.standard_ratings_a):
+        rcd_suffix = f" + {eff_spec.rcd_idn_ma}mA RCD" if (
+            eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None
+        ) else ""
+        device_label = f"{breaker_in_a}A MCCB{rcd_suffix}"
+    elif eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None:
         if eff_spec.category == CircuitCategory.EV_CHARGER:
             device_label = (
                 f"{breaker_in_a}A Type {curve.value} RCBO {eff_spec.rcd_idn_ma}mA "
@@ -252,7 +333,9 @@ def solve_circuit(
     else:
         device_label = f"{breaker_in_a}A Type {curve.value} MCB"
 
-    if eff_spec.insulation_type == "xlpe_90c":
+    if eff_spec.insulation_type == "xlpe_90c" and breaker_in_a <= max(
+        devices_std.standard_ratings_a
+    ):
         flags.append(
             ReviewFlag(
                 code="XLPE_CONSERVATIVE_70C_BASE_IT",
@@ -356,6 +439,8 @@ def solve_circuit(
                 upsize_reasons.append("zs_impedance")
             if not ev.cpc_adiabatic_pass and "cpc_adiabatic" not in upsize_reasons:
                 upsize_reasons.append("cpc_adiabatic")
+            if not ev.live_adiabatic_pass and "live_adiabatic" not in upsize_reasons:
+                upsize_reasons.append("live_adiabatic")
 
             # On TT systems, missing RCD cannot be fixed by upsizing copper;
             # stop early if only TT earth-fault verification failed.
@@ -364,6 +449,7 @@ def solve_circuit(
                 and ev.thermal_pass
                 and ev.vd_pass
                 and ev.cpc_adiabatic_pass
+                and ev.live_adiabatic_pass
                 and not ev.earth_fault_pass
             ):
                 break
@@ -514,10 +600,30 @@ def solve_circuit(
             )
         )
 
+    if not chosen.live_adiabatic_pass:
+        flags.append(
+            ReviewFlag(
+                code="LIVE_CONDUCTOR_ADIABATIC_FAIL",
+                severity=ReviewSeverity.BLOCKER,
+                category="bs7671",
+                circuit_id=eff_spec.circuit_id,
+                regulation_ref="BS 7671 Reg 434.5.2",
+                message=(
+                    f"Circuit {eff_spec.circuit_id} phase conductor ({chosen.cable_mm2:g} mm²) "
+                    f"fails short-circuit adiabatic check: min {chosen.cpc_min_mm2:.2f} mm²."
+                ),
+            )
+        )
+
     assigned_phase = (
         PhaseAssignment.THREE_PHASE
         if eff_spec.is_three_phase
         else (eff_spec.fixed_phase or phase)
+    )
+    containment = size_conduit_or_tray(
+        chosen.cable_mm2,
+        is_three_phase=eff_spec.is_three_phase,
+        grouping_count=eff_spec.grouping_count,
     )
 
     return SolvedCircuit(
@@ -551,6 +657,8 @@ def solve_circuit(
         adiabatic_i2t_a2s=round(i2t_a2s, 1),
         cpc_min_mm2=round(chosen.cpc_min_mm2, 3),
         cpc_adiabatic_pass=chosen.cpc_adiabatic_pass,
+        live_adiabatic_pass=chosen.live_adiabatic_pass,
+        recommended_containment=containment,
         overall_pass=chosen.all_pass,
         upsize_reasons=upsize_reasons,
         flags=flags,

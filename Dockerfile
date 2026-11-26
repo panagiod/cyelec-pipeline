@@ -6,11 +6,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CYELEC_STANDARDS_DIR=/app/standards \
     PORT=8080
 
-# Install Latin + Greek TTF fonts for deterministic CAD/SVG/report rendering
+# Install Latin + Greek TTF fonts & WeasyPrint Pango/Cairo libs (zero AGPLv3)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         fonts-noto-core \
         fonts-dejavu-core \
+        libpango-1.0-0 \
+        libpangoft2-1.0-0 \
+        libgdk-pixbuf-2.0-0 \
+        libffi8 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create stateless non-root user
@@ -23,9 +27,9 @@ COPY pyproject.toml README.md ./
 COPY standards ./standards
 COPY src ./src
 
-# Install FastAPI server + Apache-2.0 GCP Firestore/GCS adapters (zero AGPLv3)
+# Install FastAPI + GCP Firestore/GCS + LGPLv3 IFC BIM + BSD WeasyPrint PDF (zero AGPLv3)
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir ".[api,gcp]" \
+    && pip install --no-cache-dir ".[api,gcp,bim,render]" \
     && chown -R cyelec:cyelec /app
 
 USER cyelec

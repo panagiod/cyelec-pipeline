@@ -22,11 +22,11 @@ Deterministic-first, zero-commercial-CAD-license Python 3.12 electrical engineer
 
 | File | Scope |
 | --- | --- |
-| `standards/bs7671_cables.yaml` | Appendix 4 Method B (Cyprus masonry conduit default) & Method C ratings (`1.5–35 mm²`), `mV/A/m`, 20°C resistance, $C_a$ (Table 4B1), $C_g$ (Table 4C1), $C_i$ (Table 52.2), 70°C PVC & 90°C XLPE temp multipliers (`1.20` / `1.28`) & adiabatic $k$ (`115` / `143`) |
-| `standards/bs7671_devices.yaml` | BS 7671 Table 41.3 Type B & C MCB/RCBO $Z_{s,\max}$ ($U_0=230\text{ V}, C_{\min}=0.95$) and let-through $I^2t$ (`6–63 A`) |
+| `standards/bs7671_cables.yaml` | Appendix 4 Method B (Cyprus masonry conduit default) & Method C ratings (`1.5–240 mm²`, 70°C PVC & 90°C XLPE/SWA), `mV/A/m`, 20°C resistance, $C_a$ (Table 4B1), $C_g$ (Table 4C1), $C_i$ (Table 52.2), temp multipliers (`1.20` / `1.28`) & adiabatic $k$ (`115` / `143`) |
+| `standards/bs7671_devices.yaml` | BS 7671 Table 41.3 Type B, C & D MCB/RCBO (`6–63 A`), commercial MCCBs & BS 88-2 HRC fuses (`63–400 A`), $Z_{s,\max}$ ($U_0=230\text{ V}, C_{\min}=0.95$) and let-through $I^2t$ |
 | `standards/eac_cyprus_rules.yaml` | Dual profiles (`cyprus_eac_17th_a3`: `3.0 m` / `cyprus_eac_18th_a2`: `2.5 m` bathroom exclusion), Cyprus ambient (`40°C` indoor / `45°C` outdoor), TT earthing default ($R_A \cdot I_{\Delta n} \le 50\text{ V}$, `200 Ω` stability warning), 3%/5% $\Delta V$ limits, EAC 1P/3P, PV `> 5 kVA`, CT metering (`> 100 A/phase`), substation thresholds (`100 / 150 kVA`) |
-| `standards/room_templates.yaml` | Bilingual English + Greek + Cyprus Greeklish/abbreviated room aliases and domestic circuit load templates |
-| `standards/cyprus_boq_rates.yaml` | Indicative Cyprus electrical contracting supply & install EUR unit rates (cables, PVC conduits, switchgear, BS 1363 accessories, TT earth rod kit, EV chargers, 19% VAT) |
+| `standards/room_templates.yaml` | Bilingual English + Greek + Cyprus Greeklish/abbreviated room aliases and residential + commercial/industrial MEP templates (open office, meeting, server UPS, retail, warehouse, plant, stairwell, lift shaft) |
+| `standards/cyprus_boq_rates.yaml` | Indicative Cyprus electrical contracting supply & install EUR unit rates (`1.5–240 mm²` PVC/XLPE, PVC conduits & galvanized cable tray, MCB/RCBO/MCCB switchgear, BS 1363 & BS 5266/5839 accessories, TT earth rod kit, EV chargers, 19%/5% VAT) |
 
 ## Quickstart
 

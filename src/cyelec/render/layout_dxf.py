@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ezdxf.document import Drawing
+from ezdxf.filemanagement import readfile as read_dxf
+from ezdxf.lldxf.const import DXFError
 
 from cyelec.models.spatial import DeviceType, Phase2DesignResult
 from cyelec.synth.sample_plan import render_building_to_dxf
@@ -23,9 +25,43 @@ ELECTRICAL_LAYERS: dict[str, int] = {
 }
 
 
-def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
-    """Render architectural floorplan plus Phase 2/3 electrical layers and EAC/ETEK title block."""
-    doc = render_building_to_dxf(result.design.building)
+def _resolve_original_dxf_path(
+    result: Phase2DesignResult,
+    source_dxf_path: Path | None = None,
+) -> Path | None:
+    if source_dxf_path is not None and source_dxf_path.is_file():
+        return source_dxf_path if source_dxf_path.suffix.lower() == ".dxf" else None
+    src = result.design.building.source_file
+    if not src or "," in src:
+        return None
+    candidate = Path(src)
+    if candidate.is_file() and candidate.suffix.lower() == ".dxf":
+        return candidate
+    return None
+
+
+def render_electrical_layout_dxf(
+    result: Phase2DesignResult,
+    *,
+    source_dxf_path: Path | None = None,
+) -> Drawing:
+    """Overlay electrical layers onto the architect's original DXF (or synthetic fallback)."""
+    orig_path = _resolve_original_dxf_path(result, source_dxf_path)
+    preserved_underlay = False
+    inv_scale = 1.0
+    if orig_path is not None:
+        try:
+            doc = read_dxf(str(orig_path))
+            preserved_underlay = True
+            unit_scale = result.design.building.source_unit_scale_to_mm
+            inv_scale = 1.0 / unit_scale if unit_scale > 0 else 1.0
+        except (OSError, DXFError):
+            doc = render_building_to_dxf(result.design.building)
+    else:
+        doc = render_building_to_dxf(result.design.building)
+
+    def _s(v_mm: float) -> float:
+        return v_mm * inv_scale
 
     for layer_name, color_idx in ELECTRICAL_LAYERS.items():
         if layer_name not in doc.layers:
@@ -34,23 +70,43 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
     msp = doc.modelspace()
     spatial = result.spatial
 
+    # Mark DB1 anchor clearly when overlaying onto the architect's original DXF
+    if preserved_underlay:
+        db_pt = result.design.building.db_anchor.location_mm
+        dx, dy = _s(db_pt.x_mm), _s(db_pt.y_mm)
+        db_w, db_h = _s(220.0), _s(120.0)
+        msp.add_lwpolyline(
+            [
+                (dx - db_w, dy - db_h),
+                (dx + db_w, dy - db_h),
+                (dx + db_w, dy + db_h),
+                (dx - db_w, dy + db_h),
+            ],
+            close=True,
+            dxfattribs={"layer": "E-TITLE"},
+        )
+        msp.add_text(
+            result.design.building.db_anchor.id,
+            dxfattribs={"layer": "E-TITLE", "height": _s(120.0)},
+        ).set_placement((dx + _s(250.0), dy - _s(50.0)))
+
     # 1. Section 701 wet-zone polygons
     for wz in spatial.wet_zones:
         for ring in wz.zone_0_polygons_mm:
             msp.add_lwpolyline(
-                [(p.x_mm, p.y_mm) for p in ring],
+                [(_s(p.x_mm), _s(p.y_mm)) for p in ring],
                 close=True,
                 dxfattribs={"layer": "E-WETZONE-Z0"},
             )
         for ring in wz.zone_2_polygons_mm:
             msp.add_lwpolyline(
-                [(p.x_mm, p.y_mm) for p in ring],
+                [(_s(p.x_mm), _s(p.y_mm)) for p in ring],
                 close=True,
                 dxfattribs={"layer": "E-WETZONE-Z2"},
             )
         for ring in wz.socket_exclusion_polygons_mm:
             msp.add_lwpolyline(
-                [(p.x_mm, p.y_mm) for p in ring],
+                [(_s(p.x_mm), _s(p.y_mm)) for p in ring],
                 close=True,
                 dxfattribs={"layer": "E-WETZONE-EXCL"},
             )
@@ -59,63 +115,58 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
     for rc in spatial.routed_circuits:
         for seg in rc.segments:
             msp.add_line(
-                (seg.start_mm.x_mm, seg.start_mm.y_mm),
-                (seg.end_mm.x_mm, seg.end_mm.y_mm),
+                (_s(seg.start_mm.x_mm), _s(seg.start_mm.y_mm)),
+                (_s(seg.end_mm.x_mm), _s(seg.end_mm.y_mm)),
                 dxfattribs={"layer": "E-COND"},
             )
 
     # 3. Placed electrical device symbols + circuit tags
     for dev in spatial.devices:
-        x, y = dev.location_mm.x_mm, dev.location_mm.y_mm
+        x, y = _s(dev.location_mm.x_mm), _s(dev.location_mm.y_mm)
         tag = f"{dev.circuit_id or '?'}:{dev.device_id.split('-')[-1]}"
 
         if dev.device_type == DeviceType.LUMINAIRE:
             layer = "E-LITE"
-            msp.add_circle((x, y), radius=120.0, dxfattribs={"layer": layer})
-            msp.add_line((x - 85.0, y - 85.0), (x + 85.0, y + 85.0), dxfattribs={"layer": layer})
-            msp.add_line((x - 85.0, y + 85.0), (x + 85.0, y - 85.0), dxfattribs={"layer": layer})
+            r = _s(120.0)
+            d = _s(85.0)
+            msp.add_circle((x, y), radius=r, dxfattribs={"layer": layer})
+            msp.add_line((x - d, y - d), (x + d, y + d), dxfattribs={"layer": layer})
+            msp.add_line((x - d, y + d), (x + d, y - d), dxfattribs={"layer": layer})
         elif dev.device_type == DeviceType.SWITCH:
             layer = "E-SWIT"
-            msp.add_circle((x, y), radius=70.0, dxfattribs={"layer": layer})
-            msp.add_line((x, y), (x + 110.0, y + 110.0), dxfattribs={"layer": layer})
+            msp.add_circle((x, y), radius=_s(70.0), dxfattribs={"layer": layer})
+            msp.add_line((x, y), (x + _s(110.0), y + _s(110.0)), dxfattribs={"layer": layer})
         elif dev.device_type == DeviceType.SOCKET_TWIN:
             layer = "E-SOCK"
+            sr = _s(90.0)
             msp.add_arc(
                 center=(x, y),
-                radius=90.0,
+                radius=sr,
                 start_angle=0.0,
                 end_angle=180.0,
                 dxfattribs={"layer": layer},
             )
-            msp.add_line((x - 90.0, y), (x + 90.0, y), dxfattribs={"layer": layer})
+            msp.add_line((x - sr, y), (x + sr, y), dxfattribs={"layer": layer})
         elif dev.device_type == DeviceType.SPLIT_AC:
             layer = "E-AC"
-            rect = [
-                (x - 160.0, y - 80.0),
-                (x + 160.0, y - 80.0),
-                (x + 160.0, y + 80.0),
-                (x - 160.0, y + 80.0),
-            ]
+            rx, ry = _s(160.0), _s(80.0)
+            rect = [(x - rx, y - ry), (x + rx, y - ry), (x + rx, y + ry), (x - rx, y + ry)]
             msp.add_lwpolyline(rect, close=True, dxfattribs={"layer": layer})
         else:
             layer = "E-APPL"
-            rect = [
-                (x - 100.0, y - 100.0),
-                (x + 100.0, y - 100.0),
-                (x + 100.0, y + 100.0),
-                (x - 100.0, y + 100.0),
-            ]
+            rr = _s(100.0)
+            rect = [(x - rr, y - rr), (x + rr, y - rr), (x + rr, y + rr), (x - rr, y + rr)]
             msp.add_lwpolyline(rect, close=True, dxfattribs={"layer": layer})
 
-        lbl = msp.add_text(tag, dxfattribs={"layer": layer, "height": 75.0})
-        lbl.set_placement((x + 110.0, y + 40.0))
+        lbl = msp.add_text(tag, dxfattribs={"layer": layer, "height": _s(75.0)})
+        lbl.set_placement((x + _s(110.0), y + _s(40.0)))
 
     # 4. EAC / ETEK Plan-Approval Drawing Border, Title Block & Symbol Legend
     all_pts = [p for r in result.design.building.rooms for p in r.polygon_mm]
-    minx = min(p.x_mm for p in all_pts) - 1000.0
-    maxx = max(p.x_mm for p in all_pts) + 3800.0
-    miny = min(p.y_mm for p in all_pts) - 1800.0
-    maxy = max(p.y_mm for p in all_pts) + 1000.0
+    minx = _s(min(p.x_mm for p in all_pts) - 1000.0)
+    maxx = _s(max(p.x_mm for p in all_pts) + 3800.0)
+    miny = _s(min(p.y_mm for p in all_pts) - 1800.0)
+    maxy = _s(max(p.y_mm for p in all_pts) + 1000.0)
 
     msp.add_lwpolyline(
         [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)],
@@ -123,7 +174,7 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
         dxfattribs={"layer": "E-TITLE"},
     )
     # Right-side legend & EAC/ETEK title panel
-    panel_x = maxx - 3200.0
+    panel_x = maxx - _s(3200.0)
     msp.add_line((panel_x, miny), (panel_x, maxy), dxfattribs={"layer": "E-TITLE"})
 
     eac = result.design.eac_compliance
@@ -168,19 +219,24 @@ def render_electrical_layout_dxf(result: Phase2DesignResult) -> Drawing:
         ),
         (f"SHA256: {result.design.provenance.input_sha256[:16]}", 105.0),
     ]
-    cur_y = maxy - 450.0
+    cur_y = maxy - _s(450.0)
     for text, h in legend_lines:
         msp.add_text(
-            text, dxfattribs={"layer": "E-TITLE", "height": h}
-        ).set_placement((panel_x + 150.0, cur_y))
-        cur_y -= max(320.0, h * 2.4)
+            text, dxfattribs={"layer": "E-TITLE", "height": _s(h)}
+        ).set_placement((panel_x + _s(150.0), cur_y))
+        cur_y -= _s(max(320.0, h * 2.4))
 
     return doc
 
 
-def export_electrical_layout_dxf(result: Phase2DesignResult, out_path: Path) -> Path:
+def export_electrical_layout_dxf(
+    result: Phase2DesignResult,
+    out_path: Path,
+    *,
+    source_dxf_path: Path | None = None,
+) -> Path:
     """Write annotated Phase 2 electrical overlay R2018 DXF file."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = render_electrical_layout_dxf(result)
+    doc = render_electrical_layout_dxf(result, source_dxf_path=source_dxf_path)
     doc.saveas(str(out_path))
     return out_path

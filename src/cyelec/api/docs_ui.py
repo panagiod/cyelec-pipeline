@@ -6,9 +6,16 @@ from __future__ import annotations
 from cyelec import __version__
 
 
-def render_workbench_guide_tab_html() -> str:
+def render_workbench_guide_tab_html(*, show_api_docs: bool = True) -> str:
     """Return compact Quick-Reference & Know-How HTML embedded inside the Workbench tab."""
-    return """
+    docs_btn = (
+        '<a href="/docs" target="_blank" rel="noopener"'
+        ' class="btn btn-secondary btn-sm" style="text-decoration:none;">'
+        "REST API Reference (/docs) ↗</a>"
+        if show_api_docs
+        else ""
+    )
+    return f"""
           <div style="display:flex;justify-content:space-between;align-items:center;
                       flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:8px;
                       border-bottom:1px solid var(--border);">
@@ -25,10 +32,7 @@ def render_workbench_guide_tab_html() -> str:
                  class="btn btn-primary btn-sm" style="text-decoration:none;">
                 Open Full Searchable Guide &amp; Formulas ↗
               </a>
-              <a href="/docs" target="_blank" rel="noopener"
-                 class="btn btn-secondary btn-sm" style="text-decoration:none;">
-                REST API Reference (/docs) ↗
-              </a>
+              {docs_btn}
             </div>
           </div>
 
@@ -37,30 +41,28 @@ def render_workbench_guide_tab_html() -> str:
             <div class="panel" style="margin:0;">
               <h2>1. 5-Step ETEK Engineer Workflow</h2>
               <ol style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
-                <li>Select a Cyprus benchmark or upload an architectural <code>.dxf</code>/<code>.ifc</code>.</li>
+                <li>Select a Cyprus benchmark or upload architectural <code>.dxf</code>/<code>.ifc</code> (select 2+ <code>.dxf</code> for Multi-Floor).</li>
                 <li>If layers are non-standard, map them in the <strong>DXF Layer Mapping Wizard</strong>.</li>
                 <li>Set <strong>EAC Profile</strong> (<code>18th+A2</code> 2.5 m or <code>17th+A3</code> 3.0 m),
-                    <strong>TT earthing</strong>, PV kVA, and firm/ETEK branding.</li>
+                    <strong>TT earthing</strong>, PV kVA, 19%/5% VAT, Tender BOQ, and firm/ETEK branding.</li>
                 <li>Click <strong>Run Deterministic Solve</strong>, then refine visually on the
-                    <strong>Interactive Floorplan</strong> (click rooms to reclassify, click
-                    <em>Relocate DB1</em> to re-route conduits) or override phases/Cg per circuit.</li>
+                    <strong>Interactive Floorplan</strong> (click rooms to reclassify across 20 residential &amp; commercial types, or click
+                    <em>Relocate DB1</em> to re-route conduits).</li>
                 <li>Resolve any <strong>BLOCKER</strong> flags, save revisions in
-                    <strong>Workspace</strong>, and click <strong>Download EAC ZIP Pack</strong>.</li>
+                    <strong>Workspace</strong>, and click <strong>Download EAC ZIP Pack</strong> (with original DXF underlay &amp; native PDF).</li>
               </ol>
             </div>
 
             <div class="panel" style="margin:0;">
               <h2>2. Cyprus EAC &amp; BS 7671 Key Limits</h2>
               <ul style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
-                <li><strong>Ambient (Method B masonry):</strong> 40°C indoor (<code>Ca=0.87</code>),
-                    45°C roof/outdoor (<code>Ca=0.79</code>) for 70°C PVC Cu.</li>
+                <li><strong>Ambient &amp; Cables:</strong> 40°C indoor / 45°C roof; <code>1.5–35 mm²</code> 70°C PVC &amp; <code>50–240 mm²</code> 90°C XLPE/SWA + <code>80–400 A</code> MCCBs &amp; Type D motors.</li>
                 <li><strong>Voltage Drop (cumulative):</strong> <code>&le; 3.0%</code> lighting,
-                    <code>&le; 5.0%</code> power (sub-main + final combined).</li>
+                    <code>&le; 5.0%</code> power (sub-main + final combined) + 45% conduit/tray fill.</li>
                 <li><strong>TT Earthing (Cyprus default):</strong>
-                    <code>Ra &times; I&Delta;n &le; 50 V</code>, 30 mA RCD mandatory on finals,
-                    100 mA Type S selective RCD on TT sub-mains (Reg 536.4.1.4).</li>
-                <li><strong>Wet Zones (Sec 701):</strong> 2.5 m socket exclusion (18th+A2) or
-                    3.0 m (17th+A3), clipped to bathroom walls.</li>
+                    <code>Ra &times; I&Delta;n &le; 50 V</code>, 30 mA RCD on finals,
+                    100 mA Type S selective RCD on TT sub-mains, plus live-conductor adiabatic check (Reg 434.5.2).</li>
+                <li><strong>Commercial &amp; Wet Zones:</strong> BS 5266 Emergency Lighting, BS 5839 Fire Alarm spur, Server UPS, 3P VRF/Lift feeders, and Sec 701 2.5 m / 3.0 m exclusion.</li>
                 <li><strong>EAC Escalations:</strong> 3P mandatory for houses/2-3 bed flats/PV &gt; 5 kVA;
                     CT metering &gt; 100 A/ph; Substation warn &ge; 100 kVA, blocker &ge; 150 kVA.</li>
               </ul>
@@ -102,13 +104,16 @@ def render_workbench_guide_tab_html() -> str:
 """
 
 
-def render_user_guide_html(base_url: str = "") -> str:
+def render_user_guide_html(base_url: str = "", *, show_api_docs: bool = True) -> str:
     """Return full standalone searchable User Documentation & Engineering Know-How page."""
     import html
 
     prefix = base_url.rstrip("/")
     og_img = html.escape(f"{prefix}/og-thumbnail.jpg", quote=True)
     logo_url = html.escape(f"{prefix}/logo.png", quote=True)
+    docs_nav_link = (
+        '<a class="nav-btn" href="/docs">OpenAPI (/docs)</a>' if show_api_docs else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,7 +373,7 @@ def render_user_guide_html(base_url: str = "") -> str:
     </a>
     <div class="nav-links">
       <a class="nav-btn nav-btn-primary" href="/">&larr; Open Workbench</a>
-      <a class="nav-btn" href="/docs">OpenAPI (/docs)</a>
+      {docs_nav_link}
       <span style="font-size:11px;opacity:0.85;">v{__version__}</span>
     </div>
   </header>

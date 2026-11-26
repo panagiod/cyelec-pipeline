@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Literal
 
-from cyelec.models.building import BuildingModel, Point2D, Room
+from cyelec.models.building import BuildingModel, BuildingType, Point2D, Room, RoomType
 from cyelec.models.electrical import (
     BreakerCurve,
     CircuitCategory,
@@ -16,6 +16,34 @@ from cyelec.models.electrical import (
     ReviewSeverity,
 )
 from cyelec.standards_loader import StandardsBundle
+
+_COMMERCIAL_BUILDING_TYPES = frozenset(
+    {
+        BuildingType.OFFICE,
+        BuildingType.SHOP,
+        BuildingType.WORKSHOP,
+        BuildingType.INDUSTRIAL,
+    }
+)
+_COMMERCIAL_ROOM_TYPES = frozenset(
+    {
+        RoomType.OPEN_OFFICE,
+        RoomType.MEETING_ROOM,
+        RoomType.SERVER_ROOM,
+        RoomType.RETAIL_FLOOR,
+        RoomType.WAREHOUSE,
+        RoomType.PLANT_ROOM,
+        RoomType.STAIRWELL,
+        RoomType.LIFT_SHAFT,
+    }
+)
+
+
+def is_commercial_building(building: BuildingModel) -> bool:
+    """Return True when building type or room types indicate commercial/industrial MEP scope."""
+    if building.building_type in _COMMERCIAL_BUILDING_TYPES:
+        return True
+    return any(r.normalized_type in _COMMERCIAL_ROOM_TYPES for r in building.rooms)
 
 
 def _manhattan_m(a: Point2D, b: Point2D) -> float:
@@ -121,12 +149,14 @@ def _generate_board_circuits(
     overrides: DesignOverrides | None,
     next_id: list[int],
     emitted_keys: set[str],
+    is_commercial: bool = False,
 ) -> list[CircuitSpec]:
     """Generate lighting, socket ring, split A/C, and appliance circuits for one board."""
     tmpl_std = standards.room_templates
     defaults = tmpl_std.circuit_defaults
     eac_std = standards.eac_rules
     u0 = eac_std.system_nominal.u0_v
+    ul = eac_std.system_nominal.ul_v
     method: Literal["B", "C"] = eac_std.ambient_defaults_c.default_installation_method
     rcd_idn = eac_std.earthing.default_rcd_idn_ma
 
@@ -156,6 +186,15 @@ def _generate_board_circuits(
         day_rooms = rooms[:midpoint]
         night_rooms = rooms[midpoint:]
 
+    primary_light_lbl = (
+        "Lighting - General / Task Zone" if is_commercial else "Lighting - Day / Living Zone"
+    )
+    secondary_light_lbl = (
+        "Lighting - Circulation / Perimeter Zone"
+        if is_commercial
+        else "Lighting - Night / Sleeping Zone"
+    )
+
     lighting_groups: list[tuple[str, list[Room]]] = []
     if day_rooms:
         day_chunks = _chunk_by_max_watts(
@@ -163,16 +202,14 @@ def _generate_board_circuits(
         )
         for i, chunk in enumerate(day_chunks, start=1):
             suffix = f" #{i}" if len(day_chunks) > 1 else ""
-            lighting_groups.append((f"{floor_prefix}Lighting - Day / Living Zone{suffix}", chunk))
+            lighting_groups.append((f"{floor_prefix}{primary_light_lbl}{suffix}", chunk))
     if night_rooms:
         night_chunks = _chunk_by_max_watts(
             night_rooms, lighting_w, defaults.lighting_circuit_max_connected_w
         )
         for i, chunk in enumerate(night_chunks, start=1):
             suffix = f" #{i}" if len(night_chunks) > 1 else ""
-            lighting_groups.append(
-                (f"{floor_prefix}Lighting - Night / Sleeping Zone{suffix}", chunk)
-            )
+            lighting_groups.append((f"{floor_prefix}{secondary_light_lbl}{suffix}", chunk))
 
     for desc, grp_rooms in lighting_groups:
         conn_w = max(100.0, round(sum(lighting_w[r.id] for r in grp_rooms), 1))
@@ -334,15 +371,28 @@ def _generate_board_circuits(
             )
         )
 
-    # 4. Dedicated Appliances (Cooker, Oven, Dishwasher, Washer, Solar WH)
+    # 4. Dedicated Appliances (Cooker, Oven, Dishwasher, Washer, Solar WH, UPS, 3P Plant/Lift)
     for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         for app in rt.dedicated_appliances:
+            if (
+                is_commercial
+                and room.normalized_type == RoomType.KITCHEN
+                and app.category in (CircuitCategory.COOKER, CircuitCategory.OVEN)
+            ):
+                # Commercial staff kitchenettes do not install 7 kW domestic hobs / built-in ovens
+                continue
             if app.key in emitted_keys:
                 continue
             emitted_keys.add(app.key)
             div_w = round(app.connected_w * app.diversity, 1)
-            ib = round(div_w / (u0 * app.power_factor), 2)
+            v_nom = ul if app.is_three_phase else u0
+            ib = round(
+                div_w / (math.sqrt(3.0) * v_nom * app.power_factor)
+                if app.is_three_phase
+                else div_w / (v_nom * app.power_factor),
+                2,
+            )
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
@@ -356,8 +406,8 @@ def _generate_board_circuits(
                     diversified_load_w=div_w,
                     power_factor=app.power_factor,
                     design_current_ib_a=ib,
-                    nominal_voltage_v=u0,
-                    is_three_phase=False,
+                    nominal_voltage_v=v_nom,
+                    is_three_phase=app.is_three_phase,
                     length_m=_estimate_radial_length_m(
                         db, [room], defaults.vertical_drop_allowance_m
                     ),
@@ -367,6 +417,47 @@ def _generate_board_circuits(
                     preferred_curve=app.curve,
                     min_breaker_in_a=app.min_breaker_in_a,
                     min_cable_mm2=app.min_cable_mm2,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+        if (
+            is_commercial
+            and room.normalized_type == RoomType.KITCHEN
+            and "commercial_kitchenette_boiler" not in emitted_keys
+        ):
+            emitted_keys.add("commercial_kitchenette_boiler")
+            kb_w = 2500.0
+            kb_div = round(kb_w * 0.80, 1)
+            kb_ib = round(kb_div / u0, 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=board_id,
+                    description=(
+                        f"{floor_prefix}Kitchenette Water Boiler / Coffee Radial "
+                        f"({room.raw_label})"
+                    ),
+                    category=CircuitCategory.APPLIANCE,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[room.id],
+                    connected_load_w=kb_w,
+                    diversity_factor=0.80,
+                    diversified_load_w=kb_div,
+                    power_factor=1.0,
+                    design_current_ib_a=kb_ib,
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        db, [room], defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
                     rcd_protected=True,
                     rcd_idn_ma=rcd_idn,
                     vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
@@ -389,6 +480,7 @@ def generate_circuits(
     u0 = eac_std.system_nominal.u0_v
     method: Literal["B", "C"] = eac_std.ambient_defaults_c.default_installation_method
     rcd_idn = eac_std.earthing.default_rcd_idn_ma
+    is_commercial = is_commercial_building(building)
 
     next_id = [1]
     emitted_keys: set[str] = set()
@@ -421,6 +513,7 @@ def generate_circuits(
                     overrides=overrides,
                     next_id=next_id,
                     emitted_keys=emitted_keys,
+                    is_commercial=is_commercial,
                 )
             )
         primary_board_id = default_board.board_id
@@ -438,11 +531,12 @@ def generate_circuits(
                 overrides=overrides,
                 next_id=next_id,
                 emitted_keys=emitted_keys,
+                is_commercial=is_commercial,
             )
         )
 
     # Fallback: ensure Cyprus residential installations always include Immersion/Solar Water Heater
-    if "solar_water_heater" not in emitted_keys:
+    if (not is_commercial) and ("solar_water_heater" not in emitted_keys):
         water_room = building.rooms[0]
         div_w = 3000.0
         ib = round(div_w / u0, 2)
@@ -470,6 +564,73 @@ def generate_circuits(
                 preferred_curve=BreakerCurve.B,
                 min_breaker_in_a=16,
                 min_cable_mm2=2.5,
+                rcd_protected=True,
+                rcd_idn_ma=rcd_idn,
+                vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+            )
+        )
+
+    # 4b. Commercial Life-Safety Circuits (BS 5266 Emergency Lighting + BS 5839 Fire Alarm)
+    if is_commercial:
+        emg_rooms = [
+            r
+            for r in building.rooms
+            if r.normalized_type
+            in (RoomType.CORRIDOR, RoomType.STAIRWELL, RoomType.OPEN_OFFICE, RoomType.RETAIL_FLOOR)
+        ] or building.rooms[:1]
+        emg_w = 300.0
+        circuits.append(
+            CircuitSpec(
+                circuit_id=_next_id(),
+                board_id=primary_board_id,
+                description="Emergency Lighting (BS 5266 / EN 1838)",
+                category=CircuitCategory.EMERGENCY_LIGHTING,
+                topology=CircuitTopology.RADIAL,
+                room_ids=[r.id for r in emg_rooms],
+                connected_load_w=emg_w,
+                diversity_factor=1.0,
+                diversified_load_w=emg_w,
+                power_factor=0.95,
+                design_current_ib_a=round(emg_w / (u0 * 0.95), 2),
+                nominal_voltage_v=u0,
+                is_three_phase=False,
+                length_m=_estimate_radial_length_m(
+                    primary_db, emg_rooms, defaults.vertical_drop_allowance_m
+                ),
+                installation_method=method,
+                ambient_temp_c=_resolve_ambient_c(emg_rooms, standards, overrides),
+                grouping_count=1,
+                preferred_curve=BreakerCurve.B,
+                min_breaker_in_a=6,
+                min_cable_mm2=1.5,
+                rcd_protected=True,
+                rcd_idn_ma=rcd_idn,
+                vd_limit_pct=eac_std.voltage_drop_limits_pct.lighting,
+            )
+        )
+        fa_w = 250.0
+        circuits.append(
+            CircuitSpec(
+                circuit_id=_next_id(),
+                board_id=primary_board_id,
+                description="Fire Alarm Panel Dedicated Spur (BS 5839 — Dedicated RCBO)",
+                category=CircuitCategory.FIRE_ALARM,
+                topology=CircuitTopology.RADIAL,
+                room_ids=[building.rooms[0].id],
+                connected_load_w=fa_w,
+                diversity_factor=1.0,
+                diversified_load_w=fa_w,
+                power_factor=0.95,
+                design_current_ib_a=round(fa_w / (u0 * 0.95), 2),
+                nominal_voltage_v=u0,
+                is_three_phase=False,
+                length_m=12.0,
+                installation_method=method,
+                ambient_temp_c=_resolve_ambient_c(building.rooms[:1], standards, overrides),
+                grouping_count=1,
+                preferred_curve=BreakerCurve.B,
+                min_breaker_in_a=6,
+                min_cable_mm2=1.5,
                 rcd_protected=True,
                 rcd_idn_ma=rcd_idn,
                 vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
@@ -520,21 +681,22 @@ def generate_circuits(
 
     # 6. Optional Commercial 3-Phase Central HVAC / Process Feeder(s)
     if building.extra_three_phase_load_kva > 0.0:
-        remaining_kva = building.extra_three_phase_load_kva
-        feeder_idx = 1
+        total_extra = building.extra_three_phase_load_kva
         ul = eac_std.system_nominal.ul_v
-        while remaining_kva > 1e-6:
-            chunk_kva = min(30.0, remaining_kva)
-            remaining_kva = round(remaining_kva - chunk_kva, 3)
+        chunk_max = 60.0 if total_extra > 120.0 else 30.0
+        n_feeders = max(1, math.ceil(total_extra / chunk_max))
+        each_kva = round(total_extra / n_feeders, 3)
+        for feeder_idx in range(1, n_feeders + 1):
             pf = 0.90
-            watts = round(chunk_kva * 1000.0 * pf, 1)
-            ib_3p = round((chunk_kva * 1000.0) / (math.sqrt(3.0) * ul), 2)
+            watts = round(each_kva * 1000.0 * pf, 1)
+            ib_3p = round((each_kva * 1000.0) / (math.sqrt(3.0) * ul), 2)
+            use_mccb = ib_3p > 63.0
             circuits.append(
                 CircuitSpec(
                     circuit_id=_next_id(),
                     board_id=primary_board_id,
-                    description=f"3-Phase Commercial HVAC / Process Feeder #{feeder_idx}",
-                    category=CircuitCategory.OTHER,
+                    description=f"3-Phase Commercial HVAC / VRF Feeder #{feeder_idx}",
+                    category=CircuitCategory.HVAC_3P,
                     topology=CircuitTopology.RADIAL,
                     room_ids=[building.rooms[0].id],
                     connected_load_w=watts,
@@ -546,17 +708,17 @@ def generate_circuits(
                     is_three_phase=True,
                     length_m=22.0,
                     installation_method=method,
+                    insulation_type="xlpe_90c" if use_mccb else "pvc_70c",
                     ambient_temp_c=_resolve_ambient_c(building.rooms[:1], standards, overrides),
                     grouping_count=1,
-                    preferred_curve=BreakerCurve.C,
-                    min_breaker_in_a=50,
-                    min_cable_mm2=16.0,
+                    preferred_curve=BreakerCurve.MCCB if use_mccb else BreakerCurve.C,
+                    min_breaker_in_a=80 if use_mccb else (32 if each_kva >= 15.0 else 16),
+                    min_cable_mm2=25.0 if use_mccb else (6.0 if each_kva >= 15.0 else 4.0),
                     rcd_protected=True,
                     rcd_idn_ma=rcd_idn,
                     vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
                 )
             )
-            feeder_idx += 1
 
     return circuits
 

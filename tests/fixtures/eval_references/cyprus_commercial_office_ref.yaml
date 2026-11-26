@@ -1,61 +1,62 @@
 plan_name: "Cyprus Commercial Office 450 m² (EAC CT Metering)"
 source_reference: >-
   Licensed Cyprus ETEK engineer reference schedule for a 450 m² commercial office
-  requiring EAC 3-phase CT metering (> 100 A/phase)
+  requiring EAC 3-phase CT metering (> 100 A/phase), BS 5266 emergency lighting,
+  BS 5839 fire alarm spur, server room UPS feeder, and 3-phase central VRF HVAC.
 building_type: office
 expected_area_m2: 450.0
-expected_room_count: 5
+expected_room_count: 6
 expected_supply_phases: 3
 expected_supply_tier: "3x200A (138.6 kVA - CT Metering)"
 expected_main_breaker_a: 200
-expected_diversified_kva: 125.0
-expected_max_phase_a: 180.0
+expected_diversified_kva: 130.0
+expected_max_phase_a: 188.0
 expected_imbalance_pct: 10.0
-expected_total_circuits: 18
-expected_sockets_min: 20
-expected_luminaires_min: 20
-expected_split_ac_count: 2
+expected_total_circuits: 20
+expected_sockets_min: 18
+expected_luminaires_min: 12
+expected_split_ac_count: 3
 expected_conduit_m: 680.0
-expected_boq_eur: 11200.0
+expected_boq_eur: 11800.0
 reference_circuits:
   - category: lighting
-    description: "Commercial Office LED Lighting Zones"
+    description: "Commercial Office EN 12464-1 LED Lighting Zones"
     count: 4
     breaker_in_a: 6
     cable_mm2: 1.5
+  - category: emergency_lighting
+    description: "BS 5266 / EN 1838 Emergency Lighting"
+    count: 1
+    breaker_in_a: 6
+    cable_mm2: 1.5
+  - category: fire_alarm
+    description: "BS 5839 Fire Alarm Panel Dedicated Spur"
+    count: 1
+    breaker_in_a: 6
+    cable_mm2: 1.5
   - category: socket_ring
-    description: "Workstation & Office 32 A Socket Rings"
+    description: "Workstation & Staff Kitchenette 32 A Socket Rings"
     count: 4
     breaker_in_a: 32
     cable_mm2: 2.5
   - category: split_ac
-    description: "Dedicated Split A/C Circuits (Server/Meeting)"
-    count: 2
+    description: "Dedicated Split A/C Circuits (Open Office / Meeting / Server)"
+    count: 3
     breaker_in_a: 16
     cable_mm2: 2.5
-  - category: cooker
-    description: "Office Kitchenette Hob"
+  - category: ups_server
+    description: "Server Room Clean Power / UPS 32 A Feeder"
     count: 1
     breaker_in_a: 32
     cable_mm2: 6.0
-  - category: oven
-    description: "Office Kitchenette Oven"
-    count: 1
-    breaker_in_a: 16
-    cable_mm2: 2.5
   - category: appliance
-    description: "Office Kitchenette Dishwasher"
-    count: 1
+    description: "Staff Kitchenette Dishwasher & Water Boiler Radials"
+    count: 2
     breaker_in_a: 16
     cable_mm2: 2.5
-  - category: water_heater
-    description: "Office Instant/Storage Water Heater"
-    count: 1
-    breaker_in_a: 16
-    cable_mm2: 2.5
-  - category: other
-    description: "3-Phase HVAC VRF / Server UPS / Commercial Sub-Feeders"
+  - category: hvac_3p
+    description: "3-Phase Central HVAC / VRF Modular Feeders"
     count: 4
-    breaker_in_a: 50
-    cable_mm2: 16.0
+    breaker_in_a: 40
+    cable_mm2: 10.0
     is_three_phase: true

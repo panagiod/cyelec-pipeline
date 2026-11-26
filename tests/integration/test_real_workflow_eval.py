@@ -210,7 +210,7 @@ def test_dimension_stripping_and_hall_precedence() -> None:
     bundle = load_standards()
     assert (
         classify_room_label("MAIN OFFICE 44.9 mp", bundle.room_templates).normalized_type
-        == RoomType.LIVING_ROOM
+        == RoomType.OPEN_OFFICE
     )
     assert (
         classify_room_label("BEDROOM HALL", bundle.room_templates).normalized_type

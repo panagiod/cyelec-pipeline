@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 from cyelec import __version__
+from cyelec.ingest.dwg_bridge import convert_dwg_to_dxf
 from cyelec.ingest.dxf_ingest import ingest_dxf
 from cyelec.ingest.ifc_ingest import ingest_ifc
 from cyelec.ingest.room_classifier import RoomClassifierFallback
-from cyelec.models.building import BuildingModel, BuildingType, DxfLayerMapping
+from cyelec.models.building import BuildingModel, BuildingType, DxfLayerMapping, RoomType
 from cyelec.models.electrical import (
     CircuitSpec,
     DesignOverrides,
@@ -145,6 +147,17 @@ def run_phase1_pipeline(
     # 2b. Solve sub-mains (if multi-floor sub-distribution boards are defined)
     prelim_sub_mains: dict[str, SolvedSubMain] = {}
     if effective_building.sub_boards:
+        is_comm_ipf = effective_building.building_type in (
+            BuildingType.OFFICE,
+            BuildingType.SHOP,
+            BuildingType.WORKSHOP,
+            BuildingType.INDUSTRIAL,
+        )
+        origin_ipf_ka = (
+            overrides.prospective_fault_current_ka
+            if (overrides is not None and overrides.prospective_fault_current_ka is not None)
+            else (10.0 if is_comm_ipf else 6.0)
+        )
         for sb in effective_building.sub_boards:
             b_specs = [s for s in effective_specs if s.board_id == sb.board_id]
             if not b_specs:
@@ -155,6 +168,7 @@ def run_phase1_pipeline(
                 standards,
                 earthing_system=earthing_system,
                 ze_or_ra_ohm=ze_or_ra_ohm,
+                origin_ipf_ka=origin_ipf_ka,
             )
 
     # 3. BS 7671 deterministic sizing & compliance verification for each circuit
@@ -362,7 +376,7 @@ def run_phase2_pipeline(
 
     spatial_flags: list[ReviewFlag] = list(extra_flags) if extra_flags else []
 
-    # 1. Architectural ingestion (DXF / IFC) or direct BuildingModel
+    # 1. Architectural ingestion (DXF / DWG / IFC) or direct BuildingModel
     if isinstance(source, Path):
         suffix = source.suffix.lower()
         if suffix == ".dxf":
@@ -375,6 +389,20 @@ def run_phase2_pipeline(
                 layer_mapping=layer_mapping,
             )
             spatial_flags.extend(ingest_flags)
+        elif suffix == ".dwg":
+            with tempfile.TemporaryDirectory(prefix="cyelec_dwg_") as dwg_tmp:
+                converted_dxf, dwg_flag = convert_dwg_to_dxf(source, Path(dwg_tmp))
+                spatial_flags.append(dwg_flag)
+                building, ingest_flags = ingest_dxf(
+                    converted_dxf,
+                    standards=standards,
+                    project_name=project_name or source.stem.replace("_", " ").title(),
+                    building_type=building_type,
+                    tier2_fallback=tier2_fallback,
+                    layer_mapping=layer_mapping,
+                )
+                building = building.model_copy(update={"source_file": str(source)})
+                spatial_flags.extend(ingest_flags)
         elif suffix == ".ifc":
             building, ingest_flags = ingest_ifc(
                 source,
@@ -385,7 +413,9 @@ def run_phase2_pipeline(
             )
             spatial_flags.extend(ingest_flags)
         else:
-            raise ValueError(f"Unsupported architectural input format: '{suffix}' (use .dxf/.ifc)")
+            raise ValueError(
+                f"Unsupported architectural input format: '{suffix}' (use .dxf/.dwg/.ifc)"
+            )
     else:
         building = source
 
@@ -395,6 +425,25 @@ def run_phase2_pipeline(
 
     # 2. BS 7671 Section 701 wet zones (clipped to room walls)
     wet_zones = compute_building_wet_zones(building, standards, eac_profile=eac_profile)
+    wz_room_ids = {w.room_id for w in wet_zones}
+    for room in building.rooms:
+        if (
+            room.normalized_type in (RoomType.BATHROOM, RoomType.ENSUITE)
+            and room.id not in wz_room_ids
+        ):
+            spatial_flags.append(
+                ReviewFlag(
+                    code="WET_ROOM_NO_FIXTURE_GEOMETRY",
+                    severity=ReviewSeverity.WARNING,
+                    category="bs7671",
+                    regulation_ref="BS 7671 Section 701",
+                    message=(
+                        f"Wet room {room.id} ('{room.raw_label}') has no bathtub/shower fixture "
+                        "polygon in the source CAD; Section 701 Zone 0/1/2 boundaries could not "
+                        "be verified automatically — confirm fixture & IP44/socket clearances."
+                    ),
+                )
+            )
 
     # 3. Deterministic valid-wall electrical accessory placement
     placed_devices, placement_flags = place_electrical_devices(building, wet_zones, standards)

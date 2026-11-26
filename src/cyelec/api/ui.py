@@ -8,12 +8,33 @@ from cyelec import __version__
 from cyelec.api.docs_ui import render_workbench_guide_tab_html
 
 
-def render_etek_workbench_html(base_url: str = "") -> str:
+def render_etek_workbench_html(
+    base_url: str = "",
+    *,
+    show_api_docs: bool = True,
+    ifc_available: bool = False,
+    dwg_available: bool = False,
+) -> str:
     """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard served at GET /."""
     prefix = base_url.rstrip("/")
     og_img = html.escape(f"{prefix}/og-thumbnail.jpg", quote=True)
     logo_url = html.escape(f"{prefix}/logo.png", quote=True)
-    guide_tab_html = render_workbench_guide_tab_html()
+    guide_tab_html = render_workbench_guide_tab_html(show_api_docs=show_api_docs)
+    api_docs_link = (
+        '<a class="hdr-link" href="/docs" target="_blank" rel="noopener">API Docs</a>'
+        if show_api_docs
+        else ""
+    )
+    exts = [".dxf"]
+    if dwg_available:
+        exts.append(".dwg")
+    if ifc_available:
+        exts.append(".ifc")
+    upload_accept = ",".join(exts)
+    fmt_list = " / ".join(exts)
+    upload_label = (
+        f"Or Upload Architectural Floorplan(s) ({fmt_list} — select 2+ .dxf for multi-floor)"
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -272,7 +293,7 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       <a class="hdr-link" href="/guide" target="_blank" rel="noopener">
         User Guide &amp; Know-How
       </a>
-      <a class="hdr-link" href="/docs" target="_blank" rel="noopener">API Docs</a>
+      {api_docs_link}
       <div class="meta">v{__version__} | BS 7671 / Cyprus EAC</div>
     </div>
   </header>
@@ -298,8 +319,14 @@ def render_etek_workbench_html(base_url: str = "") -> str:
         </option>
       </select>
 
-      <label for="dxfFile">Or Upload Architectural DXF (.dxf / .ifc)</label>
-      <input id="dxfFile" type="file" accept=".dxf,.ifc" />
+      <label for="dxfFile">{upload_label}</label>
+      <input id="dxfFile" type="file" accept="{upload_accept}" multiple />
+      <div id="multiFloorBox" class="layer-box">
+        <strong style="font-size:11px;color:#1b365d;">
+          Multi-Floor Combiner (MDB -&gt; Sub-DBs)
+        </strong>
+        <div id="multiFloorRows"></div>
+      </div>
       <div id="layerWizard" class="layer-box">
         <strong style="font-size:11px;color:#1b365d;">DXF Layer Mapping Wizard</strong>
         <div id="layerRows"></div>
@@ -328,19 +355,31 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       <label for="pvKva">PV Capacity Override (kVA, optional)</label>
       <input id="pvKva" type="number" step="0.5" placeholder="Use model default" />
 
-      <h2 style="margin-top:14px;">3. Branding &amp; Language</h2>
+      <h2 style="margin-top:14px;">3. Branding, BOQ &amp; Language</h2>
       <label for="reportLang">Deliverable Language</label>
       <select id="reportLang">
         <option value="en">English (EN)</option>
         <option value="el">Ελληνικά (EL)</option>
         <option value="bilingual">Bilingual (EN / EL)</option>
       </select>
+      <label for="vatRateSel">Cyprus VAT Rate (BOQ)</label>
+      <select id="vatRateSel">
+        <option value="0.19">19% Standard Cyprus VAT</option>
+        <option value="0.05">5% Reduced Primary Residence VAT</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;">
+        <input id="tenderBoqChk" type="checkbox" style="width:auto;" />
+        <span>Unpriced Tender BOQ (Blank Contractor Rates)</span>
+      </label>
       <label for="firmName">Consulting Firm Name</label>
       <input id="firmName" placeholder="e.g., Kypros MEP Consulting Ltd" />
       <label for="engName">ETEK Engineer Name</label>
       <input id="engName" placeholder="e.g., N. Papadopoulos" />
       <label for="etekReg">ETEK Registration No.</label>
       <input id="etekReg" placeholder="e.g., ETEK-E-4821" />
+      <button class="btn btn-secondary" onclick="saveFirmDefaults()">
+        Save Firm Branding &amp; VAT Defaults
+      </button>
 
       <button class="btn btn-primary" onclick="runSolve()">Run Deterministic Solve</button>
       <button class="btn btn-secondary" onclick="downloadBundle()">Download EAC ZIP Pack</button>
@@ -467,6 +506,12 @@ def render_etek_workbench_html(base_url: str = "") -> str:
             <button class="btn btn-secondary btn-sm" onclick="diffLatestRevisions()">
               Diff Latest 2 Revisions
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="exportTenantGdpr()">
+              Export Data (GDPR Art. 20)
+            </button>
+            <button class="btn btn-active btn-sm" onclick="eraseTenantGdpr()">
+              Erase Tenant (GDPR Art. 17)
+            </button>
             <span id="wsStatus" style="color:var(--muted);"></span>
           </div>
           <div id="revListBox" style="margin-bottom:12px;"></div>
@@ -483,7 +528,9 @@ def render_etek_workbench_html(base_url: str = "") -> str:
   <script>
     const ROOM_TYPES = [
       'living_room', 'kitchen', 'kitchen_living', 'master_bedroom', 'bedroom',
-      'bathroom', 'ensuite', 'wc', 'corridor', 'utility', 'veranda', 'storage'
+      'bathroom', 'ensuite', 'wc', 'corridor', 'utility', 'veranda', 'storage',
+      'open_office', 'meeting_room', 'server_room', 'retail_floor',
+      'warehouse', 'plant_room', 'stairwell', 'lift_shaft'
     ];
     const LAYER_ROLES = ['auto', 'rooms', 'walls', 'doors', 'windows', 'fixtures', 'text', 'db'];
 
@@ -556,9 +603,14 @@ def render_etek_workbench_html(base_url: str = "") -> str:
         eac_profile: document.getElementById('eacProfile').value,
         earthing_system: document.getElementById('earthing').value,
         report_language: document.getElementById('reportLang').value,
+        tender_boq_blank_rates: document.getElementById('tenderBoqChk').checked,
         circuit_overrides: circuitOverrides,
         room_type_overrides: roomTypeOverrides
       }};
+      const vatRate = parseFloat(document.getElementById('vatRateSel').value || '0.19');
+      if (Math.abs(vatRate - 0.19) > 1e-6) {{
+        ov.boq_rate_overrides = {{ vat_rate: vatRate }};
+      }}
       const ze = document.getElementById('zeRa').value;
       if (ze) ov.ze_or_ra_ohm = parseFloat(ze);
       const amb = document.getElementById('ambientC').value;
@@ -574,6 +626,23 @@ def render_etek_workbench_html(base_url: str = "") -> str:
         ov.branding = {{ firm_name: firm, engineer_name: eng, etek_reg_no: etek }};
       }}
       return ov;
+    }}
+
+    function collectMultiFloorMeta(fileList) {{
+      const labels = [];
+      const submains = {{}};
+      for (let i = 0; i < fileList.length; i++) {{
+        const lblEl = document.querySelector(`input[data-mf-lbl="${{i}}"]`);
+        const lenEl = document.querySelector(`input[data-mf-len="${{i}}"]`);
+        const defLbl = (i === 0) ? 'GF' : `${{i}}F`;
+        const lbl = ((lblEl && lblEl.value) ? lblEl.value : defLbl).trim().toUpperCase() || defLbl;
+        labels.push(lbl);
+        if (lenEl && lenEl.value) {{
+          const v = parseFloat(lenEl.value);
+          if (!Number.isNaN(v) && v > 0) submains[lbl] = v;
+        }}
+      }}
+      return {{ labels, submains }};
     }}
 
     function setCircuitOverride(cid, field, val) {{
@@ -601,7 +670,9 @@ def render_etek_workbench_html(base_url: str = "") -> str:
         ? `${{pb.imbalance_pct.toFixed(2)}}% | ${{sp.total_conduit_m.toFixed(1)}} m`
         : `1P | ${{sp.total_conduit_m.toFixed(1)}} m`;
       document.getElementById('kBoq').textContent = boq
-        ? `€${{boq.grand_total_eur.toLocaleString('en-US', {{minimumFractionDigits:2}})}}`
+        ? (boq.tender_blank_rates
+            ? 'Tender BOQ (Unpriced)'
+            : `€${{boq.grand_total_eur.toLocaleString('en-US', {{minimumFractionDigits:2}})}}`)
         : '-';
 
       const blk = d.review_flags.filter(f => f.severity === 'blocker').length;
@@ -635,12 +706,14 @@ def render_etek_workbench_html(base_url: str = "") -> str:
           <td class="r">${{sm.voltage_drop_pct.toFixed(2)}}%</td>
           <td class="r">${{sm.cumulative_lighting_vd_pct.toFixed(2)}}% /
             ${{sm.cumulative_power_vd_pct.toFixed(2)}}%</td>
+          <td class="r">${{sm.downstream_ipf_ka != null
+            ? sm.downstream_ipf_ka.toFixed(2) + ' kA' : '-'}}</td>
         </tr>`).join('');
         document.getElementById('subMainsBox').innerHTML = `<table>
           <thead><tr>
             <th>Sub-Board</th><th>Parent</th><th class="c">Floor</th><th>Upstream Protection</th>
             <th class="c">Sub-Main Cable</th><th class="r">Sub ΔV</th>
-            <th class="r">Cumul. L/P ΔV</th>
+            <th class="r">Cumul. L/P ΔV</th><th class="r">Sub Ipf</th>
           </tr></thead><tbody>${{rows}}</tbody></table>`;
       }} else {{
         document.getElementById('subMainsBox').innerHTML = '';
@@ -687,6 +760,8 @@ def render_etek_workbench_html(base_url: str = "") -> str:
 
       if (boq && boq.items) {{
         const lang = document.getElementById('reportLang').value;
+        const vatPct = Math.round((boq.vat_rate != null ? boq.vat_rate : 0.19) * 100);
+        const blank = Boolean(boq.tender_blank_rates);
         const bRows = boq.items.map(it => {{
           const txt = lang === 'el'
             ? it.description_el
@@ -699,14 +774,17 @@ def render_etek_workbench_html(base_url: str = "") -> str:
             <td>${{escapeHtml(txt)}}</td>
             <td class="c">${{escapeHtml(it.unit)}}</td>
             <td class="r">${{it.quantity.toFixed(2)}}</td>
-            <td class="r">€${{it.unit_rate_eur.toFixed(2)}}</td>
-            <td class="r">€${{it.total_eur.toFixed(2)}}</td>
+            <td class="r">${{blank ? '<em>Tender</em>' : '€' + it.unit_rate_eur.toFixed(2)}}</td>
+            <td class="r">${{blank ? '<em>Formula</em>' : '€' + it.total_eur.toFixed(2)}}</td>
           </tr>`;
         }}).join('');
-        const totals = `
-          <tr><td colspan="6" class="r"><strong>Subtotal (excl. VAT)</strong></td>
+        const totals = blank
+          ? `<tr><td colspan="7" class="r"><strong>Unpriced Tender BOQ Mode:
+              Excel export leaves Column G blank with live =ROUND(F*G,2) &amp;
+              ${{vatPct}}% Cyprus VAT formulas.</strong></td></tr>`
+          : `<tr><td colspan="6" class="r"><strong>Subtotal (excl. VAT)</strong></td>
             <td class="r"><strong>€${{boq.subtotal_eur.toFixed(2)}}</strong></td></tr>
-          <tr><td colspan="6" class="r"><strong>Cyprus VAT (19%)</strong></td>
+          <tr><td colspan="6" class="r"><strong>Cyprus VAT (${{vatPct}}%)</strong></td>
             <td class="r"><strong>€${{boq.vat_eur.toFixed(2)}}</strong></td></tr>
           <tr><td colspan="6" class="r"><strong>GRAND TOTAL (EUR incl. VAT)</strong></td>
             <td class="r"><strong>€${{boq.grand_total_eur.toFixed(2)}}</strong></td></tr>`;
@@ -787,12 +865,33 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       try {{ sessionStorage.setItem('cyelec_api_key', ev.target.value.trim()); }} catch (_) {{}}
     }});
 
-    // DXF Layer Mapping Wizard trigger on file select
+    // Multi-Floor selector + DXF Layer Mapping Wizard trigger on file select
     document.getElementById('dxfFile').addEventListener('change', async (ev) => {{
-      const f = ev.target.files[0];
+      const files = ev.target.files;
+      const mfBox = document.getElementById('multiFloorBox');
+      const mfRows = document.getElementById('multiFloorRows');
       const box = document.getElementById('layerWizard');
       const rows = document.getElementById('layerRows');
       Object.keys(layerRoleChoices).forEach(k => delete layerRoleChoices[k]);
+
+      if (files.length > 1) {{
+        mfRows.innerHTML = Array.from(files).map((fl, i) => {{
+          const defLbl = (i === 0) ? 'GF' : `${{i}}F`;
+          const defLen = (i === 0) ? 8 : (8 + i * 6);
+          return `<div class="layer-row" style="grid-template-columns:1fr 56px 56px;">
+            <span title="${{escapeHtml(fl.name)}}">${{escapeHtml(fl.name)}}</span>
+            <input data-mf-lbl="${{i}}" value="${{defLbl}}" title="Floor Label" />
+            <input data-mf-len="${{i}}" type="number" min="1" value="${{defLen}}"
+              title="Sub-main m" />
+          </div>`;
+        }}).join('');
+        mfBox.style.display = 'block';
+      }} else {{
+        mfBox.style.display = 'none';
+        mfRows.innerHTML = '';
+      }}
+
+      const f = files[0];
       if (!f || !f.name.toLowerCase().endsWith('.dxf')) {{
         box.style.display = 'none';
         return;
@@ -832,6 +931,28 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       }}
     }});
 
+    async function saveFirmDefaults() {{
+      const status = document.getElementById('statusLine');
+      const ov = collectOverrides();
+      const vat = parseFloat(document.getElementById('vatRateSel').value || '0.19');
+      const payload = {{
+        report_language: ov.report_language,
+        branding: ov.branding || null,
+        boq_rate_overrides: {{ vat_rate: vat }}
+      }};
+      try {{
+        const resp = await fetch('/v1/tenants/me', {{
+          method: 'PUT',
+          headers: authHeaders(true),
+          body: JSON.stringify(payload)
+        }});
+        if (!resp.ok) throw new Error(await resp.text());
+        status.textContent = 'Saved tenant firm branding, language & VAT defaults.';
+      }} catch (err) {{
+        status.textContent = `Save defaults failed: ${{err.message}}`;
+      }}
+    }}
+
     async function runSolve() {{
       const status = document.getElementById('statusLine');
       status.textContent = 'Running deterministic BS 7671 / EAC / NetworkX solve...';
@@ -840,7 +961,23 @@ def render_etek_workbench_html(base_url: str = "") -> str:
 
       try {{
         let resp;
-        if (fileInput.files.length > 0) {{
+        if (fileInput.files.length > 1) {{
+          const fd = new FormData();
+          for (const fl of fileInput.files) fd.append('files', fl);
+          const meta = collectMultiFloorMeta(fileInput.files);
+          fd.append('floors_json', JSON.stringify(meta.labels));
+          if (Object.keys(meta.submains).length > 0) {{
+            fd.append('submain_lengths_json', JSON.stringify(meta.submains));
+          }}
+          fd.append('overrides_json', JSON.stringify(overrides));
+          const lm = collectLayerMapping();
+          if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
+          resp = await fetch('/v1/solve/dxf/multifloor', {{
+            method: 'POST',
+            headers: authHeaders(false),
+            body: fd
+          }});
+        }} else if (fileInput.files.length === 1) {{
           const fd = new FormData();
           fd.append('file', fileInput.files[0]);
           fd.append('overrides_json', JSON.stringify(overrides));
@@ -874,7 +1011,23 @@ def render_etek_workbench_html(base_url: str = "") -> str:
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
       let resp;
-      if (fileInput.files.length > 0) {{
+      if (fileInput.files.length > 1) {{
+        const fd = new FormData();
+        for (const fl of fileInput.files) fd.append('files', fl);
+        const meta = collectMultiFloorMeta(fileInput.files);
+        fd.append('floors_json', JSON.stringify(meta.labels));
+        if (Object.keys(meta.submains).length > 0) {{
+          fd.append('submain_lengths_json', JSON.stringify(meta.submains));
+        }}
+        fd.append('overrides_json', JSON.stringify(overrides));
+        const lm = collectLayerMapping();
+        if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
+        resp = await fetch('/v1/solve/dxf/multifloor/bundle', {{
+          method: 'POST',
+          headers: authHeaders(false),
+          body: fd
+        }});
+      }} else if (fileInput.files.length === 1) {{
         const fd = new FormData();
         fd.append('file', fileInput.files[0]);
         fd.append('overrides_json', JSON.stringify(overrides));
@@ -933,22 +1086,69 @@ def render_etek_workbench_html(base_url: str = "") -> str:
         pid = created.project_id;
         document.getElementById('projName').value = '';
       }}
-      const tmpl = document.getElementById('benchmarkSel').value;
-      const resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
-        method: 'POST',
-        headers: authHeaders(true),
-        body: JSON.stringify({{
-          benchmark_template: tmpl,
-          overrides: collectOverrides(),
-          carry_forward_overrides: true
-        }})
-      }});
+      const fileInput = document.getElementById('dxfFile');
+      let resp;
+      if (fileInput.files.length === 1) {{
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('overrides_json', JSON.stringify(collectOverrides()));
+        const lm = collectLayerMapping();
+        if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
+        fd.append('carry_forward', 'true');
+        resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions/dxf`, {{
+          method: 'POST',
+          headers: authHeaders(false),
+          body: fd
+        }});
+      }} else {{
+        const tmpl = document.getElementById('benchmarkSel').value;
+        resp = await fetch(`/v1/projects/${{encodeURIComponent(pid)}}/revisions`, {{
+          method: 'POST',
+          headers: authHeaders(true),
+          body: JSON.stringify({{
+            benchmark_template: tmpl,
+            overrides: collectOverrides(),
+            carry_forward_overrides: true
+          }})
+        }});
+      }}
       if (!resp.ok) {{ st.textContent = 'Save revision failed.'; return; }}
       const rec = await resp.json();
       st.textContent = `Saved Rev ${{rec.summary.revision_number}} cleanly.`;
       await loadProjects();
       sel.value = pid;
       await loadRevisions();
+    }}
+
+    async function exportTenantGdpr() {{
+      const st = document.getElementById('wsStatus');
+      const resp = await fetch('/v1/tenants/me/export', {{ headers: authHeaders(false) }});
+      if (!resp.ok) {{ st.textContent = 'GDPR export failed: ' + await resp.text(); return; }}
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'cyelec_gdpr_export.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      st.textContent = 'Downloaded GDPR Art. 20 portable JSON export.';
+    }}
+
+    async function eraseTenantGdpr() {{
+      const st = document.getElementById('wsStatus');
+      const msg = 'Permanently erase ALL projects, revisions & usage (GDPR Art. 17)?';
+      if (!confirm(msg)) {{
+        return;
+      }}
+      const resp = await fetch('/v1/tenants/me', {{
+        method: 'DELETE',
+        headers: authHeaders(false)
+      }});
+      if (!resp.ok) {{ st.textContent = 'GDPR erasure failed: ' + await resp.text(); return; }}
+      st.textContent = 'Tenant workspace permanently erased (GDPR Art. 17).';
+      document.getElementById('revListBox').innerHTML = '';
+      document.getElementById('revDiffBox').innerHTML = '';
+      await loadProjects();
     }}
 
     async function loadRevisions() {{

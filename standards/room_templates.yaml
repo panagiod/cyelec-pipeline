@@ -41,13 +41,8 @@ rooms:
         "dining",
         "living/dining",
         "liv",
-        "main office",
-        "office",
-        "meeting room",
-        "conference room",
         "study",
         "home office",
-        "server room",
       ]
     aliases_el:
       [
@@ -439,3 +434,237 @@ rooms:
     is_wet_room: false
     is_outdoor: false
     dedicated_appliances: []
+
+  open_office:
+    aliases_en:
+      [
+        "open office",
+        "main office",
+        "office",
+        "office suite",
+        "office floor",
+        "open plan office",
+        "workspace",
+        "workstations",
+        "reception",
+        "reception lobby",
+        "grafeio",
+      ]
+    aliases_el: ["ΓΡΑΦΕΙΟ", "ΑΝΟΙΚΤΟ ΓΡΑΦΕΙΟ", "ΧΩΡΟΣ ΓΡΑΦΕΙΩΝ", "ΥΠΟΔΟΧΗ"]
+    lighting_w_per_m2: 12.0
+    min_lighting_points: 4
+    lighting_zone: "day"
+    socket_count_default: 10
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 2500.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  meeting_room:
+    aliases_en:
+      [
+        "meeting room",
+        "conference room",
+        "boardroom",
+        "board room",
+        "training room",
+        "aithousa synedriaseon",
+      ]
+    aliases_el: ["ΑΙΘΟΥΣΑ ΣΥΝΕΔΡΙΑΣΕΩΝ", "ΣΥΝΕΔΡΙΑΣΕΩΝ", "ΑΙΘΟΥΣΑ ΣΥΣΚΕΨΕΩΝ"]
+    lighting_w_per_m2: 12.0
+    min_lighting_points: 2
+    lighting_zone: "day"
+    socket_count_default: 6
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 2200.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  server_room:
+    aliases_en:
+      [
+        "server room",
+        "it room",
+        "data room",
+        "comms room",
+        "mdf room",
+        "idf room",
+        "network room",
+        "rack room",
+      ]
+    aliases_el: ["ΑΙΘΟΥΣΑ ΔΙΑΚΟΜΙΣΤΩΝ", "ΔΩΜΑΤΙΟ SERVER", "ΜΗΧΑΝΟΓΡΑΦΗΣΗ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 1
+    lighting_zone: "day"
+    socket_count_default: 2
+    socket_group: "none"
+    has_split_ac: true
+    ac_electrical_w: 2800.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "server_ups_clean_power"
+        label: "Server Rack UPS / Clean Power Feeder"
+        category: "ups_server"
+        connected_w: 5500.0
+        diversity: 0.90
+        power_factor: 0.95
+        min_breaker_in_a: 32
+        min_cable_mm2: 6.0
+        curve: "C"
+        is_three_phase: false
+
+  retail_floor:
+    aliases_en:
+      [
+        "retail",
+        "retail floor",
+        "shop",
+        "shop floor",
+        "showroom",
+        "sales floor",
+        "storefront",
+        "katastima",
+      ]
+    aliases_el: ["ΚΑΤΑΣΤΗΜΑ", "ΕΚΘΕΣΙΑΚΟΣ ΧΩΡΟΣ", "ΧΩΡΟΣ ΠΩΛΗΣΕΩΝ"]
+    lighting_w_per_m2: 15.0
+    min_lighting_points: 4
+    lighting_zone: "day"
+    socket_count_default: 8
+    socket_group: "general"
+    has_split_ac: true
+    ac_electrical_w: 3200.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  warehouse:
+    aliases_en:
+      [
+        "warehouse",
+        "depot",
+        "loading bay",
+        "workshop",
+        "factory floor",
+        "industrial hall",
+        "production floor",
+        "ergastirio",
+      ]
+    aliases_el: ["ΑΠΟΘΗΚΗ ΕΜΠΟΡΕΥΜΑΤΩΝ", "ΒΙΟΤΕΧΝΙΚΟΣ ΧΩΡΟΣ", "ΕΡΓΑΣΤΗΡΙΟ"]
+    lighting_w_per_m2: 10.0
+    min_lighting_points: 4
+    lighting_zone: "day"
+    socket_count_default: 4
+    socket_group: "general"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "warehouse_3p_cee_socket"
+        label: "3-Phase 32A CEE Industrial Socket Radial"
+        category: "socket_radial"
+        connected_w: 15000.0
+        diversity: 0.80
+        power_factor: 0.90
+        min_breaker_in_a: 32
+        min_cable_mm2: 6.0
+        curve: "C"
+        is_three_phase: true
+
+  plant_room:
+    aliases_en:
+      [
+        "plant room",
+        "mechanical room",
+        "mech room",
+        "hvac room",
+        "chiller room",
+        "boiler room",
+        "pump room",
+        "switchroom",
+        "switch room",
+        "lv room",
+        "mixanostasio",
+      ]
+    aliases_el: ["ΜΗΧΑΝΟΣΤΑΣΙΟ", "ΛΕΒΗΤΟΣΤΑΣΙΟ", "ΧΩΡΟΣ ΠΙΝΑΚΩΝ"]
+    lighting_w_per_m2: 8.0
+    min_lighting_points: 2
+    lighting_zone: "day"
+    socket_count_default: 2
+    socket_group: "general"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "plant_3p_hvac_chiller"
+        label: "3-Phase Central HVAC / Chiller Plant Feeder"
+        category: "hvac_3p"
+        connected_w: 22000.0
+        diversity: 0.85
+        power_factor: 0.88
+        min_breaker_in_a: 40
+        min_cable_mm2: 10.0
+        curve: "D"
+        is_three_phase: true
+
+  stairwell:
+    aliases_en:
+      [
+        "stairwell",
+        "staircase",
+        "stairs",
+        "stair",
+        "fire escape",
+        "escape stair",
+        "klimakostasio",
+      ]
+    aliases_el: ["ΚΛΙΜΑΚΟΣΤΑΣΙΟ", "ΣΚΑΛΑ", "ΚΛΙΜΑΚΑ"]
+    lighting_w_per_m2: 8.0
+    min_lighting_points: 2
+    lighting_zone: "day"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances: []
+
+  lift_shaft:
+    aliases_en:
+      [
+        "lift",
+        "lift shaft",
+        "elevator",
+        "elevator shaft",
+        "lift lobby",
+        "anelkystiras",
+        "asanser",
+      ]
+    aliases_el: ["ΑΝΕΛΚΥΣΤΗΡΑΣ", "ΦΡΕΑΤΙΟ ΑΝΕΛΚΥΣΤΗΡΑ", "ΑΣΑΝΣΕΡ"]
+    lighting_w_per_m2: 6.0
+    min_lighting_points: 1
+    lighting_zone: "day"
+    socket_count_default: 0
+    socket_group: "none"
+    has_split_ac: false
+    ac_electrical_w: 0.0
+    is_wet_room: false
+    is_outdoor: false
+    dedicated_appliances:
+      - key: "lift_3p_motor_feeder"
+        label: "3-Phase Passenger Lift Motor Feeder (Type D)"
+        category: "lift"
+        connected_w: 15000.0
+        diversity: 1.0
+        power_factor: 0.85
+        min_breaker_in_a: 32
+        min_cable_mm2: 6.0
+        curve: "D"
+        is_three_phase: true

@@ -102,14 +102,20 @@ class _FakeCollectionRef:
 
 class _FakeBatch:
     def __init__(self) -> None:
-        self._ops: list[tuple[_FakeDocRef, dict[str, Any], bool]] = []
+        self._ops: list[tuple[str, _FakeDocRef, dict[str, Any] | None, bool]] = []
 
     def set(self, ref: _FakeDocRef, data: dict[str, Any], *, merge: bool = False) -> None:
-        self._ops.append((ref, data, merge))
+        self._ops.append(("set", ref, data, merge))
+
+    def delete(self, ref: _FakeDocRef) -> None:
+        self._ops.append(("delete", ref, None, False))
 
     def commit(self) -> None:
-        for ref, data, merge in self._ops:
-            ref.set(data, merge=merge)
+        for op, ref, data, merge in self._ops:
+            if op == "delete":
+                ref.delete()
+            elif data is not None:
+                ref.set(data, merge=merge)
         self._ops.clear()
 
 

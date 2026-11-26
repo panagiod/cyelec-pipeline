@@ -55,13 +55,13 @@ jobs:
           docker build -t "${{ steps.target.outputs.image_uri }}" .
           docker push "${{ steps.target.outputs.image_uri }}"
 
-      - name: Prune older Artifact Registry images (keep newest 4 for €0.00/mo free tier)
+      - name: Prune older Artifact Registry images (keep newest 2 for €0.00/mo free tier)
         run: |
           REPO_PATH="${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}"
           OLD_DIGESTS="$(gcloud artifacts docker images list "${REPO_PATH}" \
             --include-tags \
             --sort-by="~UPDATE_TIME" \
-            --format="value(version)" | tail -n +5 || true)"
+            --format="value(version)" | tail -n +3 || true)"
           for digest in ${OLD_DIGESTS}; do
             echo "Pruning old image digest: ${digest}"
             gcloud artifacts docker images delete "${REPO_PATH}@${digest}" \
@@ -103,6 +103,8 @@ jobs:
           hdrs = open(sys.argv[2], encoding="utf-8").read().lower()
           assert data["status"] == "ok", f"Unhealthy: {data}"
           assert data["store_backend"] == "firestore", f"Wrong store backend: {data}"
+          assert data.get("ifc_available") is True, f"IFC BIM not enabled: {data}"
+          assert data.get("pdf_export_available") is True, f"WeasyPrint PDF not enabled: {data}"
           for required in (
               "x-frame-options: deny",
               "x-content-type-options: nosniff",
@@ -111,10 +113,17 @@ jobs:
               "strict-transport-security:",
           ):
               assert required in hdrs, f"Missing security header: {required}"
-          print("VERIFIED: status=ok, store_backend=firestore, OWASP headers present, version=" + data["pipeline_version"])
+          print("VERIFIED: status=ok, store_backend=firestore, ifc=true, pdf=true, OWASP headers present, version=" + data["pipeline_version"])
           ' "${RESP}" "${HDR_FILE}"
           if [ "${ENV_NAME}" = "prod" ]; then
             OPENAPI_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${URL}/openapi.json")"
             test "${OPENAPI_CODE}" = "404" || (echo "Expected prod /openapi.json 404, got ${OPENAPI_CODE}" && exit 1)
-            echo "VERIFIED: prod /openapi.json disabled (HTTP 404)"
+            for page in "/" "/guide"; do
+              PAGE_HTML="$(curl -fsS "${URL}${page}")"
+              if echo "${PAGE_HTML}" | grep -q 'href="/docs"'; then
+                echo "Prod ${page} must not expose broken /docs link!"
+                exit 1
+              fi
+            done
+            echo "VERIFIED: prod /openapi.json disabled (HTTP 404) & /docs hidden on / and /guide"
           fi

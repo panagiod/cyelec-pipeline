@@ -44,9 +44,12 @@ def test_bs7671_cable_constants_and_derating_factors() -> None:
     assert cables.get_ci(0) == pytest.approx(1.0)
     assert cables.get_ci(100) == pytest.approx(0.81)
 
-    # Cable table coverage 1.5 - 35 mm²
+    # Cable table coverage 1.5 - 240 mm² (domestic PVC + commercial XLPE/SWA)
     sizes = [c.size_mm2 for c in cables.sorted_cables()]
-    assert sizes == [1.5, 2.5, 4.0, 6.0, 10.0, 16.0, 25.0, 35.0]
+    assert sizes == [
+        1.5, 2.5, 4.0, 6.0, 10.0, 16.0, 25.0, 35.0,
+        50.0, 70.0, 95.0, 120.0, 150.0, 185.0, 240.0,
+    ]
     c25 = cables.get_cable(2.5)
     assert c25.method_b_1p_a == pytest.approx(24.0)
     assert c25.method_c_1p_a == pytest.approx(27.0)

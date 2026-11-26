@@ -363,17 +363,36 @@ class FirestoreWorkspaceStore:
         items.sort(key=lambda p: p.updated_at, reverse=True)
         return items
 
+    def _usage_summary_ref(self, tenant_id: str) -> Any:
+        return self._tenant_ref(tenant_id).collection("meta").document("usage_summary")
+
+    def _batch_delete_refs(self, refs: list[Any], *, chunk_size: int = 400) -> None:
+        if not refs:
+            return
+        for i in range(0, len(refs), chunk_size):
+            chunk = refs[i : i + chunk_size]
+            batch = self._db.batch()
+            if hasattr(batch, "delete"):
+                for ref in chunk:
+                    batch.delete(ref)
+                batch.commit()
+            else:
+                for ref in chunk:
+                    ref.delete()
+
     def delete_project(self, tenant_id: str, project_id: str) -> bool:
         """Delete a tenant-owned project, all Firestore revision docs, and GCS gzip blobs."""
         proj_ref = self._project_ref(tenant_id, project_id)
         if not proj_ref.get().exists:
             return False
+        rev_refs: list[Any] = []
         for rev_snap in self._revisions_col(tenant_id, project_id).stream():
             rev_data = rev_snap.to_dict() or {}
             blob_path = rev_data.get("result_blob_path")
             if blob_path:
                 self._blobs.delete_blob(str(blob_path))
-            rev_snap.reference.delete()
+            rev_refs.append(rev_snap.reference)
+        self._batch_delete_refs(rev_refs)
         self._blobs.delete_prefix(f"tenants/{tenant_id}/projects/{project_id}/")
         proj_ref.delete()
         return True
@@ -391,55 +410,87 @@ class FirestoreWorkspaceStore:
         notes: str = "",
     ) -> RevisionRecord:
         proj_ref = self._project_ref(tenant_id, project_id)
-        proj_snap = proj_ref.get()
-        if not proj_snap.exists:
-            raise KeyError(f"Project '{project_id}' not found for tenant '{tenant_id}'.")
-
-        proj_data = proj_snap.to_dict() or {}
-        rev_num = int(proj_data.get("revision_count", 0)) + 1
         rev_id = f"rev_{uuid.uuid4().hex[:12]}"
         now = _utc_now()
-
         d = result.design
         boq_total = d.boq.grand_total_eur if d.boq is not None else 0.0
         blob_path = (
             f"tenants/{tenant_id}/projects/{project_id}/"
-            f"revisions/rev_{rev_num:06d}_{rev_id}.json.gz"
+            f"revisions/{rev_id}.json.gz"
         )
-        # Upload gzipped JSON snapshot to GCS first so metadata never points to a missing blob
+
+        # Verify project exists before writing GCS blob
+        proj_snap = proj_ref.get()
+        if not proj_snap.exists:
+            raise KeyError(f"Project '{project_id}' not found for tenant '{tenant_id}'.")
+
+        # Upload immutable rev_id-keyed gzipped snapshot first so metadata never dangles
         self._blobs.put_gzip_json(blob_path, result.model_dump_json())
 
-        rev_doc: dict[str, Any] = {
-            "revision_id": rev_id,
-            "project_id": project_id,
-            "tenant_id": tenant_id,
-            "revision_number": rev_num,
-            "notes": notes,
-            "input_sha256": d.provenance.input_sha256,
-            "overrides_json": overrides.model_dump_json() if overrides is not None else None,
-            "result_blob_path": blob_path,
-            "supply_tier": d.eac_compliance.recommended_supply_tier,
-            "diversified_kva": d.eac_compliance.total_diversified_kva,
-            "boq_grand_total_eur": boq_total,
-            "has_blockers": d.has_blockers,
-            "created_at": now,
-        }
-        rev_ref = self._revisions_col(tenant_id, project_id).document(f"{rev_num:06d}")
+        def _build_rev_doc(rev_num: int) -> dict[str, Any]:
+            return {
+                "revision_id": rev_id,
+                "project_id": project_id,
+                "tenant_id": tenant_id,
+                "revision_number": rev_num,
+                "notes": notes,
+                "input_sha256": d.provenance.input_sha256,
+                "overrides_json": overrides.model_dump_json() if overrides is not None else None,
+                "result_blob_path": blob_path,
+                "supply_tier": d.eac_compliance.recommended_supply_tier,
+                "diversified_kva": d.eac_compliance.total_diversified_kva,
+                "boq_grand_total_eur": boq_total,
+                "has_blockers": d.has_blockers,
+                "created_at": now,
+            }
 
-        # Atomic batch commit updating revision doc + project counters together
-        batch = self._db.batch()
-        batch.set(rev_ref, rev_doc)
-        batch.set(
-            proj_ref,
-            {
-                "revision_count": rev_num,
-                "latest_supply_tier": d.eac_compliance.recommended_supply_tier,
-                "latest_boq_eur": boq_total,
-                "updated_at": now,
-            },
-            merge=True,
-        )
-        batch.commit()
+        # Use a real Firestore transaction when available to prevent concurrent revision races
+        if hasattr(self._db, "transaction"):
+            from google.cloud import firestore
+
+            tx = self._db.transaction()
+
+            def _commit_in_tx(transaction: Any) -> dict[str, Any]:
+                snap = proj_ref.get(transaction=transaction)
+                if not snap.exists:
+                    raise KeyError(f"Project '{project_id}' not found for tenant '{tenant_id}'.")
+                cur_data = snap.to_dict() or {}
+                next_num = int(cur_data.get("revision_count", 0)) + 1
+                doc = _build_rev_doc(next_num)
+                r_ref = self._revisions_col(tenant_id, project_id).document(f"{next_num:06d}")
+                transaction.set(r_ref, doc)
+                transaction.set(
+                    proj_ref,
+                    {
+                        "revision_count": next_num,
+                        "latest_supply_tier": d.eac_compliance.recommended_supply_tier,
+                        "latest_boq_eur": boq_total,
+                        "updated_at": now,
+                    },
+                    merge=True,
+                )
+                return doc
+
+            tx_runner = firestore.transactional(_commit_in_tx)
+            rev_doc: dict[str, Any] = tx_runner(tx)
+        else:
+            proj_data = proj_snap.to_dict() or {}
+            rev_num = int(proj_data.get("revision_count", 0)) + 1
+            rev_doc = _build_rev_doc(rev_num)
+            rev_ref = self._revisions_col(tenant_id, project_id).document(f"{rev_num:06d}")
+            batch = self._db.batch()
+            batch.set(rev_ref, rev_doc)
+            batch.set(
+                proj_ref,
+                {
+                    "revision_count": rev_num,
+                    "latest_supply_tier": d.eac_compliance.recommended_supply_tier,
+                    "latest_boq_eur": boq_total,
+                    "updated_at": now,
+                },
+                merge=True,
+            )
+            batch.commit()
 
         return RevisionRecord(
             summary=self._doc_to_rev_summary(rev_doc),
@@ -487,7 +538,7 @@ class FirestoreWorkspaceStore:
         return self.get_revision(tenant_id, project_id, revs[-1].revision_number)
 
     # ------------------------------------------------------------------
-    # Usage Metering (Strictly Tenant-Scoped)
+    # Usage Metering (Strictly Tenant-Scoped, O(1) Atomic Rollup Counter)
     # ------------------------------------------------------------------
     def record_usage(
         self,
@@ -499,27 +550,83 @@ class FirestoreWorkspaceStore:
         project_id: str | None = None,
     ) -> None:
         evt_id = f"evt_{uuid.uuid4().hex[:12]}"
-        self._usage_col(tenant_id).document(evt_id).set(
-            {
-                "event_id": evt_id,
-                "tenant_id": tenant_id,
-                "project_id": project_id,
-                "event_type": event_type,
-                "duration_ms": round(duration_ms, 2),
-                "payload_bytes": max(0, int(payload_bytes)),
-                "created_at": _utc_now(),
-            }
-        )
+        clean_ms = round(max(0.0, float(duration_ms)), 2)
+        clean_bytes = max(0, int(payload_bytes))
+        now = _utc_now()
+        evt_ref = self._usage_col(tenant_id).document(evt_id)
+        summary_ref = self._usage_summary_ref(tenant_id)
+        safe_et = self._safe_id(event_type, "event_type")
+
+        evt_doc: dict[str, Any] = {
+            "event_id": evt_id,
+            "tenant_id": tenant_id,
+            "project_id": project_id,
+            "event_type": safe_et,
+            "duration_ms": clean_ms,
+            "payload_bytes": clean_bytes,
+            "created_at": now,
+        }
+
+        if hasattr(self._db, "transaction"):
+            from google.cloud import firestore
+
+            batch = self._db.batch()
+            batch.set(evt_ref, evt_doc)
+            batch.set(
+                summary_ref,
+                {
+                    "total_events": firestore.Increment(1),
+                    "total_duration_ms": firestore.Increment(clean_ms),
+                    "total_payload_bytes": firestore.Increment(clean_bytes),
+                    "counts_by_event_type": {safe_et: firestore.Increment(1)},
+                    "updated_at": now,
+                },
+                merge=True,
+            )
+            batch.commit()
+        else:
+            evt_ref.set(evt_doc)
+            cur_snap = summary_ref.get()
+            cur = cur_snap.to_dict() if cur_snap.exists else {}
+            cur_map = dict((cur or {}).get("counts_by_event_type") or {})
+            cur_map[safe_et] = int(cur_map.get(safe_et, 0)) + 1
+            summary_ref.set(
+                {
+                    "total_events": int((cur or {}).get("total_events", 0)) + 1,
+                    "total_duration_ms": round(
+                        float((cur or {}).get("total_duration_ms", 0.0)) + clean_ms, 2
+                    ),
+                    "total_payload_bytes": int((cur or {}).get("total_payload_bytes", 0))
+                    + clean_bytes,
+                    "counts_by_event_type": cur_map,
+                    "updated_at": now,
+                },
+                merge=True,
+            )
 
     def get_usage_summary(self, tenant_id: str) -> UsageSummary:
-        counts: dict[str, int] = {}
+        """O(1) rollup read for usage metering (falls back to stream for legacy tenants)."""
+        summary_snap = self._usage_summary_ref(tenant_id).get()
+        if summary_snap.exists:
+            data = summary_snap.to_dict() or {}
+            raw_counts = data.get("counts_by_event_type") or {}
+            counts = {str(k): int(v) for k, v in raw_counts.items()}
+            return UsageSummary(
+                tenant_id=tenant_id,
+                total_events=int(data.get("total_events", 0)),
+                total_duration_ms=round(float(data.get("total_duration_ms", 0.0)), 2),
+                total_payload_bytes=int(data.get("total_payload_bytes", 0)),
+                counts_by_event_type=counts,
+            )
+
+        counts_legacy: dict[str, int] = {}
         total_events = 0
         total_ms = 0.0
         total_bytes = 0
         for snap in self._usage_col(tenant_id).stream():
             data = snap.to_dict() or {}
             et = str(data.get("event_type", "unknown"))
-            counts[et] = counts.get(et, 0) + 1
+            counts_legacy[et] = counts_legacy.get(et, 0) + 1
             total_events += 1
             total_ms += float(data.get("duration_ms", 0.0))
             total_bytes += int(data.get("payload_bytes", 0))
@@ -528,7 +635,7 @@ class FirestoreWorkspaceStore:
             total_events=total_events,
             total_duration_ms=round(total_ms, 2),
             total_payload_bytes=total_bytes,
-            counts_by_event_type=counts,
+            counts_by_event_type=counts_legacy,
         )
 
     # ------------------------------------------------------------------
@@ -556,7 +663,7 @@ class FirestoreWorkspaceStore:
         )
 
     def delete_tenant_cascade(self, tenant_id: str) -> bool:
-        """GDPR Article 17 right to erasure: delete Firestore docs + GCS blobs for tenant."""
+        """GDPR Article 17 right to erasure: batch-delete Firestore docs + GCS blobs for tenant."""
         t_ref = self._tenant_ref(tenant_id)
         existed = bool(t_ref.get().exists)
 
@@ -566,8 +673,9 @@ class FirestoreWorkspaceStore:
         # Belt-and-suspenders sweep of any remaining GCS blobs under this tenant's prefix
         self._blobs.delete_prefix(f"tenants/{tenant_id}/")
 
-        for evt_snap in self._usage_col(tenant_id).stream():
-            evt_snap.reference.delete()
+        usage_refs = [evt_snap.reference for evt_snap in self._usage_col(tenant_id).stream()]
+        self._batch_delete_refs(usage_refs)
+        self._usage_summary_ref(tenant_id).delete()
 
         if existed:
             t_ref.delete()

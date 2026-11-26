@@ -51,15 +51,20 @@ class CircuitCategory(StrEnum):
     """Functional category of a final circuit."""
 
     LIGHTING = "lighting"
+    EMERGENCY_LIGHTING = "emergency_lighting"
+    FIRE_ALARM = "fire_alarm"
     SOCKET_RING = "socket_ring"
     SOCKET_RADIAL = "socket_radial"
     SPLIT_AC = "split_ac"
+    HVAC_3P = "hvac_3p"
     COOKER = "cooker"
     OVEN = "oven"
     APPLIANCE = "appliance"
     WATER_HEATER = "water_heater"
     EV_CHARGER = "ev_charger"
     PV = "pv"
+    UPS_SERVER = "ups_server"
+    LIFT = "lift"
     OTHER = "other"
 
 
@@ -71,10 +76,13 @@ class CircuitTopology(StrEnum):
 
 
 class BreakerCurve(StrEnum):
-    """BS EN 60898 / 61009 instantaneous tripping characteristic."""
+    """BS EN 60898/61009 (B/C/D), BS EN 60947-2 (MCCB), and BS 88-2 gG HRC fuse characteristics."""
 
     B = "B"
     C = "C"
+    D = "D"
+    MCCB = "MCCB"
+    BS88 = "BS88"
 
 
 class PhaseAssignment(StrEnum):
@@ -255,6 +263,8 @@ class SolvedCircuit(BaseModel):
     adiabatic_i2t_a2s: float
     cpc_min_mm2: float
     cpc_adiabatic_pass: bool
+    live_adiabatic_pass: bool = True
+    recommended_containment: str = "20mm PVC"
     overall_pass: bool
     upsize_reasons: list[str] = Field(default_factory=list)
     flags: list[ReviewFlag] = Field(default_factory=list)
@@ -299,6 +309,7 @@ class SolvedSubMain(BaseModel):
     zs_ohm: float
     zs_max_ohm: float
     earth_fault_pass: bool
+    downstream_ipf_ka: float | None = None
     overall_pass: bool
     flags: list[ReviewFlag] = Field(default_factory=list)
 

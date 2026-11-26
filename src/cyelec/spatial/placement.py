@@ -9,9 +9,17 @@ from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from cyelec.models.building import BuildingModel, DoorOpening, Point2D, Room, WindowOpening
+from cyelec.models.building import (
+    BuildingModel,
+    DoorOpening,
+    Point2D,
+    Room,
+    RoomType,
+    WindowOpening,
+)
 from cyelec.models.electrical import ReviewFlag, ReviewSeverity
 from cyelec.models.spatial import DeviceType, PlacedDevice, RoomWetZones
+from cyelec.solver.grouper import is_commercial_building
 from cyelec.spatial.wet_zones import classify_point_wet_zone
 from cyelec.standards_loader import StandardsBundle
 
@@ -392,8 +400,18 @@ def place_electrical_devices(
                 )
             )
 
-        # 5. Dedicated Appliance Outlets (Cooker, Oven, Dishwasher, Washer, Solar Water Heater)
-        room_apps = [a for a in rt.dedicated_appliances if a.key not in emitted_appliance_keys]
+        # 5. Dedicated Appliance Outlets (Cooker, Oven, Dishwasher, Washer, Solar WH, Plant/UPS)
+        is_comm = is_commercial_building(building)
+        room_apps = [
+            a
+            for a in rt.dedicated_appliances
+            if a.key not in emitted_appliance_keys
+            and not (
+                is_comm
+                and room.normalized_type == RoomType.KITCHEN
+                and a.category.value in ("cooker", "oven")
+            )
+        ]
         if room_apps:
             app_pts = _place_points_along_candidates(
                 valid_walls, len(room_apps), min_spacing_mm=450.0
