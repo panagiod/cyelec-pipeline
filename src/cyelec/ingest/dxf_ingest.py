@@ -335,29 +335,45 @@ def _find_containing_room(
     return best_rid if best_dist <= max_fallback_dist_mm else None
 
 
-def _extract_wall_cavities(lines: list[LineString]) -> list[Polygon]:
-    """Morphological wall-cavity extractor for real double-line AutoCAD architectural walls."""
+def _extract_wall_cavities(
+    lines: list[LineString],
+    *,
+    buffer_mm: float = 140.0,
+    subtract_thin_mm: float = 0.0,
+) -> list[Polygon]:
+    """Morphological wall-cavity extractor for double-line walls and doorless partition gaps."""
     if not lines:
         return []
-    wall_band = unary_union(lines).buffer(140.0, join_style="mitre")
-    geoms = (
-        list(wall_band.geoms)
-        if hasattr(wall_band, "geoms")
-        else [wall_band]
+    merged_lines = unary_union(lines)
+    wall_band = merged_lines.buffer(buffer_mm, join_style="mitre")
+    wall_thin = (
+        merged_lines.buffer(subtract_thin_mm, join_style="mitre")
+        if subtract_thin_mm > 0.0
+        else None
     )
+    geoms = list(wall_band.geoms) if hasattr(wall_band, "geoms") else [wall_band]
     cavities: list[Polygon] = []
     for geom in geoms:
         if not isinstance(geom, Polygon):
             continue
         for interior in geom.interiors:
             hole = Polygon(interior)
-            expanded = hole.buffer(120.0, join_style="mitre").simplify(25.0, preserve_topology=True)
-            if (
-                isinstance(expanded, Polygon)
-                and expanded.is_valid
-                and 1.2e6 <= expanded.area <= 5e8
-            ):
-                cavities.append(expanded)
+            expanded = hole.buffer(max(10.0, buffer_mm - 20.0), join_style="mitre")
+            if wall_thin is not None:
+                expanded = expanded.difference(wall_thin)
+                if hasattr(expanded, "geoms"):
+                    poly_parts = [g for g in expanded.geoms if isinstance(g, Polygon)]
+                    if not poly_parts:
+                        continue
+                    expanded = max(poly_parts, key=lambda g: g.area)
+            if isinstance(expanded, Polygon) and expanded.is_valid:
+                simplified = expanded.simplify(25.0, preserve_topology=True)
+                if (
+                    isinstance(simplified, Polygon)
+                    and simplified.is_valid
+                    and 1.2e6 <= simplified.area <= 5e8
+                ):
+                    cavities.append(simplified)
     return cavities
 
 
@@ -366,6 +382,8 @@ def _polygonize_rooms_from_walls(
     door_arcs: list[tuple[Point2D, float, float, float]],
     window_lines: list[tuple[Point2D, Point2D]],
     door_leaves: list[tuple[Point2D, Point2D]] | None = None,
+    *,
+    flags: list[ReviewFlag] | None = None,
 ) -> list[Polygon]:
     """Derive closed room polygons from wall + doorway + window segments when A-ROOM is absent."""
     lines: list[LineString] = []
@@ -398,9 +416,34 @@ def _polygonize_rooms_from_walls(
         p for p in polygonize(noded) if isinstance(p, Polygon) and 1_200_000.0 <= p.area <= 5e8
     ]
     if len(raw_polys) < 2:
-        cavities = _extract_wall_cavities(lines)
+        cavities = _extract_wall_cavities(lines, buffer_mm=140.0)
         if len(cavities) > len(raw_polys):
             raw_polys = cavities
+
+    # Morphological doorway-gap closing (<= 960 mm door openings) when drawing has no door
+    # geometry OR walls severely under-segmented due to open/unbridged interior doorways.
+    has_doors = bool(door_arcs or door_leaves)
+    if (not has_doors) or (len(raw_polys) <= 3 and len(wall_lines) >= 20):
+        bridged = _extract_wall_cavities(lines, buffer_mm=480.0, subtract_thin_mm=80.0)
+        raw_area = sum(p.area for p in raw_polys)
+        bridged_area = sum(p.area for p in bridged)
+        if len(bridged) > len(raw_polys) and (
+            raw_area <= 0.0 or bridged_area >= 0.70 * raw_area
+        ):
+            raw_polys = bridged
+            if flags is not None:
+                flags.append(
+                    ReviewFlag(
+                        code="DOORWAY_GAPS_MORPHOLOGICALLY_BRIDGED",
+                        severity=ReviewSeverity.INFO,
+                        category="geometry",
+                        message=(
+                            f"Bridged open/doorless partition gaps (<= 960 mm) morphologically "
+                            f"to separate {len(bridged)} enclosed room polygon(s). "
+                            "Verify room boundaries."
+                        ),
+                    )
+                )
 
     if not raw_polys:
         return []
@@ -677,7 +720,7 @@ def ingest_dxf(
     # Wall-to-room polygonization fallback OR hybrid merge for partial A-ROOM drawings
     if not room_raw_polys and wall_lines:
         room_raw_polys = _polygonize_rooms_from_walls(
-            wall_lines, door_arcs, window_lines, door_leaves=door_leaves
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
         )
         if room_raw_polys:
             flags.append(
@@ -695,7 +738,7 @@ def ingest_dxf(
     elif room_raw_polys and wall_lines:
         # Hybrid merge: recover enclosed rooms that lack explicit A-ROOM polylines
         wall_derived = _polygonize_rooms_from_walls(
-            wall_lines, door_arcs, window_lines, door_leaves=door_leaves
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
         )
         added_hybrid = 0
         for cand in wall_derived:

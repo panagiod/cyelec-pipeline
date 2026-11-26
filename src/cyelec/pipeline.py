@@ -38,7 +38,7 @@ from cyelec.solver.balancer import balance_three_phase_loads
 from cyelec.solver.boq import generate_boq
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
-from cyelec.solver.grouper import generate_circuits
+from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circuits
 from cyelec.solver.submain import finalize_submain_cumulative_vd, solve_submain
 from cyelec.spatial.placement import place_electrical_devices
 from cyelec.spatial.router import route_circuits
@@ -400,14 +400,26 @@ def run_phase2_pipeline(
     placed_devices, placement_flags = place_electrical_devices(building, wet_zones, standards)
     spatial_flags.extend(placement_flags)
 
-    # 4. Generate circuit list once and route every circuit on NetworkX conduit graph
+    # 4. Generate circuit list, route on NetworkX conduit graph, and auto-split over-long loops
     specs = generate_circuits(building, standards, overrides=overrides)
     bound_devices, routed_circuits, routing_flags = route_circuits(
         building, specs, placed_devices
     )
-    spatial_flags.extend(routing_flags)
-
     routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
+
+    for _ in range(2):
+        specs, split_flags, did_split = split_oversized_routed_circuits(
+            building, specs, routed_lengths_m, standards, overrides=overrides
+        )
+        if not did_split:
+            break
+        spatial_flags.extend(split_flags)
+        bound_devices, routed_circuits, routing_flags = route_circuits(
+            building, specs, placed_devices
+        )
+        routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
+
+    spatial_flags.extend(routing_flags)
 
     # 5. Feed true NetworkX routed lengths and precomputed specs into Phase 1 solvers
     design = run_phase1_pipeline(

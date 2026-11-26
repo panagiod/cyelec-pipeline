@@ -291,3 +291,51 @@ def test_layer0_wall_fallback(tmp_path: Path) -> None:
     assert model.rooms[0].normalized_type == RoomType.LIVING_ROOM
     assert 23.0 <= model.total_floor_area_m2 <= 25.0
 
+
+def test_doorless_partition_gaps_morphologically_bridged(tmp_path: Path) -> None:
+    """Doorless interior partition walls with 900 mm doorway gaps must separate distinct rooms."""
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 4
+    msp = doc.modelspace()
+
+    # 8000 x 4000 mm shell split at x=4000 with a 900 mm doorless gap (y=1550..2450)
+    for a, b in [
+        ((0, 0), (8000, 0)),
+        ((8000, 0), (8000, 4000)),
+        ((8000, 4000), (0, 4000)),
+        ((0, 4000), (0, 0)),
+        ((4000, 0), (4000, 1550)),
+        ((4000, 2450), (4000, 4000)),
+    ]:
+        msp.add_line(a, b, dxfattribs={"layer": "A-WALL"})
+    msp.add_text("BEDROOM 1", dxfattribs={"layer": "A-TEXT", "insert": (2000, 2000)})
+    msp.add_text("BEDROOM 2", dxfattribs={"layer": "A-TEXT", "insert": (6000, 2000)})
+
+    dxf_path = tmp_path / "doorless_two_beds.dxf"
+    doc.saveas(dxf_path)
+
+    model, flags = ingest_dxf(dxf_path, building_type=BuildingType.APARTMENT_2BED)
+    assert "DOORWAY_GAPS_MORPHOLOGICALLY_BRIDGED" in {f.code for f in flags}
+    assert len(model.rooms) == 2
+    assert {r.normalized_type for r in model.rooms} == {
+        RoomType.MASTER_BEDROOM,
+        RoomType.BEDROOM,
+    }
+
+
+def test_overlong_circuits_auto_split_for_practicability() -> None:
+    """Phase 2 pipeline must auto-split rings >120 m and lighting >95 m to preserve sizing."""
+    from cyelec.models.electrical import CircuitCategory
+
+    building = generate_benchmark_dxf(BenchmarkTemplate.APARTMENT_3BED)
+    p2 = run_phase2_pipeline(building)
+    flag_codes = {f.code for f in p2.design.review_flags}
+    assert "CIRCUIT_AUTO_SPLIT_FOR_PRACTICABILITY" in flag_codes
+
+    for circ in p2.design.circuits:
+        if circ.spec.category == CircuitCategory.LIGHTING:
+            assert circ.cable_mm2 <= 2.5
+        if circ.spec.category == CircuitCategory.SOCKET_RING:
+            assert circ.spec.length_m <= 120.0
+
+

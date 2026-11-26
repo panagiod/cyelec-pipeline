@@ -12,6 +12,8 @@ from cyelec.models.electrical import (
     CircuitSpec,
     CircuitTopology,
     DesignOverrides,
+    ReviewFlag,
+    ReviewSeverity,
 )
 from cyelec.standards_loader import StandardsBundle
 
@@ -557,3 +559,161 @@ def generate_circuits(
             feeder_idx += 1
 
     return circuits
+
+
+def _spatial_halves(rooms: list[Room]) -> tuple[list[Room], list[Room]]:
+    """Split rooms into two spatially compact halves along their dominant centroid axis."""
+    xs = [r.centroid_mm().x_mm for r in rooms]
+    ys = [r.centroid_mm().y_mm for r in rooms]
+    use_x = (max(xs) - min(xs)) >= (max(ys) - min(ys))
+    ordered = sorted(
+        rooms,
+        key=lambda r: (
+            (r.centroid_mm().x_mm, r.centroid_mm().y_mm)
+            if use_x
+            else (r.centroid_mm().y_mm, r.centroid_mm().x_mm)
+        ),
+    )
+    mid = max(1, len(ordered) // 2)
+    return ordered[:mid], ordered[mid:]
+
+
+def split_oversized_routed_circuits(
+    building: BuildingModel,
+    specs: list[CircuitSpec],
+    routed_lengths_m: dict[str, float],
+    standards: StandardsBundle,
+    *,
+    overrides: DesignOverrides | None = None,
+    max_lighting_length_m: float = 95.0,
+    max_ring_length_m: float = 120.0,
+) -> tuple[list[CircuitSpec], list[ReviewFlag], bool]:
+    """Auto-split over-long multi-room lighting (>95 m) and ring (>120 m) circuits after routing.
+
+    Keeps 6 A lighting circuits on installable 1.5 mm² terminals (avoiding 4.0 mm² ceiling-rose
+    clashes) and keeps 32 A socket rings within the practical BS 7671 Appendix 15 length guideline
+    while conserving total diversified kVA across split rings.
+    """
+    rooms_by_id = {r.id: r for r in building.rooms}
+    boards_by_id = {sb.board_id: sb.location_mm for sb in building.sub_boards}
+    default_db = building.db_anchor.location_mm
+    tmpl_std = standards.room_templates
+    defaults = tmpl_std.circuit_defaults
+    u0 = standards.eac_rules.system_nominal.u0_v
+    protected_ids = set(overrides.circuit_overrides.keys()) if overrides is not None else set()
+
+    new_specs: list[CircuitSpec] = []
+    flags: list[ReviewFlag] = []
+    did_split = False
+
+    for spec in specs:
+        actual_len = routed_lengths_m.get(spec.circuit_id, spec.length_m)
+        spec_rooms = [rooms_by_id[rid] for rid in spec.room_ids if rid in rooms_by_id]
+        db_pt = boards_by_id.get(spec.board_id, default_db)
+
+        should_split_light = (
+            spec.category == CircuitCategory.LIGHTING
+            and len(spec_rooms) >= 2
+            and actual_len > max_lighting_length_m
+            and spec.circuit_id not in protected_ids
+        )
+        should_split_ring = (
+            spec.category == CircuitCategory.SOCKET_RING
+            and len(spec_rooms) >= 2
+            and actual_len > max_ring_length_m
+            and spec.circuit_id not in protected_ids
+        )
+
+        if not (should_split_light or should_split_ring):
+            new_specs.append(spec)
+            continue
+
+        did_split = True
+        left_rooms, right_rooms = _spatial_halves(spec_rooms)
+        base_desc = spec.description.split(" (Split")[0]
+
+        for part_idx, part_rooms in enumerate((left_rooms, right_rooms), start=1):
+            if should_split_light:
+                conn_w = max(
+                    100.0,
+                    round(
+                        sum(
+                            max(
+                                r.area_m2 * tmpl_std.rooms[r.normalized_type].lighting_w_per_m2,
+                                tmpl_std.rooms[r.normalized_type].min_lighting_points * 40.0,
+                            )
+                            for r in part_rooms
+                        ),
+                        1,
+                    ),
+                )
+                div_w = round(conn_w * spec.diversity_factor, 1)
+                ib = round(div_w / (u0 * spec.power_factor), 2)
+                est_len = _estimate_radial_length_m(
+                    db_pt, part_rooms, defaults.vertical_drop_allowance_m
+                )
+            else:
+                # Conserve building diversified demand across split rings (floor 2300 W/ring)
+                share = len(part_rooms) / max(1, len(spec_rooms))
+                conn_w = max(2300.0, round(spec.connected_load_w * share, 1))
+                div_w = round(conn_w * spec.diversity_factor, 1)
+                ib = round(div_w / (u0 * spec.power_factor), 2)
+                est_len = _estimate_ring_length_m(
+                    db_pt, part_rooms, defaults.vertical_drop_allowance_m
+                )
+
+            new_specs.append(
+                spec.model_copy(
+                    update={
+                        "description": f"{base_desc} (Split {part_idx})",
+                        "room_ids": [r.id for r in part_rooms],
+                        "connected_load_w": conn_w,
+                        "diversified_load_w": div_w,
+                        "design_current_ib_a": ib,
+                        "length_m": est_len,
+                        "ambient_temp_c": _resolve_ambient_c(part_rooms, standards, overrides),
+                    }
+                )
+            )
+
+        limit_m = max_lighting_length_m if should_split_light else max_ring_length_m
+        flags.append(
+            ReviewFlag(
+                code="CIRCUIT_AUTO_SPLIT_FOR_PRACTICABILITY",
+                severity=ReviewSeverity.INFO,
+                category="bs7671",
+                regulation_ref="BS 7671 Reg 314.1 & Appendix 15",
+                message=(
+                    f"Auto-split oversized {spec.category.value} circuit '{spec.description}' "
+                    f"(routed {actual_len:.1f} m > {limit_m:.0f} m practical limit) into 2 "
+                    "spatially compact circuits to preserve standard terminal/conductor sizing."
+                ),
+            )
+        )
+
+    if not did_split:
+        return specs, [], False
+
+    # Deterministically renumber C1..CN unless user supplied circuit overrides
+    if not protected_ids:
+        renumbered = [
+            s.model_copy(update={"circuit_id": f"C{idx}"})
+            for idx, s in enumerate(new_specs, start=1)
+        ]
+        return renumbered, flags, True
+
+    used_ids: set[str] = set()
+    next_num = len(new_specs) + 1
+    out: list[CircuitSpec] = []
+    for s in new_specs:
+        if s.circuit_id not in used_ids:
+            used_ids.add(s.circuit_id)
+            out.append(s)
+        else:
+            while f"C{next_num}" in used_ids or f"C{next_num}" in protected_ids:
+                next_num += 1
+            cid = f"C{next_num}"
+            used_ids.add(cid)
+            out.append(s.model_copy(update={"circuit_id": cid}))
+    return out, flags, True
+
