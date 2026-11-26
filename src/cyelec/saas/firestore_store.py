@@ -147,14 +147,28 @@ class FirestoreWorkspaceStore:
     # ------------------------------------------------------------------
     # Internal Document Reference Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_id(value: str, label: str) -> str:
+        clean = value.strip()
+        if (
+            not clean
+            or len(clean) > 128
+            or "/" in clean
+            or "\\" in clean
+            or ".." in clean
+            or "\x00" in clean
+        ):
+            raise ValueError(f"Invalid {label}: {value!r}")
+        return clean
+
     def _tenant_ref(self, tenant_id: str) -> Any:
-        return self._db.collection("tenants").document(tenant_id)
+        return self._db.collection("tenants").document(self._safe_id(tenant_id, "tenant_id"))
 
     def _projects_col(self, tenant_id: str) -> Any:
         return self._tenant_ref(tenant_id).collection("projects")
 
     def _project_ref(self, tenant_id: str, project_id: str) -> Any:
-        return self._projects_col(tenant_id).document(project_id)
+        return self._projects_col(tenant_id).document(self._safe_id(project_id, "project_id"))
 
     def _revisions_col(self, tenant_id: str, project_id: str) -> Any:
         return self._project_ref(tenant_id, project_id).collection("revisions")

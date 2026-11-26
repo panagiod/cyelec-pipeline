@@ -31,7 +31,7 @@ jobs:
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Resolve target environment
         id: target
@@ -42,7 +42,7 @@ jobs:
           echo "image_uri=${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud via Keyless OIDC (WIF)
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOYER_SA }}
@@ -50,32 +50,12 @@ jobs:
       - name: Configure Docker for EU Artifact Registry
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Enforce Artifact Registry cleanup policy & Pub/Sub gate prerequisites
+      - name: Enforce Artifact Registry retention policy (€0.00/mo free-tier cap)
         run: |
-          for ROLE in roles/artifactregistry.repoAdmin roles/pubsub.admin roles/serviceusage.serviceUsageAdmin; do
-            gcloud projects add-iam-policy-binding "${{ vars.GCP_PROJECT_ID }}" \
-              --member="serviceAccount:${{ vars.GCP_DEPLOYER_SA }}" \
-              --role="${ROLE}" \
-              --quiet >/dev/null
-          done
-          for attempt in 1 2 3 4; do
-            if gcloud services enable pubsub.googleapis.com \
-              --project="${{ vars.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
-              break
-            fi
-            echo "Waiting for Service Usage IAM propagation (attempt ${attempt}/4)..."
-            sleep 10
-          done
-          for attempt in 1 2 3 4; do
-            if gcloud artifacts repositories set-cleanup-policies "${AR_REPO}" \
-              --project="${{ vars.GCP_PROJECT_ID }}" \
-              --location="${GCP_REGION}" \
-              --policy=deploy/gcp/ar_cleanup_policy.json; then
-              break
-            fi
-            echo "Waiting for IAM propagation (attempt ${attempt}/4)..."
-            sleep 10
-          done
+          gcloud artifacts repositories set-cleanup-policies "${AR_REPO}" \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --location="${GCP_REGION}" \
+            --policy=deploy/gcp/ar_cleanup_policy.json
 
       - name: Build and push immutable SHA-pinned container image
         run: |
@@ -83,7 +63,7 @@ jobs:
           docker push "${{ steps.target.outputs.image_uri }}"
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "1.9.8"
           terraform_wrapper: false
@@ -103,16 +83,32 @@ jobs:
           echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
         id: tf
 
-      - name: Live Post-Deploy Health & Backend Verification
+      - name: Live Post-Deploy Health, Security Headers & Backend Verification
         run: |
           URL="${{ steps.tf.outputs.service_url }}"
+          ENV_NAME="${{ steps.target.outputs.env }}"
           echo "Verifying live Cloud Run endpoint: ${URL}/health"
-          RESP="$(curl -fsS --retry 5 --retry-delay 3 "${URL}/health")"
+          HDR_FILE="$(mktemp)"
+          RESP="$(curl -fsS --retry 5 --retry-delay 3 -D "${HDR_FILE}" "${URL}/health")"
           echo "${RESP}"
           python3 -c '
           import json, sys
           data = json.loads(sys.argv[1])
+          hdrs = open(sys.argv[2], encoding="utf-8").read().lower()
           assert data["status"] == "ok", f"Unhealthy: {data}"
           assert data["store_backend"] == "firestore", f"Wrong store backend: {data}"
-          print("VERIFIED: status=ok, store_backend=firestore, version=" + data["pipeline_version"])
-          ' "${RESP}"
+          for required in (
+              "x-frame-options: deny",
+              "x-content-type-options: nosniff",
+              "referrer-policy: no-referrer",
+              "content-security-policy:",
+              "strict-transport-security:",
+          ):
+              assert required in hdrs, f"Missing security header: {required}"
+          print("VERIFIED: status=ok, store_backend=firestore, OWASP headers present, version=" + data["pipeline_version"])
+          ' "${RESP}" "${HDR_FILE}"
+          if [ "${ENV_NAME}" = "prod" ]; then
+            OPENAPI_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${URL}/openapi.json")"
+            test "${OPENAPI_CODE}" = "404" || (echo "Expected prod /openapi.json 404, got ${OPENAPI_CODE}" && exit 1)
+            echo "VERIFIED: prod /openapi.json disabled (HTTP 404)"
+          fi

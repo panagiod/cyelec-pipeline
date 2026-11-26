@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from cyelec import __version__
 from cyelec.api.docs_ui import render_workbench_guide_tab_html
 
@@ -9,8 +11,8 @@ from cyelec.api.docs_ui import render_workbench_guide_tab_html
 def render_etek_workbench_html(base_url: str = "") -> str:
     """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard served at GET /."""
     prefix = base_url.rstrip("/")
-    og_img = f"{prefix}/og-thumbnail.jpg"
-    logo_url = f"{prefix}/logo.png"
+    og_img = html.escape(f"{prefix}/og-thumbnail.jpg", quote=True)
+    logo_url = html.escape(f"{prefix}/logo.png", quote=True)
     guide_tab_html = render_workbench_guide_tab_html()
     return f"""<!DOCTYPE html>
 <html lang="en">

@@ -707,7 +707,7 @@ def serve(
 
 @app.command("budget-gate")
 def budget_gate(
-    host: Annotated[str, typer.Option("--host", help="Bind host address.")] = "0.0.0.0",
+    host: Annotated[str, typer.Option("--host", help="Bind host address.")] = "127.0.0.1",
     port: Annotated[
         int | None,
         typer.Option("--port", help="Bind port (defaults to $PORT env var or 8080)."),

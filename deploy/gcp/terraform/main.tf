@@ -57,11 +57,18 @@ resource "google_service_account" "runtime" {
   display_name = "cyelec-pipeline ${var.environment} Cloud Run runtime SA"
 }
 
-# Firestore access
+# Firestore access strictly scoped to THIS environment's named database
+# (staging public demo SA cannot read or write the cyelec-prod database)
 resource "google_project_iam_member" "firestore_user" {
   project = var.project_id
   role    = "roles/datastore.user"
   member  = "serviceAccount:${google_service_account.runtime.email}"
+
+  condition {
+    title       = "firestore_db_${var.environment}_only"
+    description = "Restrict Firestore access exclusively to ${google_firestore_database.workspace.name}"
+    expression  = "resource.name == \"projects/${var.project_id}/databases/${google_firestore_database.workspace.name}\" || resource.name.startsWith(\"projects/${var.project_id}/databases/${google_firestore_database.workspace.name}/\")"
+  }
 }
 
 # Scoped strictly to THIS environment's GCS bucket (staging SA cannot touch prod bucket)
@@ -142,6 +149,14 @@ resource "google_cloud_run_v2_service" "api" {
         value = local.is_prod ? "1" : "0"
       }
       env {
+        name  = "CYELEC_DISABLE_OPENAPI"
+        value = local.is_prod ? "1" : "0"
+      }
+      env {
+        name  = "CYELEC_DEMO_LOCK_TENANT_MUTATIONS"
+        value = local.is_prod ? "0" : "1"
+      }
+      env {
         name  = "CYELEC_RATE_LIMIT_RPM"
         value = tostring(local.effective_rate_limit)
       }
@@ -199,7 +214,7 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
 }
 
 # ----------------------------------------------------------------------
-# 5. Layer-2 Automated €10/mo Budget Hard Gate (prod-managed, project-wide)
+# 5. Layer-2 Automated €10/mo Budget Hard Gate (prod-managed, least-privilege)
 #    Billing Budget -> Pub/Sub -> cyelec-budget-gate Cloud Run (OIDC auth)
 #    Pauses cyelec-staging & cyelec-prod ingress at 90% (€9) safely!
 # ----------------------------------------------------------------------
@@ -216,18 +231,28 @@ resource "google_service_account" "budget_gate" {
   display_name = "cyelec-pipeline €10 Budget Hard-Gate SA"
 }
 
-resource "google_project_iam_member" "budget_gate_run_admin" {
-  count   = local.is_prod ? 1 : 0
-  project = var.project_id
-  role    = "roles/run.admin"
-  member  = "serviceAccount:${google_service_account.budget_gate[0].email}"
+# Least-privilege: grant roles/run.developer strictly on cyelec-staging & cyelec-prod
+# (eliminates project-wide roles/run.admin & deployer SA privilege escalation)
+resource "google_cloud_run_v2_service_iam_member" "budget_gate_run_dev" {
+  for_each = local.is_prod ? toset(["cyelec-staging", "cyelec-prod"]) : toset([])
+  project  = var.project_id
+  location = var.region
+  name     = each.key
+  role     = "roles/run.developer"
+  member   = "serviceAccount:${google_service_account.budget_gate[0].email}"
+
+  depends_on = [google_cloud_run_v2_service.api]
 }
 
-resource "google_project_iam_member" "budget_gate_sa_user" {
-  count   = local.is_prod ? 1 : 0
-  project = var.project_id
-  role    = "roles/iam.serviceAccountUser"
-  member  = "serviceAccount:${google_service_account.budget_gate[0].email}"
+# Least-privilege: allow actAs ONLY on the staging & prod Cloud Run runtime SAs
+# (cannot actAs cyelec-gh-deployer or any other project service account)
+resource "google_service_account_iam_member" "budget_gate_sa_user" {
+  for_each           = local.is_prod ? toset(["cyelec-staging-sa", "cyelec-prod-sa"]) : toset([])
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${each.key}@${var.project_id}.iam.gserviceaccount.com"
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.budget_gate[0].email}"
+
+  depends_on = [google_service_account.runtime]
 }
 
 resource "google_service_account" "pubsub_invoker" {
@@ -293,6 +318,10 @@ resource "google_cloud_run_v2_service" "budget_gate" {
         name  = "CYELEC_BUDGET_GATE_RATIO"
         value = var.budget_gate_ratio
       }
+      env {
+        name  = "CYELEC_EXPECTED_SUBSCRIPTION"
+        value = "projects/${var.project_id}/subscriptions/cyelec-budget-gate-push"
+      }
 
       startup_probe {
         http_get {
@@ -308,8 +337,8 @@ resource "google_cloud_run_v2_service" "budget_gate" {
   }
 
   depends_on = [
-    google_project_iam_member.budget_gate_run_admin,
-    google_project_iam_member.budget_gate_sa_user,
+    google_cloud_run_v2_service_iam_member.budget_gate_run_dev,
+    google_service_account_iam_member.budget_gate_sa_user,
   ]
 }
 

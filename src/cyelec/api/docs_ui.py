@@ -104,9 +104,11 @@ def render_workbench_guide_tab_html() -> str:
 
 def render_user_guide_html(base_url: str = "") -> str:
     """Return full standalone searchable User Documentation & Engineering Know-How page."""
+    import html
+
     prefix = base_url.rstrip("/")
-    og_img = f"{prefix}/og-thumbnail.jpg"
-    logo_url = f"{prefix}/logo.png"
+    og_img = html.escape(f"{prefix}/og-thumbnail.jpg", quote=True)
+    logo_url = html.escape(f"{prefix}/logo.png", quote=True)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -792,4 +794,4 @@ curl -sS -X PUT https://&lt;your-cyelec-host&gt;/v1/tenants/me \\
   </script>
 </body>
 </html>
-"""
+"""  # nosec B608

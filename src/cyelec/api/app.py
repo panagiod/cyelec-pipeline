@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -54,7 +55,30 @@ from cyelec.standards_loader import load_standards
 from cyelec.synth.benchmarks import BenchmarkTemplate, generate_benchmark_dxf
 
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB hard cap per DXF/IFC upload
+_MAX_MULTIFLOOR_FILES = 12
+_MAX_MULTIFLOOR_TOTAL_BYTES = 50 * 1024 * 1024  # 50 MB aggregate cap across floor uploads
+_MAX_RATE_BUCKETS = 4096
 _CHUNK_BYTES = 256 * 1024
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-:]{1,253}$")
+_SAFE_FLOOR_RE = re.compile(r"[^A-Z0-9_-]")
+_TMP_PATH_RE = re.compile(r"(?:/tmp/|/var/folders/|C:\\\\?Users\\\\?)[^\s'\"]+")
+
+_HTML_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+_API_CSP = "default-src 'none'; frame-ancestors 'none'"
+_PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), payment=()"
 
 
 class HealthResponse(BaseModel):
@@ -257,6 +281,66 @@ def _solve_dxf_bundle_sync(
         return p2, zip_path.read_bytes()
 
 
+def _validate_safe_id(value: str, field_name: str) -> str:
+    """Strictly validate tenant/project identifiers to prevent path or document traversal."""
+    clean = value.strip()
+    if not clean or ".." in clean or not _SAFE_ID_RE.match(clean):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid {field_name}: must be 1-64 characters of "
+                "[A-Za-z0-9._-] without '..'."
+            ),
+        )
+    return clean
+
+
+def _safe_base_url(request: Request) -> str:
+    """Build a strictly validated origin URL for OG metadata without host-header injection."""
+    raw_proto = (
+        request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip().lower()
+    )
+    proto = raw_proto if raw_proto in ("http", "https") else "https"
+    raw_host = (
+        request.headers.get("x-forwarded-host", request.headers.get("host", ""))
+        .split(",")[0]
+        .strip()
+    )
+    if not raw_host or not _SAFE_HOST_RE.match(raw_host):
+        return ""
+    return f"{proto}://{raw_host}"
+
+
+def _sanitize_client_error(exc: Exception) -> str:
+    """Strip temporary filesystem paths before returning validation errors to HTTP callers."""
+    if isinstance(exc, OSError):
+        return "Failed to read or parse uploaded CAD file."
+    msg = _TMP_PATH_RE.sub("<uploaded_file>", str(exc))
+    return msg[:500]
+
+
+def _security_headers(
+    req_id: str,
+    *,
+    is_html: bool = False,
+    is_https: bool = False,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    headers: dict[str, str] = {
+        "X-Request-ID": req_id,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": _PERMISSIONS_POLICY,
+        "Content-Security-Policy": _HTML_CSP if is_html else _API_CSP,
+    }
+    if is_https:
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _solve_multifloor_dxf_sync(
     floor_blobs: list[tuple[str, bytes]],
     submain_lengths_m: dict[str, float] | None,
@@ -268,9 +352,11 @@ def _solve_multifloor_dxf_sync(
         tmp = Path(tmp_dir)
         floor_files: list[tuple[str, Path]] = []
         for idx, (label, data) in enumerate(floor_blobs):
-            p = tmp / f"floor_{idx}_{label}.dxf"
+            safe_label = _SAFE_FLOOR_RE.sub("", label.upper())[:16] or f"F{idx}"
+            # Never interpolate user-supplied labels into filesystem paths
+            p = tmp / f"floor_{idx:02d}.dxf"
             p.write_bytes(data)
-            floor_files.append((label, p))
+            floor_files.append((safe_label, p))
         model, mf_flags = ingest_multi_floor_dxf(
             floor_files,
             submain_lengths_m=submain_lengths_m,
@@ -305,6 +391,12 @@ def create_app(
     else:
         active_store, store_backend = build_workspace_store_from_env()
     store = active_store
+
+    disable_openapi = os.environ.get("CYELEC_DISABLE_OPENAPI", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     api = FastAPI(
         title="cyelec-pipeline SaaS API",
         version=__version__,
@@ -313,6 +405,9 @@ def create_app(
             "Multi-Tenant EU B2B SaaS service with strict per-tenant isolation, "
             "revision diffing, Pass-2 override carry-forward, and usage metering."
         ),
+        docs_url=None if disable_openapi else "/docs",
+        redoc_url=None if disable_openapi else "/redoc",
+        openapi_url=None if disable_openapi else "/openapi.json",
     )
     api.state.store = store
     api.state.store_backend = store_backend
@@ -321,7 +416,7 @@ def create_app(
         auth_tid = getattr(request.state, "auth_tenant_id", None)
         if isinstance(auth_tid, str) and auth_tid:
             return auth_tid
-        return header_tenant or "anonymous"
+        return _validate_safe_id(header_tenant or "anonymous", "X-Tenant-ID")
 
     def _merge_tenant_defaults(
         tenant_id: str,
@@ -360,8 +455,21 @@ def create_app(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        raw_req_id = request.headers.get("X-Request-ID", "").strip()
+        req_id = (
+            raw_req_id
+            if (_SAFE_ID_RE.fullmatch(raw_req_id) and len(raw_req_id) <= 64)
+            else str(uuid.uuid4())
+        )
         t0 = time.perf_counter()
+        raw_proto = (
+            request.headers.get("x-forwarded-proto", request.url.scheme)
+            .split(",")[0]
+            .strip()
+            .lower()
+        )
+        is_https = raw_proto == "https"
+        path = request.url.path
 
         supplied = request.headers.get("X-API-Key", "").strip()
         auth_tenant: str | None = None
@@ -370,44 +478,97 @@ def create_app(
             if auth_tenant is not None:
                 request.state.auth_tenant_id = auth_tenant
 
-        if request.url.path.startswith("/v1/admin/"):
-            admin_key = os.environ.get("CYELEC_ADMIN_KEY", "").strip()
-            supplied_admin = request.headers.get("X-Admin-Key", "").strip()
+        admin_key = os.environ.get("CYELEC_ADMIN_KEY", "").strip()
+        supplied_admin = request.headers.get("X-Admin-Key", "").strip()
+        admin_ok = bool(admin_key) and hmac.compare_digest(supplied_admin, admin_key)
+
+        if path.startswith("/v1/admin/"):
             if not admin_key:
                 return JSONResponse(
                     status_code=503,
                     content={"detail": "Admin provisioning disabled (CYELEC_ADMIN_KEY not set)."},
-                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                    headers=_security_headers(req_id, is_https=is_https),
                 )
-            if not hmac.compare_digest(supplied_admin, admin_key):
+            if not admin_ok:
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Invalid or missing X-Admin-Key."},
-                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                    headers=_security_headers(req_id, is_https=is_https),
                 )
-        elif request.url.path.startswith("/v1/"):
+        elif path.startswith("/v1/"):
             expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
-            auth_required = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip() in ("1", "true")
+            auth_required = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             global_ok = bool(expected_key) and hmac.compare_digest(supplied, expected_key)
 
             if (expected_key or auth_required) and not (global_ok or auth_tenant is not None):
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Invalid or missing X-API-Key."},
-                    headers={"X-Request-ID": req_id, "X-Content-Type-Options": "nosniff"},
+                    headers=_security_headers(req_id, is_https=is_https),
                 )
 
-        # Layer-1 cost guardrail: sliding-window rate limit on compute-heavy POST solve routes
+            # In open public demo mode (staging), block unauthenticated key-issuing / erasure
+            demo_lock = os.environ.get("CYELEC_DEMO_LOCK_TENANT_MUTATIONS", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            if (
+                demo_lock
+                and not auth_required
+                and (
+                    (request.method == "POST" and path == "/v1/tenants/me/api-key")
+                    or (request.method == "DELETE" and path == "/v1/tenants/me")
+                )
+                and not (auth_tenant is not None or global_ok or admin_ok)
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": (
+                            "Tenant key issuance and erasure require an authenticated X-API-Key "
+                            "or X-Admin-Key in public demo mode."
+                        )
+                    },
+                    headers=_security_headers(req_id, is_https=is_https),
+                )
+
+        # Layer-1 guardrail: bounded sliding-window rate limit using trusted rightmost client IP
         rpm_raw = os.environ.get("CYELEC_RATE_LIMIT_RPM", "0").strip()
         rpm_limit = int(rpm_raw) if rpm_raw.isdigit() else 0
-        if rpm_limit > 0 and request.method == "POST" and (
-            request.url.path.startswith("/v1/solve/")
-            or "/revisions" in request.url.path
-        ):
-            fwd_for = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            client_host = request.client.host if request.client else "unknown"
-            bucket_key = auth_tenant or fwd_for or client_host
+        rate_limited_route = (
+            request.method == "POST"
+            and (
+                path.startswith("/v1/solve/")
+                or path == "/v1/dxf/layers"
+                or path.startswith("/v1/admin/")
+                or path == "/v1/tenants/me/api-key"
+                or "/revisions" in path
+            )
+        )
+        if rpm_limit > 0 and rate_limited_route:
+            xff_parts = [
+                part.strip()
+                for part in request.headers.get("X-Forwarded-For", "").split(",")
+                if part.strip()
+            ]
+            # Cloud Run / Google Front End appends the real client IP on the right
+            trusted_ip = xff_parts[-1] if xff_parts else (
+                request.client.host if request.client else "unknown"
+            )
+            bucket_key = auth_tenant or trusted_ip
             now_mono = time.monotonic()
+            if len(rate_buckets) >= _MAX_RATE_BUCKETS and bucket_key not in rate_buckets:
+                stale = [k for k, dq in rate_buckets.items() if not dq or (now_mono - dq[-1]) > 60]
+                for k in stale:
+                    del rate_buckets[k]
+                if len(rate_buckets) >= _MAX_RATE_BUCKETS:
+                    oldest_key = min(rate_buckets, key=lambda k: rate_buckets[k][-1])
+                    del rate_buckets[oldest_key]
             q = rate_buckets[bucket_key]
             while q and (now_mono - q[0]) > 60.0:
                 q.popleft()
@@ -415,38 +576,37 @@ def create_app(
                 return JSONResponse(
                     status_code=429,
                     content={
-                        "detail": f"Rate limit exceeded ({rpm_limit} solves/min). Retry shortly."
+                        "detail": f"Rate limit exceeded ({rpm_limit} requests/min). Retry shortly."
                     },
-                    headers={
-                        "X-Request-ID": req_id,
-                        "Retry-After": "60",
-                        "X-Content-Type-Options": "nosniff",
-                    },
+                    headers=_security_headers(
+                        req_id, is_https=is_https, extra={"Retry-After": "60"}
+                    ),
                 )
             q.append(now_mono)
 
         response = await call_next(request)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        response.headers["X-Request-ID"] = req_id
-        response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
-        response.headers["X-Content-Type-Options"] = "nosniff"
+        ctype = response.headers.get("content-type", "").lower()
+        is_html = "text/html" in ctype
+        sec_hdrs = _security_headers(
+            req_id,
+            is_html=is_html,
+            is_https=is_https,
+            extra={"X-Process-Time-Ms": f"{elapsed_ms:.1f}"},
+        )
+        for hk, hv in sec_hdrs.items():
+            response.headers[hk] = hv
         return response
 
     @api.get("/", response_class=HTMLResponse)
     def workbench_ui(request: Request) -> HTMLResponse:
-        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", "")).strip()
-        base_url = f"{proto}://{host}" if host else ""
-        return HTMLResponse(content=render_etek_workbench_html(base_url=base_url))
+        return HTMLResponse(content=render_etek_workbench_html(base_url=_safe_base_url(request)))
 
     @api.get("/guide", response_class=HTMLResponse)
     def user_guide_ui(request: Request) -> HTMLResponse:
         from cyelec.api.docs_ui import render_user_guide_html
 
-        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", "")).strip()
-        base_url = f"{proto}://{host}" if host else ""
-        return HTMLResponse(content=render_user_guide_html(base_url=base_url))
+        return HTMLResponse(content=render_user_guide_html(base_url=_safe_base_url(request)))
 
     @api.get("/favicon.ico", include_in_schema=False)
     def favicon_ico() -> Response:
@@ -515,8 +675,9 @@ def create_app(
     @api.post("/v1/admin/tenants/{tenant_id}/api-key", response_model=ApiKeyIssuedResponse)
     def admin_provision_tenant_api_key(tenant_id: str) -> ApiKeyIssuedResponse:
         """Provision or rotate a tenant API key using CYELEC_ADMIN_KEY (X-Admin-Key)."""
-        raw_key = store.issue_tenant_api_key(tenant_id)
-        return ApiKeyIssuedResponse(tenant_id=tenant_id, api_key=raw_key)
+        safe_tid = _validate_safe_id(tenant_id, "tenant_id")
+        raw_key = store.issue_tenant_api_key(safe_tid)
+        return ApiKeyIssuedResponse(tenant_id=safe_tid, api_key=raw_key)
 
     @api.post("/v1/solve/building", response_model=SolveResponseEnvelope)
     def solve_building(
@@ -611,7 +772,7 @@ def create_app(
         try:
             layers = await anyio.to_thread.run_sync(_inspect_dxf_layers_sync, data)
         except (ValueError, DXFError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(
             tid, "dxf_layer_inspect", (time.perf_counter() - t0) * 1000.0, len(data)
@@ -642,7 +803,7 @@ def create_app(
                 _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
             )
         except (ValueError, ImportError, DXFError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(tid, "solve_dxf", (time.perf_counter() - t0) * 1000.0, len(data))
         return SolveResponseEnvelope(tenant_id=tid, result=p2)
@@ -698,7 +859,7 @@ def create_app(
                 _solve_dxf_bundle_sync, data, suffix, overrides, building_type, layer_mapping
             )
         except (ValueError, ImportError, DXFError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         store.record_usage(
             tid, "solve_dxf_bundle", (time.perf_counter() - t0) * 1000.0, len(zip_bytes)
@@ -731,6 +892,11 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         if not files:
             raise HTTPException(status_code=400, detail="At least one .dxf floor file is required.")
+        if len(files) > _MAX_MULTIFLOOR_FILES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Multi-floor upload supports at most {_MAX_MULTIFLOOR_FILES} floor files.",
+            )
 
         default_labels = ["GF"] + [f"{i}F" for i in range(1, len(files))]
         labels: list[str] = default_labels[: len(files)]
@@ -774,6 +940,14 @@ def create_app(
                 )
             blob = await _read_upload_bounded(uf)
             total_bytes += len(blob)
+            if total_bytes > _MAX_MULTIFLOOR_TOTAL_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "Combined multi-floor upload exceeds maximum allowed size of "
+                        f"{_MAX_MULTIFLOOR_TOTAL_BYTES // (1024 * 1024)} MB."
+                    ),
+                )
             floor_blobs.append((label, blob))
 
         overrides = _merge_tenant_defaults(tid, _parse_overrides_json(overrides_json))
@@ -788,7 +962,7 @@ def create_app(
                 layer_mapping,
             )
         except (ValueError, DXFError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, p2)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
@@ -880,7 +1054,8 @@ def create_app(
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> ProjectSummary:
         tid = _effective_tenant(request, x_tenant_id)
-        proj = store.get_project(tid, project_id)
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        proj = store.get_project(tid, safe_pid)
         if proj is None:
             raise HTTPException(status_code=404, detail="Project not found.")
         return proj
@@ -893,9 +1068,10 @@ def create_app(
     ) -> ProjectDeletedResponse:
         """Delete a tenant-owned project and all its revisions (404 if not owned by tenant)."""
         tid = _effective_tenant(request, x_tenant_id)
-        if not store.delete_project(tid, project_id):
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        if not store.delete_project(tid, safe_pid):
             raise HTTPException(status_code=404, detail="Project not found.")
-        return ProjectDeletedResponse(deleted=True, project_id=project_id)
+        return ProjectDeletedResponse(deleted=True, project_id=safe_pid)
 
     @api.post(
         "/v1/projects/{project_id}/revisions",
@@ -910,7 +1086,8 @@ def create_app(
     ) -> RevisionRecord:
         """Solve & persist a new revision with optional Pass-2 override carry-forward."""
         tid = _effective_tenant(request, x_tenant_id)
-        proj = store.get_project(tid, project_id)
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        proj = store.get_project(tid, safe_pid)
         if proj is None:
             raise HTTPException(status_code=404, detail="Project not found.")
 
@@ -923,7 +1100,7 @@ def create_app(
         t0 = time.perf_counter()
         eff_overrides = payload.overrides
         if payload.carry_forward_overrides:
-            prev = store.get_latest_revision(tid, project_id)
+            prev = store.get_latest_revision(tid, safe_pid)
             if prev is not None:
                 eff_overrides = carry_forward_overrides(prev.overrides, eff_overrides)
         eff_overrides = _merge_tenant_defaults(tid, eff_overrides)
@@ -934,14 +1111,14 @@ def create_app(
             else generate_benchmark_dxf(payload.benchmark_template)  # type: ignore[arg-type]
         )
         p2 = run_phase2_pipeline(building, overrides=eff_overrides)
-        rec = store.save_revision(tid, project_id, p2, overrides=eff_overrides, notes=payload.notes)
+        rec = store.save_revision(tid, safe_pid, p2, overrides=eff_overrides, notes=payload.notes)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         store.record_usage(
             tid,
             "revision_solve",
             elapsed_ms,
             len(p2.model_dump_json().encode("utf-8")),
-            project_id=project_id,
+            project_id=safe_pid,
         )
         return rec
 
@@ -963,7 +1140,8 @@ def create_app(
     ) -> RevisionRecord:
         """Upload a DXF/IFC revision, carry forward Pass-2 engineer overrides, and persist."""
         tid = _effective_tenant(request, x_tenant_id)
-        if store.get_project(tid, project_id) is None:
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        if store.get_project(tid, safe_pid) is None:
             raise HTTPException(status_code=404, detail="Project not found.")
 
         filename = file.filename or "upload.dxf"
@@ -977,7 +1155,7 @@ def create_app(
         layer_mapping = _parse_layer_mapping_json(layer_mapping_json)
 
         if carry_forward:
-            prev = store.get_latest_revision(tid, project_id)
+            prev = store.get_latest_revision(tid, safe_pid)
             if prev is not None:
                 overrides = carry_forward_overrides(prev.overrides, overrides)
         overrides = _merge_tenant_defaults(tid, overrides)
@@ -987,16 +1165,16 @@ def create_app(
                 _solve_dxf_bytes_sync, data, suffix, overrides, building_type, layer_mapping
             )
         except (ValueError, ImportError, DXFError, OSError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
-        rec = store.save_revision(tid, project_id, p2, overrides=overrides, notes=notes)
+        rec = store.save_revision(tid, safe_pid, p2, overrides=overrides, notes=notes)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         store.record_usage(
             tid,
             "dxf_revision_solve",
             elapsed_ms,
             len(data),
-            project_id=project_id,
+            project_id=safe_pid,
         )
         return rec
 
@@ -1007,9 +1185,10 @@ def create_app(
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> list[RevisionSummary]:
         tid = _effective_tenant(request, x_tenant_id)
-        if store.get_project(tid, project_id) is None:
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        if store.get_project(tid, safe_pid) is None:
             raise HTTPException(status_code=404, detail="Project not found.")
-        return store.list_revisions(tid, project_id)
+        return store.list_revisions(tid, safe_pid)
 
     @api.get(
         "/v1/projects/{project_id}/revisions/{revision_number}",
@@ -1022,7 +1201,8 @@ def create_app(
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> RevisionRecord:
         tid = _effective_tenant(request, x_tenant_id)
-        rec = store.get_revision(tid, project_id, revision_number)
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        rec = store.get_revision(tid, safe_pid, revision_number)
         if rec is None:
             raise HTTPException(status_code=404, detail="Revision not found.")
         return rec
@@ -1040,8 +1220,9 @@ def create_app(
     ) -> RevisionDiff:
         """Compute deterministic engineering diff (rooms, circuits, BOQ, flags) across revisions."""
         tid = _effective_tenant(request, x_tenant_id)
-        ra = store.get_revision(tid, project_id, rev_a)
-        rb = store.get_revision(tid, project_id, rev_b)
+        safe_pid = _validate_safe_id(project_id, "project_id")
+        ra = store.get_revision(tid, safe_pid, rev_a)
+        rb = store.get_revision(tid, safe_pid, rev_b)
         if ra is None or rb is None:
             raise HTTPException(status_code=404, detail="One or both revisions not found.")
         return compute_revision_diff(rev_a, ra.result, rev_b, rb.result)

@@ -546,6 +546,23 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
     return out_path
 
 
+def _safe_csv_cell(val: object) -> object:
+    """Neutralize OWASP CSV formula injection (=, +, -, @, tab, CR) on non-numeric strings."""
+    if not isinstance(val, str) or not val:
+        return val
+    if val[0] in ("=", "+", "-", "@", "\t", "\r"):
+        try:
+            float(val)
+            return val
+        except ValueError:
+            return f"'{val}"
+    return val
+
+
+def _safe_csv_row(row: list[object]) -> list[object]:
+    return [_safe_csv_cell(v) for v in row]
+
+
 def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
     """Export flat evaluated Bill of Quantities CSV (priced or blank Tender BOQ mode)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -567,16 +584,18 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
             is_tender = result.boq.is_tender_blank_rates
             for item in result.boq.items:
                 writer.writerow(
-                    [
-                        item.item_no,
-                        item.category,
-                        item.description_en,
-                        item.description_el,
-                        item.unit,
-                        f"{item.quantity:.2f}",
-                        "" if is_tender else f"{item.unit_rate_eur:.2f}",
-                        "" if is_tender else f"{item.total_eur:.2f}",
-                    ]
+                    _safe_csv_row(
+                        [
+                            item.item_no,
+                            item.category,
+                            item.description_en,
+                            item.description_el,
+                            item.unit,
+                            f"{item.quantity:.2f}",
+                            "" if is_tender else f"{item.unit_rate_eur:.2f}",
+                            "" if is_tender else f"{item.total_eur:.2f}",
+                        ]
+                    )
                 )
             writer.writerow(
                 [
@@ -626,43 +645,49 @@ def export_load_schedule_csv(result: ElectricalDesignResult, out_path: Path) -> 
         for circ in result.circuits:
             s = circ.spec
             writer.writerow(
-                [
-                    s.circuit_id,
-                    s.description,
-                    s.category.value,
-                    s.topology.value,
-                    circ.phase.value,
-                    f"{s.connected_load_w:.1f}",
-                    f"{s.diversity_factor:.2f}",
-                    f"{s.diversified_load_w:.1f}",
-                    f"{s.power_factor:.2f}",
-                    f"{s.design_current_ib_a:.2f}",
-                    circ.device_label,
-                    circ.breaker_in_a,
-                    circ.breaker_curve.value,
-                    s.rcd_idn_ma if (s.rcd_protected and s.rcd_idn_ma is not None) else "None",
-                    s.installation_method,
-                    f"{s.length_m:.1f}",
-                    f"{circ.cable_mm2:g}",
-                    f"{circ.cpc_mm2:g}",
-                    f"{circ.ca:.2f}",
-                    f"{circ.cg:.2f}",
-                    f"{circ.ci:.2f}",
-                    f"{circ.it_tabulated_a:.2f}",
-                    f"{circ.iz_derated_a:.2f}",
-                    f"{circ.required_iz_a:.2f}",
-                    "PASS" if circ.thermal_pass else "FAIL",
-                    f"{circ.mv_per_a_per_m:.2f}",
-                    f"{circ.voltage_drop_v:.3f}",
-                    f"{circ.voltage_drop_pct:.3f}",
-                    f"{s.vd_limit_pct:.1f}",
-                    "PASS" if circ.voltage_drop_pass else "FAIL",
-                    f"{circ.zs_ohm:.4f}",
-                    f"{circ.zs_max_ohm:.2f}",
-                    "PASS" if circ.earth_fault_pass else "FAIL",
-                    f"{circ.cpc_min_mm2:.3f}",
-                    "PASS" if circ.cpc_adiabatic_pass else "FAIL",
-                    "PASS" if circ.overall_pass else "FAIL",
-                ]
+                _safe_csv_row(
+                    [
+                        s.circuit_id,
+                        s.description,
+                        s.category.value,
+                        s.topology.value,
+                        circ.phase.value,
+                        f"{s.connected_load_w:.1f}",
+                        f"{s.diversity_factor:.2f}",
+                        f"{s.diversified_load_w:.1f}",
+                        f"{s.power_factor:.2f}",
+                        f"{s.design_current_ib_a:.2f}",
+                        circ.device_label,
+                        circ.breaker_in_a,
+                        circ.breaker_curve.value,
+                        (
+                            s.rcd_idn_ma
+                            if (s.rcd_protected and s.rcd_idn_ma is not None)
+                            else "None"
+                        ),
+                        s.installation_method,
+                        f"{s.length_m:.1f}",
+                        f"{circ.cable_mm2:g}",
+                        f"{circ.cpc_mm2:g}",
+                        f"{circ.ca:.2f}",
+                        f"{circ.cg:.2f}",
+                        f"{circ.ci:.2f}",
+                        f"{circ.it_tabulated_a:.2f}",
+                        f"{circ.iz_derated_a:.2f}",
+                        f"{circ.required_iz_a:.2f}",
+                        "PASS" if circ.thermal_pass else "FAIL",
+                        f"{circ.mv_per_a_per_m:.2f}",
+                        f"{circ.voltage_drop_v:.3f}",
+                        f"{circ.voltage_drop_pct:.3f}",
+                        f"{s.vd_limit_pct:.1f}",
+                        "PASS" if circ.voltage_drop_pass else "FAIL",
+                        f"{circ.zs_ohm:.4f}",
+                        f"{circ.zs_max_ohm:.2f}",
+                        "PASS" if circ.earth_fault_pass else "FAIL",
+                        f"{circ.cpc_min_mm2:.3f}",
+                        "PASS" if circ.cpc_adiabatic_pass else "FAIL",
+                        "PASS" if circ.overall_pass else "FAIL",
+                    ]
+                )
             )
     return out_path

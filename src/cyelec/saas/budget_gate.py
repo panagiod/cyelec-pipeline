@@ -13,14 +13,17 @@ Re-enabling after review is a single `terraform apply` or
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
-import urllib.request
+import re
 from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+
+_GCP_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 
 
 class BudgetNotification(BaseModel):
@@ -66,6 +69,13 @@ class BudgetGateResult(BaseModel):
     paused_services: list[str] = Field(default_factory=list)
 
 
+def _validate_gcp_identifier(value: str, label: str) -> str:
+    clean = value.strip()
+    if not _GCP_ID_RE.match(clean):
+        raise ValueError(f"Invalid GCP {label}: {value!r}")
+    return clean
+
+
 def pause_cloud_run_service(
     project_id: str,
     region: str,
@@ -77,29 +87,39 @@ def pause_cloud_run_service(
     import google.auth
     import google.auth.transport.requests
 
+    safe_project = _validate_gcp_identifier(project_id, "project_id")
+    safe_region = _validate_gcp_identifier(region, "region")
+    safe_service = _validate_gcp_identifier(service_name, "service_name")
+
     creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     auth_req = google.auth.transport.requests.Request()
     creds.refresh(auth_req)
     token = str(creds.token)
 
-    url = (
-        f"https://run.googleapis.com/v2/projects/{project_id}/locations/{region}"
-        f"/services/{service_name}?updateMask=ingress"
+    path = (
+        f"/v2/projects/{safe_project}/locations/{safe_region}"
+        f"/services/{safe_service}?updateMask=ingress"
     )
     body = json.dumps({"ingress": "INGRESS_TRAFFIC_INTERNAL_ONLY"}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="PATCH",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+    conn = http.client.HTTPSConnection("run.googleapis.com", timeout=timeout_s)
+    try:
+        conn.request(
+            "PATCH",
+            path,
+            body=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        resp = conn.getresponse()
         raw = resp.read().decode("utf-8")
+        if resp.status >= 400:
+            raise RuntimeError(f"Cloud Run API PATCH failed ({resp.status}): {raw[:300]}")
         parsed: dict[str, Any] = json.loads(raw) if raw else {}
         return parsed
+    finally:
+        conn.close()
 
 
 def evaluate_budget_notification(
@@ -152,7 +172,13 @@ def create_budget_gate_app(
     pause_fn: Callable[[str, str, str], dict[str, Any]] = pause_cloud_run_service,
 ) -> FastAPI:
     """Create the lightweight Cloud Run Pub/Sub push receiver for the €10/mo hard gate."""
-    gate_api = FastAPI(title="cyelec-budget-gate", version="1.0.0")
+    gate_api = FastAPI(
+        title="cyelec-budget-gate",
+        version="1.0.0",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
 
     @gate_api.get("/health")
     def gate_health() -> dict[str, str]:
@@ -160,12 +186,16 @@ def create_budget_gate_app(
 
     @gate_api.post("/pubsub/budget", response_model=BudgetGateResult)
     def handle_budget_pubsub(envelope: PubSubPushEnvelope) -> BudgetGateResult:
+        expected_sub = os.environ.get("CYELEC_EXPECTED_SUBSCRIPTION", "").strip()
+        if expected_sub and envelope.subscription != expected_sub:
+            raise HTTPException(status_code=403, detail="Unexpected Pub/Sub subscription.")
+
         try:
             decoded = base64.b64decode(envelope.message.data).decode("utf-8")
             notif = BudgetNotification.model_validate_json(decoded)
         except Exception as exc:
             raise HTTPException(
-                status_code=400, detail=f"Invalid budget Pub/Sub payload: {exc}"
+                status_code=400, detail="Invalid budget Pub/Sub payload."
             ) from exc
 
         project_id = os.environ.get("CYELEC_GCP_PROJECT", "").strip()
