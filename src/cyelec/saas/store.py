@@ -20,7 +20,16 @@ from cyelec.models.electrical import (
     TenantBranding,
 )
 from cyelec.models.spatial import Phase2DesignResult
-from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
+from cyelec.saas.auth import (
+    Role,
+    extract_key_prefix,
+    generate_api_key,
+    hash_api_key,
+    hash_password,
+    verify_api_key,
+    verify_password,
+)
+from cyelec.saas.billing import QuotaStatus, current_month_key, resolve_plan_spec
 
 
 def _utc_now() -> str:
@@ -28,17 +37,36 @@ def _utc_now() -> str:
 
 
 class TenantProfile(BaseModel):
-    """Per-tenant consulting practice profile, branding defaults, and plan metadata."""
+    """Per-tenant consulting practice profile, branding defaults, and billing/plan metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
     tenant_id: str
     display_name: str
     plan: str = "pro_cyprus"
+    subscription_status: str = "active"
+    stripe_customer_id: str | None = None
+    stripe_subscription_id: str | None = None
+    monthly_quota_override: int | None = None
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
     boq_rate_overrides: BoqRateOverrides | None = None
     has_api_key: bool = False
+    created_at: str
+    updated_at: str
+
+
+class UserRecord(BaseModel):
+    """Tenant-scoped firm member account (never includes password hashes or salts)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str
+    tenant_id: str
+    email: str
+    display_name: str
+    role: Role
+    auth_provider: str = "password"
     created_at: str
     updated_at: str
 
@@ -100,12 +128,13 @@ class UsageSummary(BaseModel):
 
 
 class TenantExportBundle(BaseModel):
-    """EU GDPR Article 20 portable data export for a tenant (excludes API key secrets)."""
+    """EU GDPR Article 20 portable data export for a tenant (excludes secrets & hashes)."""
 
     model_config = ConfigDict(extra="forbid")
 
     exported_at_utc: str
     tenant: TenantProfile
+    members: list[UserRecord] = Field(default_factory=list)
     projects: list[ProjectSummary] = Field(default_factory=list)
     revisions_by_project: dict[str, list[RevisionRecord]] = Field(default_factory=dict)
     usage: UsageSummary
@@ -113,7 +142,7 @@ class TenantExportBundle(BaseModel):
 
 @runtime_checkable
 class WorkspaceStoreProtocol(Protocol):
-    """Backend-agnostic multi-tenant store contract (SQLite default; PostgreSQL drop-in ready)."""
+    """Backend-agnostic multi-tenant store contract (SQLite default; Firestore Native ready)."""
 
     def close(self) -> None: ...
     def get_or_create_tenant(self, tenant_id: str) -> TenantProfile: ...
@@ -126,8 +155,47 @@ class WorkspaceStoreProtocol(Protocol):
         branding: TenantBranding | None = None,
         boq_rate_overrides: BoqRateOverrides | None = None,
     ) -> TenantProfile: ...
+    def update_tenant_billing(
+        self,
+        tenant_id: str,
+        *,
+        plan: str | None = None,
+        subscription_status: str | None = None,
+        stripe_customer_id: str | None = None,
+        stripe_subscription_id: str | None = None,
+        monthly_quota_override: int | None = None,
+        clear_quota_override: bool = False,
+    ) -> TenantProfile: ...
+    def find_tenant_by_stripe_customer(self, stripe_customer_id: str) -> str | None: ...
     def issue_tenant_api_key(self, tenant_id: str) -> str: ...
     def resolve_tenant_by_api_key(self, api_key: str) -> str | None: ...
+    def create_user(
+        self,
+        tenant_id: str,
+        email: str,
+        display_name: str,
+        *,
+        role: Role = Role.ENGINEER,
+        password: str | None = None,
+        auth_provider: str = "password",
+    ) -> UserRecord: ...
+    def authenticate_user(self, email: str, password: str) -> UserRecord | None: ...
+    def get_user_by_email(self, email: str) -> UserRecord | None: ...
+    def get_user(self, tenant_id: str, user_id: str) -> UserRecord | None: ...
+    def list_users(self, tenant_id: str) -> list[UserRecord]: ...
+    def update_user_role(
+        self, tenant_id: str, user_id: str, role: Role
+    ) -> UserRecord | None: ...
+    def delete_user(self, tenant_id: str, user_id: str) -> bool: ...
+    def get_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int: ...
+    def increment_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int: ...
+    def get_quota_status(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> QuotaStatus: ...
     def create_project(
         self, tenant_id: str, name: str, description: str = ""
     ) -> ProjectSummary: ...
@@ -190,6 +258,10 @@ class WorkspaceStore:
                     tenant_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
                     plan TEXT NOT NULL DEFAULT 'pro_cyprus',
+                    subscription_status TEXT NOT NULL DEFAULT 'active',
+                    stripe_customer_id TEXT,
+                    stripe_subscription_id TEXT,
+                    monthly_quota_override INTEGER,
                     report_language TEXT NOT NULL DEFAULT 'en',
                     branding_json TEXT,
                     boq_rate_overrides_json TEXT,
@@ -198,6 +270,31 @@ class WorkspaceStore:
                     api_key_salt TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    email TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'engineer',
+                    auth_provider TEXT NOT NULL DEFAULT 'password',
+                    password_hash TEXT,
+                    password_salt TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+                CREATE TABLE IF NOT EXISTS tenant_monthly_quotas (
+                    tenant_id TEXT NOT NULL,
+                    month_key TEXT NOT NULL,
+                    solve_count INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, month_key),
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS projects (
@@ -252,8 +349,25 @@ class WorkspaceStore:
                 self._conn.execute("ALTER TABLE tenants ADD COLUMN api_key_prefix TEXT")
             if "boq_rate_overrides_json" not in cols:
                 self._conn.execute("ALTER TABLE tenants ADD COLUMN boq_rate_overrides_json TEXT")
+            if "subscription_status" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE tenants ADD COLUMN subscription_status "
+                    "TEXT NOT NULL DEFAULT 'active'"
+                )
+            if "stripe_customer_id" not in cols:
+                self._conn.execute("ALTER TABLE tenants ADD COLUMN stripe_customer_id TEXT")
+            if "stripe_subscription_id" not in cols:
+                self._conn.execute("ALTER TABLE tenants ADD COLUMN stripe_subscription_id TEXT")
+            if "monthly_quota_override" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE tenants ADD COLUMN monthly_quota_override INTEGER"
+                )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tenants_key_prefix ON tenants(api_key_prefix)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tenants_stripe_cust "
+                "ON tenants(stripe_customer_id)"
             )
             self._conn.commit()
 
@@ -297,14 +411,36 @@ class WorkspaceStore:
             if row["boq_rate_overrides_json"]
             else None
         )
+        raw_qo = row["monthly_quota_override"]
         return TenantProfile(
             tenant_id=str(row["tenant_id"]),
             display_name=str(row["display_name"]),
             plan=str(row["plan"]),
+            subscription_status=str(row["subscription_status"] or "active"),
+            stripe_customer_id=(
+                str(row["stripe_customer_id"]) if row["stripe_customer_id"] else None
+            ),
+            stripe_subscription_id=(
+                str(row["stripe_subscription_id"]) if row["stripe_subscription_id"] else None
+            ),
+            monthly_quota_override=int(raw_qo) if raw_qo is not None else None,
             report_language=ReportLanguage(str(row["report_language"])),
             branding=branding,
             boq_rate_overrides=boq_rates,
             has_api_key=bool(row["api_key_hash"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_user(row: sqlite3.Row) -> UserRecord:
+        return UserRecord(
+            user_id=str(row["user_id"]),
+            tenant_id=str(row["tenant_id"]),
+            email=str(row["email"]),
+            display_name=str(row["display_name"]),
+            role=Role(str(row["role"])),
+            auth_provider=str(row["auth_provider"] or "password"),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
@@ -340,6 +476,278 @@ class WorkspaceStore:
             )
             self._conn.commit()
         return self.get_or_create_tenant(tenant_id)
+
+    def update_tenant_billing(
+        self,
+        tenant_id: str,
+        *,
+        plan: str | None = None,
+        subscription_status: str | None = None,
+        stripe_customer_id: str | None = None,
+        stripe_subscription_id: str | None = None,
+        monthly_quota_override: int | None = None,
+        clear_quota_override: bool = False,
+    ) -> TenantProfile:
+        current = self.get_or_create_tenant(tenant_id)
+        new_plan = plan if plan is not None else current.plan
+        new_status = (
+            subscription_status if subscription_status is not None else current.subscription_status
+        )
+        new_cust = (
+            stripe_customer_id if stripe_customer_id is not None else current.stripe_customer_id
+        )
+        new_sub = (
+            stripe_subscription_id
+            if stripe_subscription_id is not None
+            else current.stripe_subscription_id
+        )
+        new_qo = (
+            None
+            if clear_quota_override
+            else (
+                monthly_quota_override
+                if monthly_quota_override is not None
+                else current.monthly_quota_override
+            )
+        )
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE tenants
+                SET plan = ?, subscription_status = ?, stripe_customer_id = ?,
+                    stripe_subscription_id = ?, monthly_quota_override = ?, updated_at = ?
+                WHERE tenant_id = ?
+                """,
+                (new_plan, new_status, new_cust, new_sub, new_qo, now, tenant_id),
+            )
+            self._conn.commit()
+        return self.get_or_create_tenant(tenant_id)
+
+    def find_tenant_by_stripe_customer(self, stripe_customer_id: str) -> str | None:
+        if not stripe_customer_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tenant_id FROM tenants WHERE stripe_customer_id = ?",
+                (stripe_customer_id.strip(),),
+            ).fetchone()
+        return str(row["tenant_id"]) if row is not None else None
+
+    # ------------------------------------------------------------------
+    # Team Users, RBAC & Monthly Solve Quotas
+    # ------------------------------------------------------------------
+    def create_user(
+        self,
+        tenant_id: str,
+        email: str,
+        display_name: str,
+        *,
+        role: Role = Role.ENGINEER,
+        password: str | None = None,
+        auth_provider: str = "password",
+    ) -> UserRecord:
+        norm_email = email.strip().lower()
+        if not norm_email or "@" not in norm_email:
+            raise ValueError("A valid email address is required.")
+        tenant = self.get_or_create_tenant(tenant_id)
+        plan_spec = resolve_plan_spec(tenant.plan)
+        existing_members = self.list_users(tenant_id)
+        if len(existing_members) >= plan_spec.max_seats:
+            raise ValueError(
+                f"Seat limit reached ({plan_spec.max_seats} seats on plan '{plan_spec.plan_id}'). "
+                "Upgrade plan to add more firm seats."
+            )
+
+        pw_hash: str | None = None
+        pw_salt: str | None = None
+        if password is not None:
+            pw_hash, pw_salt = hash_password(password)
+        elif auth_provider == "password":
+            raise ValueError("Password is required for password-based accounts.")
+
+        uid = f"usr_{uuid.uuid4().hex[:12]}"
+        now = _utc_now()
+        with self._lock:
+            dup = self._conn.execute(
+                "SELECT user_id FROM users WHERE email = ?", (norm_email,)
+            ).fetchone()
+            if dup is not None:
+                raise ValueError("An account with this email already exists.")
+            self._conn.execute(
+                """
+                INSERT INTO users (
+                    user_id, tenant_id, email, display_name, role, auth_provider,
+                    password_hash, password_salt, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uid,
+                    tenant_id,
+                    norm_email,
+                    display_name.strip() or norm_email.split("@", 1)[0],
+                    role.value,
+                    auth_provider,
+                    pw_hash,
+                    pw_salt,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ?", (uid,)
+            ).fetchone()
+        assert row is not None
+        return self._row_to_user(row)
+
+    def authenticate_user(self, email: str, password: str) -> UserRecord | None:
+        norm_email = email.strip().lower()
+        if not norm_email or not password:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE email = ?", (norm_email,)
+            ).fetchone()
+        if row is None or not row["password_hash"] or not row["password_salt"]:
+            return None
+        if not verify_password(password, str(row["password_hash"]), str(row["password_salt"])):
+            return None
+        return self._row_to_user(row)
+
+    def get_user_by_email(self, email: str) -> UserRecord | None:
+        norm_email = email.strip().lower()
+        if not norm_email:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE email = ?", (norm_email,)
+            ).fetchone()
+        return self._row_to_user(row) if row is not None else None
+
+    def get_user(self, tenant_id: str, user_id: str) -> UserRecord | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+        return self._row_to_user(row) if row is not None else None
+
+    def list_users(self, tenant_id: str) -> list[UserRecord]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM users WHERE tenant_id = ? ORDER BY created_at ASC",
+                (tenant_id,),
+            ).fetchall()
+        return [self._row_to_user(r) for r in rows]
+
+    def update_user_role(
+        self, tenant_id: str, user_id: str, role: Role
+    ) -> UserRecord | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+            if cur is None:
+                return None
+            if str(cur["role"]) == Role.OWNER.value and role != Role.OWNER:
+                owners = self._conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM users WHERE tenant_id = ? AND role = ?",
+                    (tenant_id, Role.OWNER.value),
+                ).fetchone()
+                if owners is not None and int(owners["cnt"]) <= 1:
+                    raise ValueError("Cannot demote the last remaining owner of a tenant.")
+            self._conn.execute(
+                "UPDATE users SET role = ?, updated_at = ? WHERE user_id = ? AND tenant_id = ?",
+                (role.value, _utc_now(), user_id, tenant_id),
+            )
+            self._conn.commit()
+            updated = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+        return self._row_to_user(updated) if updated is not None else None
+
+    def delete_user(self, tenant_id: str, user_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+            if cur is None:
+                return False
+            if str(cur["role"]) == Role.OWNER.value:
+                owners = self._conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM users WHERE tenant_id = ? AND role = ?",
+                    (tenant_id, Role.OWNER.value),
+                ).fetchone()
+                if owners is not None and int(owners["cnt"]) <= 1:
+                    raise ValueError("Cannot remove the last remaining owner of a tenant.")
+            self._conn.execute(
+                "DELETE FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            )
+            self._conn.commit()
+            return True
+
+    def get_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int:
+        mk = month_key or current_month_key()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT solve_count FROM tenant_monthly_quotas "
+                "WHERE tenant_id = ? AND month_key = ?",
+                (tenant_id, mk),
+            ).fetchone()
+        return int(row["solve_count"]) if row is not None else 0
+
+    def increment_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int:
+        self.get_or_create_tenant(tenant_id)
+        mk = month_key or current_month_key()
+        now = _utc_now()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO tenant_monthly_quotas (tenant_id, month_key, solve_count, updated_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(tenant_id, month_key)
+                DO UPDATE SET solve_count = solve_count + 1, updated_at = excluded.updated_at
+                """,
+                (tenant_id, mk, now),
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                "SELECT solve_count FROM tenant_monthly_quotas "
+                "WHERE tenant_id = ? AND month_key = ?",
+                (tenant_id, mk),
+            ).fetchone()
+        return int(row["solve_count"]) if row is not None else 1
+
+    def get_quota_status(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> QuotaStatus:
+        mk = month_key or current_month_key()
+        tenant = self.get_or_create_tenant(tenant_id)
+        plan_spec = resolve_plan_spec(tenant.plan)
+        limit = (
+            tenant.monthly_quota_override
+            if tenant.monthly_quota_override is not None
+            else plan_spec.monthly_solve_quota
+        )
+        used = self.get_monthly_solve_count(tenant_id, mk)
+        return QuotaStatus(
+            tenant_id=tenant_id,
+            plan_id=plan_spec.plan_id,
+            month_key=mk,
+            solves_used=used,
+            solves_limit=limit,
+            solves_remaining=max(0, limit - used),
+            exceeded=used >= limit,
+        )
 
     def issue_tenant_api_key(self, tenant_id: str) -> str:
         """Issue or rotate a prefix-indexed per-tenant API key (salted PBKDF2 stored)."""
@@ -688,9 +1096,10 @@ class WorkspaceStore:
             return True
 
     def export_tenant_data(self, tenant_id: str) -> TenantExportBundle:
-        """GDPR Article 20 portable JSON export for a tenant (excludes API key secrets)."""
+        """GDPR Article 20 portable JSON export for a tenant (excludes secrets & hashes)."""
         with self._lock:
             tenant = self.get_or_create_tenant(tenant_id)
+            members = self.list_users(tenant_id)
             projects = self.list_projects(tenant_id)
             revisions_by_project: dict[str, list[RevisionRecord]] = {}
             for proj in projects:
@@ -705,6 +1114,7 @@ class WorkspaceStore:
         return TenantExportBundle(
             exported_at_utc=_utc_now(),
             tenant=tenant,
+            members=members,
             projects=projects,
             revisions_by_project=revisions_by_project,
             usage=usage,
@@ -718,6 +1128,10 @@ class WorkspaceStore:
                 (tenant_id,),
             ).fetchone()
             self._conn.execute("DELETE FROM usage_events WHERE tenant_id = ?", (tenant_id,))
+            self._conn.execute(
+                "DELETE FROM tenant_monthly_quotas WHERE tenant_id = ?", (tenant_id,)
+            )
+            self._conn.execute("DELETE FROM users WHERE tenant_id = ?", (tenant_id,))
             self._conn.execute("DELETE FROM revisions WHERE tenant_id = ?", (tenant_id,))
             self._conn.execute("DELETE FROM projects WHERE tenant_id = ?", (tenant_id,))
             self._conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))

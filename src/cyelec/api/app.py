@@ -40,6 +40,26 @@ from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.pdf_export import is_weasyprint_available
 from cyelec.render.qet_bridge import is_qelectrotech_available
 from cyelec.render.sld import render_sld_svg
+from cyelec.saas.auth import (
+    AuthPrincipal,
+    Role,
+    create_access_token,
+    verify_access_token,
+    verify_google_id_token,
+)
+from cyelec.saas.billing import (
+    PLAN_CATALOG,
+    PlanSpec,
+    QuotaStatus,
+    StripeWebhookOutcome,
+    SubscriptionStatus,
+    create_stripe_checkout_session,
+    create_stripe_portal_session,
+    is_stripe_configured,
+    process_stripe_event,
+    resolve_plan_spec,
+    verify_stripe_signature,
+)
 from cyelec.saas.firestore_store import (
     FirestoreWorkspaceStore,
     build_workspace_store_from_env,
@@ -52,6 +72,7 @@ from cyelec.saas.store import (
     TenantExportBundle,
     TenantProfile,
     UsageSummary,
+    UserRecord,
     WorkspaceStore,
     WorkspaceStoreProtocol,
 )
@@ -68,6 +89,16 @@ _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.\-:]{1,253}$")
 _SAFE_FLOOR_RE = re.compile(r"[^A-Z0-9_-]")
 _TMP_PATH_RE = re.compile(r"(?:/tmp/|/var/folders/|C:\\\\?Users\\\\?)[^\s'\"]+")
+
+_PUBLIC_V1_PATHS = frozenset(
+    {
+        "/v1/auth/register",
+        "/v1/auth/login",
+        "/v1/auth/google",
+        "/v1/billing/plans",
+        "/v1/billing/webhook",
+    }
+)
 
 _HTML_CSP = (
     "default-src 'self'; "
@@ -97,6 +128,8 @@ class HealthResponse(BaseModel):
     ifc_available: bool = False
     dwg_available: bool = False
     pdf_export_available: bool = False
+    stripe_configured: bool = False
+    google_sso_configured: bool = False
     store_backend: str = "sqlite"
 
 
@@ -196,6 +229,124 @@ class TenantDeletedResponse(BaseModel):
 
     deleted: bool
     tenant_id: str
+
+
+class RegisterRequest(BaseModel):
+    """Self-serve firm registration creating a tenant workspace and initial Owner seat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    firm_name: str
+    email: str
+    password: str
+    display_name: str = ""
+    tenant_id: str | None = None
+
+
+class LoginRequest(BaseModel):
+    """Email + password login request returning a signed HS256 JWT."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str
+    password: str
+
+
+class GoogleAuthRequest(BaseModel):
+    """Google OIDC ID-token sign-in / firm registration request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id_token: str
+    firm_name: str = ""
+
+
+class AuthTokenResponse(BaseModel):
+    """Issued HS256 JWT session envelope with user, tenant, and quota metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    access_token: str
+    token_type: str = "bearer"
+    user: UserRecord
+    tenant: TenantProfile
+    quota: QuotaStatus
+
+
+class AuthMeResponse(BaseModel):
+    """Resolved caller identity, RBAC role, tenant profile, and monthly quota."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    principal: AuthPrincipal
+    tenant: TenantProfile
+    quota: QuotaStatus
+
+
+class AddMemberRequest(BaseModel):
+    """Owner request to add an engineer, viewer, or co-owner seat to the firm."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str
+    display_name: str
+    password: str
+    role: Role = Role.ENGINEER
+
+
+class UpdateMemberRoleRequest(BaseModel):
+    """Owner request to change a team member's RBAC role."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Role
+
+
+class MemberDeletedResponse(BaseModel):
+    """Confirmation envelope after removing a firm member seat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    deleted: bool
+    user_id: str
+
+
+class CheckoutRequest(BaseModel):
+    """Owner request to initiate a Stripe Hosted Checkout upgrade session."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    success_url: str = ""
+    cancel_url: str = ""
+
+
+class CheckoutSessionResponse(BaseModel):
+    """Stripe Hosted Checkout redirect envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    checkout_url: str
+
+
+class PortalSessionResponse(BaseModel):
+    """Stripe Billing Customer Portal redirect envelope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    portal_url: str
+
+
+class AdminUpdatePlanRequest(BaseModel):
+    """Admin manual B2B plan / quota assignment request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    subscription_status: str = "active"
+    monthly_quota_override: int | None = None
+    clear_quota_override: bool = False
 
 
 def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
@@ -541,17 +692,42 @@ def create_app(
         is_https = raw_proto == "https"
         path = request.url.path
 
+        principal: AuthPrincipal | None = None
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.lower().startswith("bearer "):
+            jwt_principal = verify_access_token(auth_header[7:].strip())
+            if jwt_principal is not None and jwt_principal.user_id:
+                live_user = await anyio.to_thread.run_sync(
+                    store.get_user,
+                    jwt_principal.tenant_id,
+                    jwt_principal.user_id,
+                )
+                if live_user is not None:
+                    principal = jwt_principal.model_copy(
+                        update={"role": live_user.role, "email": live_user.email}
+                    )
+                    request.state.auth_tenant_id = principal.tenant_id
+                    request.state.principal = principal
+
         supplied = request.headers.get("X-API-Key", "").strip()
-        auth_tenant: str | None = None
-        if supplied:
-            auth_tenant = await _resolve_api_key_nonblocking(supplied)
-            if auth_tenant is not None:
-                request.state.auth_tenant_id = auth_tenant
+        auth_tenant: str | None = principal.tenant_id if principal is not None else None
+        if principal is None and supplied:
+            resolved_tid = await _resolve_api_key_nonblocking(supplied)
+            if resolved_tid is not None:
+                auth_tenant = resolved_tid
+                principal = AuthPrincipal(
+                    tenant_id=resolved_tid,
+                    role=Role.OWNER,
+                    auth_method="api_key",
+                )
+                request.state.auth_tenant_id = resolved_tid
+                request.state.principal = principal
 
         admin_key = os.environ.get("CYELEC_ADMIN_KEY", "").strip()
         supplied_admin = request.headers.get("X-Admin-Key", "").strip()
         admin_ok = bool(admin_key) and hmac.compare_digest(supplied_admin, admin_key)
 
+        is_public_v1 = path in _PUBLIC_V1_PATHS
         if path.startswith("/v1/admin/"):
             if not admin_key:
                 return JSONResponse(
@@ -565,7 +741,7 @@ def create_app(
                     content={"detail": "Invalid or missing X-Admin-Key."},
                     headers=_security_headers(req_id, is_https=is_https),
                 )
-        elif path.startswith("/v1/"):
+        elif path.startswith("/v1/") and not is_public_v1:
             expected_key = os.environ.get("CYELEC_API_KEY", "").strip()
             auth_required = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip().lower() in (
                 "1",
@@ -573,35 +749,84 @@ def create_app(
                 "yes",
             )
             global_ok = bool(expected_key) and hmac.compare_digest(supplied, expected_key)
+            if global_ok and principal is None:
+                hdr_tid = request.headers.get("X-Tenant-ID", "anonymous").strip() or "anonymous"
+                principal = AuthPrincipal(
+                    tenant_id=hdr_tid,
+                    role=Role.OWNER,
+                    auth_method="global_key",
+                )
+                request.state.principal = principal
 
-            if (expected_key or auth_required) and not (global_ok or auth_tenant is not None):
+            if (expected_key or auth_required) and not (global_ok or principal is not None):
                 return JSONResponse(
                     status_code=401,
-                    content={"detail": "Invalid or missing X-API-Key."},
+                    content={"detail": "Invalid or missing X-API-Key or Bearer token."},
                     headers=_security_headers(req_id, is_https=is_https),
                 )
 
-            # In open public demo mode (staging), block unauthenticated key-issuing / erasure
+            # Enforce Tenant RBAC for authenticated JWT firm seats (Owner / Engineer / Viewer)
+            if principal is not None and principal.auth_method == "jwt":
+                if principal.role == Role.VIEWER and request.method in (
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE",
+                ):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Insufficient role: 'viewer' accounts are read-only."},
+                        headers=_security_headers(req_id, is_https=is_https),
+                    )
+                is_owner_only = (
+                    (request.method == "POST" and path == "/v1/tenants/me/api-key")
+                    or (request.method == "DELETE" and path == "/v1/tenants/me")
+                    or (
+                        path.startswith("/v1/team/members")
+                        and request.method in ("POST", "PATCH", "DELETE")
+                    )
+                    or (
+                        request.method == "POST"
+                        and path in ("/v1/billing/checkout", "/v1/billing/portal")
+                    )
+                )
+                if principal.role != Role.OWNER and is_owner_only:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Insufficient role: 'owner' privileges required."},
+                        headers=_security_headers(req_id, is_https=is_https),
+                    )
+
+            # In open public demo mode (staging), block unauthenticated admin/team/billing mutations
             demo_lock = os.environ.get("CYELEC_DEMO_LOCK_TENANT_MUTATIONS", "").strip().lower() in (
                 "1",
                 "true",
                 "yes",
             )
+            demo_locked_route = (
+                (request.method == "POST" and path == "/v1/tenants/me/api-key")
+                or (request.method == "DELETE" and path == "/v1/tenants/me")
+                or (
+                    path.startswith("/v1/team/members")
+                    and request.method in ("POST", "PATCH", "DELETE")
+                )
+                or (
+                    request.method == "POST"
+                    and path in ("/v1/billing/checkout", "/v1/billing/portal")
+                )
+            )
             if (
                 demo_lock
                 and not auth_required
-                and (
-                    (request.method == "POST" and path == "/v1/tenants/me/api-key")
-                    or (request.method == "DELETE" and path == "/v1/tenants/me")
-                )
-                and not (auth_tenant is not None or global_ok or admin_ok)
+                and demo_locked_route
+                and not (principal is not None or global_ok or admin_ok)
             ):
                 return JSONResponse(
                     status_code=403,
                     content={
                         "detail": (
-                            "Tenant key issuance and erasure require an authenticated X-API-Key "
-                            "or X-Admin-Key in public demo mode."
+                            "Tenant key issuance, team/billing mutations, and erasure require an "
+                            "authenticated X-API-Key, Bearer JWT, or X-Admin-Key in demo mode."
                         )
                     },
                     headers=_security_headers(req_id, is_https=is_https),
@@ -616,6 +841,7 @@ def create_app(
                 path.startswith("/v1/solve/")
                 or path == "/v1/dxf/layers"
                 or path.startswith("/v1/admin/")
+                or path.startswith("/v1/auth/")
                 or path == "/v1/tenants/me/api-key"
                 or "/revisions" in path
             )
@@ -654,15 +880,63 @@ def create_app(
                 )
             q.append(now_mono)
 
+        # Layer-1b guardrail: per-tenant monthly solve quota enforcement
+        is_solve_route = request.method == "POST" and (
+            path.startswith("/v1/solve/") or "/revisions" in path
+        )
+        enforce_quotas = os.environ.get("CYELEC_ENFORCE_QUOTAS", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        quota_tid: str | None = None
+        quota_extra_hdrs: dict[str, str] = {}
+        if is_solve_route:
+            raw_hdr_tid = request.headers.get("X-Tenant-ID", "anonymous").strip() or "anonymous"
+            cand_tid = auth_tenant or raw_hdr_tid
+            if _SAFE_ID_RE.match(cand_tid) and ".." not in cand_tid:
+                quota_tid = cand_tid
+                q_status = await anyio.to_thread.run_sync(store.get_quota_status, quota_tid)
+                quota_extra_hdrs = {
+                    "X-Plan-Tier": q_status.plan_id,
+                    "X-Quota-Limit": str(q_status.solves_limit),
+                    "X-Quota-Used": str(q_status.solves_used),
+                    "X-Quota-Remaining": str(q_status.solves_remaining),
+                }
+                if enforce_quotas and q_status.exceeded:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "detail": (
+                                f"Monthly solve quota exceeded ({q_status.solves_used}/"
+                                f"{q_status.solves_limit} on plan '{q_status.plan_id}' for "
+                                f"{q_status.month_key}). Upgrade plan or contact support."
+                            )
+                        },
+                        headers=_security_headers(
+                            req_id, is_https=is_https, extra=quota_extra_hdrs
+                        ),
+                    )
+
         response = await call_next(request)
+
+        if is_solve_route and quota_tid is not None and 200 <= response.status_code < 300:
+            new_used = await anyio.to_thread.run_sync(
+                store.increment_monthly_solve_count, quota_tid
+            )
+            limit_val = int(quota_extra_hdrs.get("X-Quota-Limit", "500"))
+            quota_extra_hdrs["X-Quota-Used"] = str(new_used)
+            quota_extra_hdrs["X-Quota-Remaining"] = str(max(0, limit_val - new_used))
+
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         ctype = response.headers.get("content-type", "").lower()
         is_html = "text/html" in ctype
+        extra_hdrs = {"X-Process-Time-Ms": f"{elapsed_ms:.1f}", **quota_extra_hdrs}
         sec_hdrs = _security_headers(
             req_id,
             is_html=is_html,
             is_https=is_https,
-            extra={"X-Process-Time-Ms": f"{elapsed_ms:.1f}"},
+            extra=extra_hdrs,
         )
         for hk, hv in sec_hdrs.items():
             response.headers[hk] = hv
@@ -741,6 +1015,8 @@ def create_app(
             ifc_available=is_ifc_available(),
             dwg_available=is_dwg_converter_available(),
             pdf_export_available=is_weasyprint_available(),
+            stripe_configured=is_stripe_configured(),
+            google_sso_configured=bool(os.environ.get("CYELEC_GOOGLE_CLIENT_ID", "").strip()),
             store_backend=store_backend,
         )
 
@@ -1433,6 +1709,348 @@ def create_app(
     ) -> UsageSummary:
         tid = _effective_tenant(request, x_tenant_id)
         return store.get_usage_summary(tid)
+
+    # ==================================================================
+    # Stage 3: Commercial B2B Auth (JWT + Google OIDC), RBAC & Stripe Billing
+    # ==================================================================
+    def _slugify_tenant(name: str) -> str:
+        raw = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")[:32]
+        base = raw or "firm"
+        return f"{base}-{uuid.uuid4().hex[:6]}"
+
+    def _safe_redirect_url(candidate: str, fallback: str) -> str:
+        clean = candidate.strip()
+        if not clean:
+            return fallback
+        if clean.startswith("https://") or clean.startswith("http://localhost"):
+            return clean
+        raise HTTPException(
+            status_code=422, detail="Redirect URL must use https:// (or http://localhost)."
+        )
+
+    @api.post("/v1/auth/register", response_model=AuthTokenResponse, status_code=201)
+    async def auth_register(payload: RegisterRequest) -> AuthTokenResponse:
+        """Self-serve firm registration creating a new tenant workspace and Owner seat."""
+        if os.environ.get("CYELEC_DISABLE_SELF_REGISTER", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            raise HTTPException(status_code=403, detail="Self-serve registration is disabled.")
+        firm = payload.firm_name.strip()
+        if len(firm) < 2:
+            raise HTTPException(status_code=422, detail="firm_name must be at least 2 characters.")
+
+        tid = _slugify_tenant(payload.tenant_id or firm)
+
+        def _do_register() -> tuple[TenantProfile, UserRecord, QuotaStatus]:
+            store.get_or_create_tenant(tid)
+            tenant = store.update_tenant_profile(tid, display_name=firm)
+            tenant = store.update_tenant_billing(tid, plan="free", subscription_status="active")
+            user = store.create_user(
+                tid,
+                payload.email,
+                payload.display_name.strip() or firm,
+                role=Role.OWNER,
+                password=payload.password,
+                auth_provider="password",
+            )
+            quota = store.get_quota_status(tid)
+            return tenant, user, quota
+
+        try:
+            tenant, user, quota = await anyio.to_thread.run_sync(_do_register)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        token = create_access_token(
+            user_id=user.user_id,
+            tenant_id=tenant.tenant_id,
+            email=user.email,
+            role=user.role,
+        )
+        return AuthTokenResponse(
+            access_token=token,
+            user=user,
+            tenant=tenant,
+            quota=quota,
+        )
+
+    @api.post("/v1/auth/login", response_model=AuthTokenResponse)
+    async def auth_login(payload: LoginRequest) -> AuthTokenResponse:
+        """Authenticate an email + password firm member and return a signed HS256 JWT."""
+        user = await anyio.to_thread.run_sync(
+            store.authenticate_user, payload.email, payload.password
+        )
+        if user is None:
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+        tenant = await anyio.to_thread.run_sync(store.get_or_create_tenant, user.tenant_id)
+        quota = await anyio.to_thread.run_sync(store.get_quota_status, user.tenant_id)
+        token = create_access_token(
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            email=user.email,
+            role=user.role,
+        )
+        return AuthTokenResponse(
+            access_token=token,
+            user=user,
+            tenant=tenant,
+            quota=quota,
+        )
+
+    @api.post("/v1/auth/google", response_model=AuthTokenResponse)
+    async def auth_google_sso(payload: GoogleAuthRequest) -> AuthTokenResponse:
+        """Sign in or provision a firm workspace via verified Google OIDC ID token."""
+        client_id = os.environ.get("CYELEC_GOOGLE_CLIENT_ID", "").strip()
+        if not client_id:
+            raise HTTPException(
+                status_code=503,
+                detail="Google OIDC SSO is not enabled (set CYELEC_GOOGLE_CLIENT_ID).",
+            )
+        try:
+            claims = await anyio.to_thread.run_sync(
+                verify_google_id_token, payload.id_token, client_id
+            )
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+        def _find_or_provision() -> tuple[TenantProfile, UserRecord, QuotaStatus]:
+            existing = store.get_user_by_email(claims["email"])
+            if existing is not None:
+                t = store.get_or_create_tenant(existing.tenant_id)
+                return t, existing, store.get_quota_status(existing.tenant_id)
+            firm = payload.firm_name.strip() or f"{claims['name']} Practice"
+            new_tid = _slugify_tenant(firm)
+            store.get_or_create_tenant(new_tid)
+            t = store.update_tenant_profile(new_tid, display_name=firm)
+            t = store.update_tenant_billing(new_tid, plan="free", subscription_status="active")
+            u = store.create_user(
+                new_tid,
+                claims["email"],
+                claims["name"],
+                role=Role.OWNER,
+                password=None,
+                auth_provider="google",
+            )
+            return t, u, store.get_quota_status(new_tid)
+
+        tenant, user, quota = await anyio.to_thread.run_sync(_find_or_provision)
+        token = create_access_token(
+            user_id=user.user_id,
+            tenant_id=tenant.tenant_id,
+            email=user.email,
+            role=user.role,
+        )
+        return AuthTokenResponse(access_token=token, user=user, tenant=tenant, quota=quota)
+
+    @api.get("/v1/auth/me", response_model=AuthMeResponse)
+    def auth_me(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> AuthMeResponse:
+        """Return resolved caller identity, RBAC role, tenant profile, and monthly solve quota."""
+        tid = _effective_tenant(request, x_tenant_id)
+        principal = getattr(request.state, "principal", None)
+        if not isinstance(principal, AuthPrincipal):
+            principal = AuthPrincipal(tenant_id=tid, role=Role.OWNER, auth_method="demo")
+        tenant = store.get_or_create_tenant(tid)
+        quota = store.get_quota_status(tid)
+        return AuthMeResponse(principal=principal, tenant=tenant, quota=quota)
+
+    @api.get("/v1/team/members", response_model=list[UserRecord])
+    def list_team_members(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> list[UserRecord]:
+        tid = _effective_tenant(request, x_tenant_id)
+        return store.list_users(tid)
+
+    @api.post("/v1/team/members", response_model=UserRecord, status_code=201)
+    async def add_team_member(
+        request: Request,
+        payload: AddMemberRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> UserRecord:
+        tid = _effective_tenant(request, x_tenant_id)
+        try:
+            return await anyio.to_thread.run_sync(
+                lambda: store.create_user(
+                    tid,
+                    payload.email,
+                    payload.display_name,
+                    role=payload.role,
+                    password=payload.password,
+                    auth_provider="password",
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @api.patch("/v1/team/members/{user_id}/role", response_model=UserRecord)
+    def update_team_member_role(
+        request: Request,
+        user_id: str,
+        payload: UpdateMemberRoleRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> UserRecord:
+        tid = _effective_tenant(request, x_tenant_id)
+        safe_uid = _validate_safe_id(user_id, "user_id")
+        try:
+            updated = store.update_user_role(tid, safe_uid, payload.role)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Team member not found.")
+        return updated
+
+    @api.delete("/v1/team/members/{user_id}", response_model=MemberDeletedResponse)
+    def remove_team_member(
+        request: Request,
+        user_id: str,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> MemberDeletedResponse:
+        tid = _effective_tenant(request, x_tenant_id)
+        safe_uid = _validate_safe_id(user_id, "user_id")
+        try:
+            deleted = store.delete_user(tid, safe_uid)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Team member not found.")
+        return MemberDeletedResponse(deleted=True, user_id=safe_uid)
+
+    @api.get("/v1/billing/plans", response_model=list[PlanSpec])
+    def list_billing_plans() -> list[PlanSpec]:
+        """Return public Cyprus B2B SaaS subscription tiers, quotas, and seat limits."""
+        return [PLAN_CATALOG[k] for k in ("free", "pilot", "pro", "enterprise")]
+
+    @api.get("/v1/billing/subscription", response_model=SubscriptionStatus)
+    def get_my_subscription(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> SubscriptionStatus:
+        tid = _effective_tenant(request, x_tenant_id)
+        tenant = store.get_or_create_tenant(tid)
+        plan = resolve_plan_spec(tenant.plan)
+        quota = store.get_quota_status(tid)
+        seats_used = len(store.list_users(tid))
+        return SubscriptionStatus(
+            tenant_id=tid,
+            plan=plan,
+            subscription_status=tenant.subscription_status,
+            stripe_customer_id=tenant.stripe_customer_id,
+            stripe_subscription_id=tenant.stripe_subscription_id,
+            stripe_configured=is_stripe_configured(),
+            seats_used=seats_used,
+            seats_limit=plan.max_seats,
+            quota=quota,
+        )
+
+    @api.post("/v1/billing/checkout", response_model=CheckoutSessionResponse)
+    async def create_billing_checkout(
+        request: Request,
+        payload: CheckoutRequest,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> CheckoutSessionResponse:
+        tid = _effective_tenant(request, x_tenant_id)
+        plan_id = payload.plan_id.strip().lower()
+        if plan_id not in ("pilot", "pro", "enterprise"):
+            raise HTTPException(
+                status_code=422, detail="plan_id must be 'pilot', 'pro', or 'enterprise'."
+            )
+        tenant = store.get_or_create_tenant(tid)
+        base = _safe_base_url(request) or "https://localhost"
+        success_url = _safe_redirect_url(payload.success_url, f"{base}/?billing=success")
+        cancel_url = _safe_redirect_url(payload.cancel_url, f"{base}/?billing=cancel")
+        principal = getattr(request.state, "principal", None)
+        cust_email = principal.email if isinstance(principal, AuthPrincipal) else None
+
+        try:
+            sess = await anyio.to_thread.run_sync(
+                lambda: create_stripe_checkout_session(
+                    tenant_id=tid,
+                    plan_id=plan_id,
+                    success_url=success_url,
+                    cancel_url=cancel_url,
+                    customer_email=cust_email,
+                    stripe_customer_id=tenant.stripe_customer_id,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        return CheckoutSessionResponse(
+            session_id=sess["session_id"],
+            checkout_url=sess["checkout_url"],
+        )
+
+    @api.post("/v1/billing/portal", response_model=PortalSessionResponse)
+    async def create_billing_portal(
+        request: Request,
+        x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
+    ) -> PortalSessionResponse:
+        tid = _effective_tenant(request, x_tenant_id)
+        tenant = store.get_or_create_tenant(tid)
+        if not tenant.stripe_customer_id:
+            raise HTTPException(
+                status_code=400, detail="No active Stripe billing profile for this tenant yet."
+            )
+        base = _safe_base_url(request) or "https://localhost"
+        try:
+            sess = await anyio.to_thread.run_sync(
+                lambda: create_stripe_portal_session(
+                    stripe_customer_id=tenant.stripe_customer_id or "",
+                    return_url=f"{base}/",
+                )
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return PortalSessionResponse(portal_url=sess["portal_url"])
+
+    @api.post("/v1/billing/webhook", response_model=StripeWebhookOutcome)
+    async def stripe_billing_webhook(request: Request) -> StripeWebhookOutcome:
+        """Verify Stripe-Signature HMAC-SHA256 webhook and update tenant subscription atomically."""
+        webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
+        if not webhook_secret:
+            raise HTTPException(
+                status_code=503,
+                detail="Stripe webhooks disabled (STRIPE_WEBHOOK_SECRET not set).",
+            )
+        raw_body = await request.body()
+        sig_hdr = request.headers.get("Stripe-Signature", "").strip()
+        if not verify_stripe_signature(raw_body, sig_hdr, webhook_secret):
+            raise HTTPException(status_code=400, detail="Invalid Stripe-Signature header.")
+        try:
+            event = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON webhook body.") from exc
+        if not isinstance(event, dict):
+            raise HTTPException(status_code=400, detail="Invalid Stripe event payload.")
+        return await anyio.to_thread.run_sync(process_stripe_event, event, store)
+
+    @api.put("/v1/admin/tenants/{tenant_id}/plan", response_model=TenantProfile)
+    def admin_update_tenant_plan(
+        tenant_id: str,
+        payload: AdminUpdatePlanRequest,
+    ) -> TenantProfile:
+        """Admin-only manual B2B plan & monthly quota override (requires X-Admin-Key)."""
+        safe_tid = _validate_safe_id(tenant_id, "tenant_id")
+        plan_id = payload.plan_id.strip().lower()
+        if plan_id not in PLAN_CATALOG:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown plan_id '{plan_id}'. Use: {', '.join(PLAN_CATALOG)}.",
+            )
+        return store.update_tenant_billing(
+            safe_tid,
+            plan=plan_id,
+            subscription_status=payload.subscription_status,
+            monthly_quota_override=payload.monthly_quota_override,
+            clear_quota_override=payload.clear_quota_override,
+        )
 
     return api
 

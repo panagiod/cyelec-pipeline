@@ -129,9 +129,10 @@ def evaluate_budget_notification(
     region: str,
     target_services: list[str],
     gate_ratio: float = 0.90,
+    gate_mode: str = "pause_ingress",
     pause_fn: Callable[[str, str, str], dict[str, Any]] = pause_cloud_run_service,
 ) -> BudgetGateResult:
-    """Evaluate a GCP budget notification and pause target services if spend >= gate threshold."""
+    """Evaluate a GCP budget notification and pause target services (or log alert_only)."""
     threshold_amount = round(notif.budgetAmount * gate_ratio, 4)
     ratio_exceeded = notif.costAmount >= threshold_amount - 1e-9
     alert_exceeded = (
@@ -142,6 +143,16 @@ def evaluate_budget_notification(
     if not (ratio_exceeded or alert_exceeded):
         return BudgetGateResult(
             action="noop_within_budget",
+            cost_amount=notif.costAmount,
+            budget_amount=notif.budgetAmount,
+            currency=notif.currencyCode,
+            gate_threshold_amount=threshold_amount,
+            paused_services=[],
+        )
+
+    if gate_mode.strip().lower() == "alert_only":
+        return BudgetGateResult(
+            action="alert_only_logged",
             cost_amount=notif.costAmount,
             budget_amount=notif.budgetAmount,
             currency=notif.currencyCode,
@@ -182,7 +193,11 @@ def create_budget_gate_app(
 
     @gate_api.get("/health")
     def gate_health() -> dict[str, str]:
-        return {"status": "ok", "service": "cyelec-budget-gate"}
+        return {
+            "status": "ok",
+            "service": "cyelec-budget-gate",
+            "mode": os.environ.get("CYELEC_BUDGET_GATE_MODE", "pause_ingress").strip(),
+        }
 
     @gate_api.post("/pubsub/budget", response_model=BudgetGateResult)
     def handle_budget_pubsub(envelope: PubSubPushEnvelope) -> BudgetGateResult:
@@ -203,6 +218,7 @@ def create_budget_gate_app(
         raw_targets = os.environ.get("CYELEC_GATE_TARGET_SERVICES", "cyelec-staging,cyelec-prod")
         targets = [s.strip() for s in raw_targets.split(",") if s.strip()]
         gate_ratio = float(os.environ.get("CYELEC_BUDGET_GATE_RATIO", "0.90"))
+        gate_mode = os.environ.get("CYELEC_BUDGET_GATE_MODE", "pause_ingress").strip()
 
         if not project_id:
             raise HTTPException(
@@ -215,6 +231,7 @@ def create_budget_gate_app(
             region=region,
             target_services=targets,
             gate_ratio=gate_ratio,
+            gate_mode=gate_mode,
             pause_fn=pause_fn,
         )
 

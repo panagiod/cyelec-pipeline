@@ -16,13 +16,14 @@ locals {
 # 1. Dedicated Named Firestore Native Database (europe-west1, €0 idle)
 # ----------------------------------------------------------------------
 resource "google_firestore_database" "workspace" {
-  project                     = var.project_id
-  name                        = local.firestore_db_name
-  location_id                 = var.region
-  type                        = "FIRESTORE_NATIVE"
-  concurrency_mode            = "OPTIMISTIC"
-  app_engine_integration_mode = "DISABLED"
-  delete_protection_state     = local.is_prod ? "DELETE_PROTECTION_ENABLED" : "DELETE_PROTECTION_DISABLED"
+  project                           = var.project_id
+  name                              = local.firestore_db_name
+  location_id                       = var.region
+  type                              = "FIRESTORE_NATIVE"
+  concurrency_mode                  = "OPTIMISTIC"
+  app_engine_integration_mode       = "DISABLED"
+  delete_protection_state           = local.is_prod ? "DELETE_PROTECTION_ENABLED" : "DELETE_PROTECTION_DISABLED"
+  point_in_time_recovery_enablement = local.is_prod && var.enable_pitr ? "POINT_IN_TIME_RECOVERY_ENABLED" : "POINT_IN_TIME_RECOVERY_DISABLED"
 }
 
 # ----------------------------------------------------------------------
@@ -38,7 +39,20 @@ resource "google_storage_bucket" "revision_blobs" {
   force_destroy               = !local.is_prod
 
   versioning {
-    enabled = false
+    enabled = local.is_prod
+  }
+
+  dynamic "lifecycle_rule" {
+    for_each = local.is_prod ? [1] : []
+    content {
+      condition {
+        days_since_noncurrent_time = 30
+        num_newer_versions         = 5
+      }
+      action {
+        type = "Delete"
+      }
+    }
   }
 
   labels = {
@@ -93,8 +107,32 @@ resource "google_secret_manager_secret_iam_member" "prod_admin_key_accessor" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+# Optional Commercial GA Secret Manager bindings (Stripe API key, Stripe webhook secret, dedicated JWT key)
+locals {
+  optional_secret_bindings = local.is_prod ? merge(
+    var.stripe_secret_id != "" ? { "STRIPE_SECRET_KEY" = var.stripe_secret_id } : {},
+    var.stripe_webhook_secret_id != "" ? { "STRIPE_WEBHOOK_SECRET" = var.stripe_webhook_secret_id } : {},
+    var.jwt_secret_id != "" ? { "CYELEC_JWT_SECRET" = var.jwt_secret_id } : {},
+  ) : {}
+
+  optional_plain_envs = merge(
+    var.google_client_id != "" ? { "CYELEC_GOOGLE_CLIENT_ID" = var.google_client_id } : {},
+    var.stripe_price_pilot != "" ? { "STRIPE_PRICE_PILOT" = var.stripe_price_pilot } : {},
+    var.stripe_price_pro != "" ? { "STRIPE_PRICE_PRO" = var.stripe_price_pro } : {},
+    var.stripe_price_enterprise != "" ? { "STRIPE_PRICE_ENTERPRISE" = var.stripe_price_enterprise } : {},
+  )
+}
+
+resource "google_secret_manager_secret_iam_member" "optional_secret_accessor" {
+  for_each  = local.optional_secret_bindings
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 # ----------------------------------------------------------------------
-# 4. Cloud Run v2 Service (min_instances=0 -> €0.00/mo idle, tight burst cap)
+# 4. Cloud Run v2 Service (min_instances=0 default -> €0.00/mo idle; prod_min_instances=1 for Commercial GA)
 # ----------------------------------------------------------------------
 resource "google_cloud_run_v2_service" "api" {
   project  = var.project_id
@@ -108,7 +146,7 @@ resource "google_cloud_run_v2_service" "api" {
     max_instance_request_concurrency = var.concurrency
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = local.is_prod ? var.prod_min_instances : 0
       max_instance_count = local.effective_max_instances
     }
 
@@ -160,6 +198,18 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "CYELEC_RATE_LIMIT_RPM"
         value = tostring(local.effective_rate_limit)
       }
+      env {
+        name  = "CYELEC_ENFORCE_QUOTAS"
+        value = "1"
+      }
+
+      dynamic "env" {
+        for_each = local.optional_plain_envs
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
 
       dynamic "env" {
         for_each = local.is_prod ? [1] : []
@@ -168,6 +218,19 @@ resource "google_cloud_run_v2_service" "api" {
           value_source {
             secret_key_ref {
               secret  = data.google_secret_manager_secret.prod_admin_key[0].secret_id
+              version = "latest"
+            }
+          }
+        }
+      }
+
+      dynamic "env" {
+        for_each = local.optional_secret_bindings
+        content {
+          name = env.key
+          value_source {
+            secret_key_ref {
+              secret  = env.value
               version = "latest"
             }
           }
@@ -201,6 +264,7 @@ resource "google_cloud_run_v2_service" "api" {
     google_project_iam_member.firestore_user,
     google_storage_bucket_iam_member.blobs_admin,
     google_secret_manager_secret_iam_member.prod_admin_key_accessor,
+    google_secret_manager_secret_iam_member.optional_secret_accessor,
   ]
 }
 
@@ -214,9 +278,9 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
 }
 
 # ----------------------------------------------------------------------
-# 5. Layer-2 Automated €10/mo Budget Hard Gate (prod-managed, least-privilege)
+# 5. Layer-2 Automated €10/mo Budget Gate (prod-managed, least-privilege)
 #    Billing Budget -> Pub/Sub -> cyelec-budget-gate Cloud Run (OIDC auth)
-#    Pauses cyelec-staging & cyelec-prod ingress at 90% (€9) safely!
+#    mode='pause_ingress' (€10 hard cap) or 'alert_only' (Commercial GA)
 # ----------------------------------------------------------------------
 resource "google_pubsub_topic" "budget_gate" {
   count   = local.is_prod ? 1 : 0
@@ -319,6 +383,10 @@ resource "google_cloud_run_v2_service" "budget_gate" {
         value = var.budget_gate_ratio
       }
       env {
+        name  = "CYELEC_BUDGET_GATE_MODE"
+        value = var.budget_gate_mode
+      }
+      env {
         name  = "CYELEC_EXPECTED_SUBSCRIPTION"
         value = "projects/${var.project_id}/subscriptions/cyelec-budget-gate-push"
       }
@@ -371,3 +439,97 @@ resource "google_pubsub_subscription" "budget_gate_push" {
     google_service_account_iam_member.pubsub_token_creator,
   ]
 }
+
+# ----------------------------------------------------------------------
+# 6. Optional Commercial Custom Domain Mapping (prod only, var.custom_domain)
+# ----------------------------------------------------------------------
+resource "google_cloud_run_domain_mapping" "custom" {
+  count    = local.is_prod && var.custom_domain != "" ? 1 : 0
+  project  = var.project_id
+  location = var.region
+  name     = var.custom_domain
+
+  metadata {
+    namespace = var.project_id
+  }
+
+  spec {
+    route_name = google_cloud_run_v2_service.api.name
+  }
+}
+
+# ----------------------------------------------------------------------
+# 7. Optional Cloud Monitoring HTTPS Uptime Check & Ops Alert Policy (prod only)
+#    Enable via CYELEC_ALERT_EMAIL repo var (requires monitoring.googleapis.com
+#    and roles/monitoring.editor on cyelec-gh-deployer from bootstrap_wif.sh)
+# ----------------------------------------------------------------------
+resource "google_monitoring_uptime_check_config" "prod_health" {
+  count        = local.is_prod && (var.enable_monitoring || var.alert_email != "") ? 1 : 0
+  project      = var.project_id
+  display_name = "CyElec Prod /health HTTPS Uptime"
+  timeout      = "10s"
+  period       = "300s"
+
+  http_check {
+    path         = "/health"
+    port         = 443
+    use_ssl      = true
+    validate_ssl = true
+    accepted_response_status_codes {
+      status_class = "STATUS_CLASS_2XX"
+    }
+  }
+
+  monitored_resource {
+    type = "uptime_url"
+    labels = {
+      project_id = var.project_id
+      host       = trimprefix(google_cloud_run_v2_service.api.uri, "https://")
+    }
+  }
+
+  content_matchers {
+    content = "\"status\":\"ok\""
+    matcher = "CONTAINS_STRING"
+  }
+}
+
+resource "google_monitoring_notification_channel" "ops_email" {
+  count        = local.is_prod && var.alert_email != "" ? 1 : 0
+  project      = var.project_id
+  display_name = "CyElec Production Ops Email"
+  type         = "email"
+  labels = {
+    email_address = var.alert_email
+  }
+}
+
+resource "google_monitoring_alert_policy" "prod_uptime" {
+  count                 = local.is_prod && (var.enable_monitoring || var.alert_email != "") ? 1 : 0
+  project               = var.project_id
+  display_name          = "CyElec Prod Uptime Check Failed"
+  combiner              = "OR"
+  notification_channels = var.alert_email != "" ? [google_monitoring_notification_channel.ops_email[0].name] : []
+
+  conditions {
+    display_name = "Prod /health HTTPS check failing"
+    condition_threshold {
+      filter          = "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND resource.type=\"uptime_url\" AND metric.labels.check_id=\"${google_monitoring_uptime_check_config.prod_health[0].uptime_check_id}\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 1
+
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_NEXT_OLDER"
+        cross_series_reducer = "REDUCE_COUNT_FALSE"
+        group_by_fields      = ["resource.label.host"]
+      }
+
+      trigger {
+        count = 1
+      }
+    }
+  }
+}
+

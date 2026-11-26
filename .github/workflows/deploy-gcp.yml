@@ -84,7 +84,18 @@ jobs:
             -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
             -var="region=${GCP_REGION}" \
             -var="environment=${{ steps.target.outputs.env }}" \
-            -var="image_uri=${{ steps.target.outputs.image_uri }}"
+            -var="image_uri=${{ steps.target.outputs.image_uri }}" \
+            -var="prod_min_instances=${{ vars.CYELEC_PROD_MIN_INSTANCES || '0' }}" \
+            -var="budget_gate_mode=${{ vars.CYELEC_BUDGET_GATE_MODE || 'pause_ingress' }}" \
+            -var="alert_email=${{ vars.CYELEC_ALERT_EMAIL || '' }}" \
+            -var="custom_domain=${{ vars.CYELEC_CUSTOM_DOMAIN || '' }}" \
+            -var="google_client_id=${{ vars.CYELEC_GOOGLE_CLIENT_ID || '' }}" \
+            -var="stripe_secret_id=${{ vars.CYELEC_STRIPE_SECRET_ID || '' }}" \
+            -var="stripe_webhook_secret_id=${{ vars.CYELEC_STRIPE_WEBHOOK_SECRET_ID || '' }}" \
+            -var="stripe_price_pilot=${{ vars.CYELEC_STRIPE_PRICE_PILOT || '' }}" \
+            -var="stripe_price_pro=${{ vars.CYELEC_STRIPE_PRICE_PRO || '' }}" \
+            -var="stripe_price_enterprise=${{ vars.CYELEC_STRIPE_PRICE_ENTERPRISE || '' }}" \
+            -var="jwt_secret_id=${{ vars.CYELEC_JWT_SECRET_ID || '' }}"
           SERVICE_URL="$(terraform output -raw service_url)"
           echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
         id: tf

@@ -226,7 +226,165 @@ def render_electrical_layout_dxf(
         ).set_placement((panel_x + _s(150.0), cur_y))
         cur_y -= _s(max(320.0, h * 2.4))
 
+    # 5. ISO A3 (1:50) / A1 (1:100) Paper-Space Sheet Layout with Scale Bar & North Arrow
+    _add_iso_paper_space_sheet(doc, result, inv_scale=inv_scale)
     return doc
+
+
+def _add_iso_paper_space_sheet(
+    doc: Drawing,
+    result: Phase2DesignResult,
+    *,
+    inv_scale: float = 1.0,
+) -> None:
+    """Create a print-ready ISO A3 (1:50) or ISO A1 (1:100) paper-space tab with DXF VIEWPORT."""
+    rooms = result.design.building.rooms
+    all_pts = [p for r in rooms for p in r.polygon_mm]
+    if not all_pts:
+        return
+
+    raw_minx = min(p.x_mm for p in all_pts)
+    raw_maxx = max(p.x_mm for p in all_pts)
+    raw_miny = min(p.y_mm for p in all_pts)
+    raw_maxy = max(p.y_mm for p in all_pts)
+    span_x_mm = max(1000.0, raw_maxx - raw_minx)
+    span_y_mm = max(1000.0, raw_maxy - raw_miny)
+
+    # Choose ISO A3 (420x297 mm @ 1:50) for <= 16m spans, else ISO A1 (841x594 mm @ 1:100)
+    if span_x_mm <= 16_000.0 and span_y_mm <= 12_000.0:
+        sheet_label = "ISO A3"
+        sheet_w, sheet_h = 420.0, 297.0
+        scale_denom = 50
+        tab_name = "EAC-A3-1-50"
+    else:
+        sheet_label = "ISO A1"
+        sheet_w, sheet_h = 841.0, 594.0
+        scale_denom = 100
+        tab_name = "EAC-A1-1-100"
+
+    if tab_name in doc.layouts:
+        doc.layouts.delete(tab_name)
+    psp = doc.layouts.new(tab_name)
+    psp.page_setup(
+        size=(sheet_w, sheet_h),
+        margins=(10.0, 10.0, 10.0, 10.0),
+        units="mm",
+    )
+
+    margin = 10.0
+    inner_x0, inner_y0 = margin, margin
+    inner_x1, inner_y1 = sheet_w - margin, sheet_h - margin
+
+    # Outer sheet boundary & printable margin frame (all Paper-Space coordinates in mm)
+    psp.add_lwpolyline(
+        [(0.0, 0.0), (sheet_w, 0.0), (sheet_w, sheet_h), (0.0, sheet_h)],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+    psp.add_lwpolyline(
+        [
+            (inner_x0, inner_y0),
+            (inner_x1, inner_y0),
+            (inner_x1, inner_y1),
+            (inner_x0, inner_y1),
+        ],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+
+    # Bottom-right Cyprus EAC / ETEK Title Block (175 mm x 58 mm)
+    tb_w, tb_h = 175.0, 58.0
+    tb_x0 = inner_x1 - tb_w
+    tb_y0 = inner_y0
+    psp.add_lwpolyline(
+        [
+            (tb_x0, tb_y0),
+            (inner_x1, tb_y0),
+            (inner_x1, tb_y0 + tb_h),
+            (tb_x0, tb_y0 + tb_h),
+        ],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+    for dy in (14.0, 28.0, 42.0):
+        psp.add_line((tb_x0, tb_y0 + dy), (inner_x1, tb_y0 + dy), dxfattribs={"layer": "E-TITLE"})
+
+    eac = result.design.eac_compliance
+    br = result.design.branding
+    firm = br.firm_name if br and br.firm_name else "ETEK LICENSED PRACTICE"
+    eng = br.engineer_name if br and br.engineer_name else "ETEK REVIEW PENDING"
+    reg = br.etek_reg_no if br and br.etek_reg_no else "ETEK-E"
+    tb_rows = [
+        (tb_y0 + 48.0, f"EAC / ETEK ELECTRICAL LAYOUT  |  {sheet_label} @ 1:{scale_denom}", 3.4),
+        (tb_y0 + 34.0, f"PROJECT: {result.design.building.project_name[:40]}", 2.8),
+        (
+            tb_y0 + 19.0,
+            f"SUPPLY: {eac.recommended_supply_tier} | {result.design.earthing_system.value}",
+            2.5,
+        ),
+        (tb_y0 + 5.0, f"FIRM: {firm[:20]} | ENG: {eng[:14]} ({reg[:20]}) | E-101", 2.2),
+    ]
+    for ty, txt, h in tb_rows:
+        psp.add_text(txt, dxfattribs={"layer": "E-TITLE", "height": h}).set_placement(
+            (tb_x0 + 4.0, ty)
+        )
+
+    # Graphical Metric Scale Bar (bottom-left of paper sheet: 0 .. 1m .. 2m .. 5m)
+    sb_x0 = inner_x0 + 12.0
+    sb_y0 = inner_y0 + 12.0
+    mm_per_m = 1000.0 / float(scale_denom)  # 20 mm/m at 1:50; 10 mm/m at 1:100
+    bar_len = 5.0 * mm_per_m
+    psp.add_lwpolyline(
+        [
+            (sb_x0, sb_y0),
+            (sb_x0 + bar_len, sb_y0),
+            (sb_x0 + bar_len, sb_y0 + 3.0),
+            (sb_x0, sb_y0 + 3.0),
+        ],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+    for m_tick in (0, 1, 2, 5):
+        tx = sb_x0 + m_tick * mm_per_m
+        psp.add_line((tx, sb_y0), (tx, sb_y0 + 4.5), dxfattribs={"layer": "E-TITLE"})
+        psp.add_text(f"{m_tick}m", dxfattribs={"layer": "E-TITLE", "height": 2.4}).set_placement(
+            (tx - 1.5, sb_y0 + 6.0)
+        )
+    psp.add_text(
+        f"SCALE 1:{scale_denom} (METRIC)", dxfattribs={"layer": "E-TITLE", "height": 2.6}
+    ).set_placement((sb_x0, sb_y0 - 5.0))
+
+    # North Arrow (top-right inside margin)
+    nx, ny = inner_x1 - 18.0, inner_y1 - 20.0
+    psp.add_circle((nx, ny), radius=7.0, dxfattribs={"layer": "E-TITLE"})
+    psp.add_lwpolyline(
+        [(nx, ny + 7.0), (nx - 3.0, ny - 5.0), (nx, ny - 2.0), (nx + 3.0, ny - 5.0)],
+        close=True,
+        dxfattribs={"layer": "E-TITLE"},
+    )
+    psp.add_text("N", dxfattribs={"layer": "E-TITLE", "height": 3.5}).set_placement(
+        (nx - 1.5, ny + 8.5)
+    )
+
+    # Scaled DXF Paper-Space VIEWPORT centered on modelspace floorplan + E-* layers
+    vp_w = (inner_x1 - inner_x0) - 20.0
+    vp_h = (inner_y1 - (tb_y0 + tb_h)) - 14.0
+    vp_cx = (inner_x0 + inner_x1) / 2.0
+    vp_cy = (tb_y0 + tb_h) + (vp_h / 2.0) + 6.0
+    model_cx = ((raw_minx + raw_maxx) / 2.0) * inv_scale
+    model_cy = ((raw_miny + raw_maxy) / 2.0) * inv_scale
+    # Modelspace view height in model units corresponding to paper viewport height at 1:scale_denom
+    view_height_model = max(
+        (vp_h * float(scale_denom)) * inv_scale,
+        (span_y_mm * 1.25) * inv_scale,
+    )
+    psp.add_viewport(
+        center=(vp_cx, vp_cy),
+        size=(vp_w, vp_h),
+        view_center_point=(model_cx, model_cy),
+        view_height=view_height_model,
+        dxfattribs={"layer": "E-TITLE"},
+    )
 
 
 def export_electrical_layout_dxf(
@@ -235,7 +393,7 @@ def export_electrical_layout_dxf(
     *,
     source_dxf_path: Path | None = None,
 ) -> Path:
-    """Write annotated Phase 2 electrical overlay R2018 DXF file."""
+    """Write annotated Phase 2 electrical overlay R2018 DXF file with ISO A3/A1 paper sheet."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     doc = render_electrical_layout_dxf(result, source_dxf_path=source_dxf_path)
     doc.saveas(str(out_path))

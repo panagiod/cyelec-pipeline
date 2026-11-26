@@ -542,6 +542,86 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
 
         _autosize_columns(ws3, max_width=52)
 
+    # ==================================================================
+    # Sheet 4: Cyprus EAC Plan Approval & Supply Application Schedule
+    # ==================================================================
+    ws4 = wb.create_sheet(title="EAC Application")
+    ws4.views.sheetView[0].showGridLines = True
+    ws4.page_setup.orientation = ws4.ORIENTATION_PORTRAIT
+    ws4.page_setup.paperSize = ws4.PAPERSIZE_A4
+
+    ws4["A1"] = "CYPRUS EAC (ΑΗΚ) PLAN APPROVAL & ELECTRICAL SUPPLY APPLICATION SCHEDULE"
+    ws4["A1"].font = _TITLE_FONT
+    ws4["A2"] = (
+        f"Project: {result.building.project_name} | "
+        f"Input SHA-256: {result.provenance.input_sha256[:20]}"
+    )
+    ws4["A2"].font = _BODY_FONT
+
+    app_headers = ["Section", "Parameter (EN)", "Παράμετρος (EL)", "Declared Value / Status"]
+    for c_idx, title in enumerate(app_headers, start=1):
+        cell = ws4.cell(row=4, column=c_idx, value=title)
+        cell.font = _HEADER_FONT
+        cell.fill = _NAVY_FILL
+        cell.border = _CELL_BORDER
+
+    eac = result.eac_compliance
+    br = result.branding
+    pb = result.phase_balance
+    firm_str = br.firm_name if br and br.firm_name else "[Firm Name]"
+    eng_str = br.engineer_name if br and br.engineer_name else "[Engineer]"
+    etek_str = br.etek_reg_no if br and br.etek_reg_no else "[ETEK-E-XXXX]"
+    kva_str = f"{eac.total_connected_kva:.2f} / {eac.total_diversified_kva:.2f} kVA"
+    peak_str = (
+        f"{pb.max_phase_current_a:.2f} A ({pb.imbalance_pct:.2f}%)"
+        if pb
+        else f"{eac.max_phase_demand_a:.2f} A (1P)"
+    )
+    ct_str = "REQUIRED" if eac.ct_metering_required else "Direct"
+    sub_str = (
+        "MANDATORY"
+        if eac.substation_consultation_required
+        else ("WARNING" if eac.substation_warning else "N/A")
+    )
+    earth_str = f"{result.earthing_system.value} ({result.ze_or_ra_ohm:.2f} Ω)"
+    pv_str = (
+        f"{result.building.pv_capacity_kva:g} kVA"
+        if result.building.pv_capacity_kva > 0
+        else "None"
+    )
+    ev_str = (
+        f"{result.building.ev_charger_kw:g} kW"
+        if result.building.ev_charger_kw > 0
+        else "None"
+    )
+    app_rows: list[tuple[str, str, str, str]] = [
+        ("A. Premises", "Building Classification", "Κατηγορία Κτιρίου",
+         result.building.building_type.value),
+        ("A. Premises", "Total Floor Area (m²)", "Συνολικό Εμβαδόν",
+         f"{result.building.total_floor_area_m2:.2f} m²"),
+        ("A. Premises", "District / Plot No.", "Επαρχία / Αρ. Τεμαχίου",
+         "[Complete before EAC filing]"),
+        ("B. ETEK", "Consulting Firm", "Μελετητικό Γραφείο", firm_str),
+        ("B. ETEK", "Lead Engineer", "Ηλεκτρολόγος Μηχανικός", eng_str),
+        ("B. ETEK", "ETEK Reg. No.", "Αρ. Μητρώου ΕΤΕΚ", etek_str),
+        ("C. Supply", "Requested EAC Tier", "Αιτούμενη Παροχή ΑΗΚ", eac.recommended_supply_tier),
+        ("C. Supply", "Connected / Diversified kVA", "Εγκατεστημένη / Ταυτόχρονη", kva_str),
+        ("C. Supply", "Peak Phase Current", "Μέγιστο Ρεύμα Φάσης", peak_str),
+        ("C. Supply", "CT Metering (>100 A/ph)", "Θάλαμος Μετρητών CT", ct_str),
+        ("C. Supply", "Substation (>=150 kVA)", "Υποσταθμός ΑΗΚ", sub_str),
+        ("C. Supply", "Earthing & Ze/Ra", "Σύστημα Γείωσης", earth_str),
+        ("D. Systems", "PV Capacity (kVA)", "Φωτοβολταϊκά (Φ/Β)", pv_str),
+        ("D. Systems", "EV Charger (Sec 722)", "Φορτιστής EV", ev_str),
+        ("E. Sign-Off", "ETEK Statutory Stamp", "Σφραγίδα & Υπογραφή ΕΤΕΚ",
+         "REQUIRED BEFORE EAC SUBMISSION"),
+    ]
+    for app_r_idx, app_row in enumerate(app_rows, start=5):
+        for app_c_idx, app_val in enumerate(app_row, start=1):
+            c = ws4.cell(row=app_r_idx, column=app_c_idx, value=app_val)
+            c.font = _BOLD_FONT if app_c_idx == 2 else _BODY_FONT
+            c.border = _CELL_BORDER
+    _autosize_columns(ws4, max_width=46)
+
     wb.save(str(out_path))
     return out_path
 

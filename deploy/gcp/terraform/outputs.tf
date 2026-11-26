@@ -22,3 +22,13 @@ output "budget_gate_pubsub_topic" {
   description = "Pub/Sub topic ID wired to the €10/mo Cloud Run ingress hard gate (prod state)."
   value       = local.is_prod ? google_pubsub_topic.budget_gate[0].id : ""
 }
+
+output "firestore_pitr_enabled" {
+  description = "Whether 7-day continuous Firestore PITR is enabled on this environment."
+  value       = local.is_prod && var.enable_pitr
+}
+
+output "custom_domain" {
+  description = "Mapped custom domain for cyelec-prod (empty until var.custom_domain is set)."
+  value       = local.is_prod ? var.custom_domain : ""
+}

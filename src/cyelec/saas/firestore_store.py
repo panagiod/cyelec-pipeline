@@ -15,6 +15,7 @@ Designed for 100% GCP EU (europe-west1) scale-to-zero Cloud Run deployments:
 from __future__ import annotations
 
 import gzip
+import hashlib
 import os
 import uuid
 from datetime import UTC, datetime
@@ -28,7 +29,16 @@ from cyelec.models.electrical import (
     TenantBranding,
 )
 from cyelec.models.spatial import Phase2DesignResult
-from cyelec.saas.auth import extract_key_prefix, generate_api_key, hash_api_key, verify_api_key
+from cyelec.saas.auth import (
+    Role,
+    extract_key_prefix,
+    generate_api_key,
+    hash_api_key,
+    hash_password,
+    verify_api_key,
+    verify_password,
+)
+from cyelec.saas.billing import QuotaStatus, current_month_key, resolve_plan_spec
 from cyelec.saas.store import (
     ProjectSummary,
     RevisionRecord,
@@ -36,6 +46,7 @@ from cyelec.saas.store import (
     TenantExportBundle,
     TenantProfile,
     UsageSummary,
+    UserRecord,
     WorkspaceStore,
     WorkspaceStoreProtocol,
 )
@@ -164,6 +175,17 @@ class FirestoreWorkspaceStore:
     def _tenant_ref(self, tenant_id: str) -> Any:
         return self._db.collection("tenants").document(self._safe_id(tenant_id, "tenant_id"))
 
+    def _users_col(self, tenant_id: str) -> Any:
+        return self._tenant_ref(tenant_id).collection("users")
+
+    def _email_index_ref(self, norm_email: str) -> Any:
+        ehash = hashlib.sha256(norm_email.encode("utf-8")).hexdigest()[:32]
+        return self._db.collection("user_emails").document(ehash)
+
+    def _quota_ref(self, tenant_id: str, month_key: str) -> Any:
+        safe_mk = self._safe_id(month_key, "month_key")
+        return self._tenant_ref(tenant_id).collection("meta").document(f"quota_{safe_mk}")
+
     def _projects_col(self, tenant_id: str) -> Any:
         return self._tenant_ref(tenant_id).collection("projects")
 
@@ -187,14 +209,38 @@ class FirestoreWorkspaceStore:
             if data.get("boq_rate_overrides_json")
             else None
         )
+        raw_qo = data.get("monthly_quota_override")
         return TenantProfile(
             tenant_id=str(data["tenant_id"]),
             display_name=str(data["display_name"]),
             plan=str(data.get("plan", "pro_cyprus")),
+            subscription_status=str(data.get("subscription_status", "active")),
+            stripe_customer_id=(
+                str(data["stripe_customer_id"]) if data.get("stripe_customer_id") else None
+            ),
+            stripe_subscription_id=(
+                str(data["stripe_subscription_id"])
+                if data.get("stripe_subscription_id")
+                else None
+            ),
+            monthly_quota_override=int(raw_qo) if raw_qo is not None else None,
             report_language=ReportLanguage(str(data.get("report_language", "en"))),
             branding=branding,
             boq_rate_overrides=boq_rates,
             has_api_key=bool(data.get("api_key_hash")),
+            created_at=str(data["created_at"]),
+            updated_at=str(data["updated_at"]),
+        )
+
+    @staticmethod
+    def _doc_to_user(data: dict[str, Any]) -> UserRecord:
+        return UserRecord(
+            user_id=str(data["user_id"]),
+            tenant_id=str(data["tenant_id"]),
+            email=str(data["email"]),
+            display_name=str(data["display_name"]),
+            role=Role(str(data.get("role", "engineer"))),
+            auth_provider=str(data.get("auth_provider", "password")),
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
         )
@@ -248,6 +294,10 @@ class FirestoreWorkspaceStore:
             "tenant_id": tenant_id,
             "display_name": tenant_id,
             "plan": "pro_cyprus",
+            "subscription_status": "active",
+            "stripe_customer_id": None,
+            "stripe_subscription_id": None,
+            "monthly_quota_override": None,
             "report_language": ReportLanguage.EN.value,
             "branding_json": None,
             "boq_rate_overrides_json": None,
@@ -639,11 +689,263 @@ class FirestoreWorkspaceStore:
         )
 
     # ------------------------------------------------------------------
+    # Stage 3: Billing, Team Users/RBAC & Atomic Monthly Solve Quotas
+    # ------------------------------------------------------------------
+    def update_tenant_billing(
+        self,
+        tenant_id: str,
+        *,
+        plan: str | None = None,
+        subscription_status: str | None = None,
+        stripe_customer_id: str | None = None,
+        stripe_subscription_id: str | None = None,
+        monthly_quota_override: int | None = None,
+        clear_quota_override: bool = False,
+    ) -> TenantProfile:
+        current = self.get_or_create_tenant(tenant_id)
+        now = _utc_now()
+        updates: dict[str, Any] = {
+            "plan": plan if plan is not None else current.plan,
+            "subscription_status": (
+                subscription_status
+                if subscription_status is not None
+                else current.subscription_status
+            ),
+            "stripe_customer_id": (
+                stripe_customer_id
+                if stripe_customer_id is not None
+                else current.stripe_customer_id
+            ),
+            "stripe_subscription_id": (
+                stripe_subscription_id
+                if stripe_subscription_id is not None
+                else current.stripe_subscription_id
+            ),
+            "monthly_quota_override": (
+                None
+                if clear_quota_override
+                else (
+                    monthly_quota_override
+                    if monthly_quota_override is not None
+                    else current.monthly_quota_override
+                )
+            ),
+            "updated_at": now,
+        }
+        self._tenant_ref(tenant_id).set(updates, merge=True)
+        return self.get_or_create_tenant(tenant_id)
+
+    def find_tenant_by_stripe_customer(self, stripe_customer_id: str) -> str | None:
+        if not stripe_customer_id:
+            return None
+        query = self._db.collection("tenants").where(
+            "stripe_customer_id", "==", stripe_customer_id.strip()
+        )
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            tid = str(data.get("tenant_id", "")).strip()
+            if tid:
+                return tid
+        return None
+
+    def create_user(
+        self,
+        tenant_id: str,
+        email: str,
+        display_name: str,
+        *,
+        role: Role = Role.ENGINEER,
+        password: str | None = None,
+        auth_provider: str = "password",
+    ) -> UserRecord:
+        norm_email = email.strip().lower()
+        if not norm_email or "@" not in norm_email:
+            raise ValueError("A valid email address is required.")
+        tenant = self.get_or_create_tenant(tenant_id)
+        plan_spec = resolve_plan_spec(tenant.plan)
+        if len(self.list_users(tenant_id)) >= plan_spec.max_seats:
+            raise ValueError(
+                f"Seat limit reached ({plan_spec.max_seats} seats on plan '{plan_spec.plan_id}'). "
+                "Upgrade plan to add more firm seats."
+            )
+
+        idx_ref = self._email_index_ref(norm_email)
+        if idx_ref.get().exists:
+            raise ValueError("An account with this email already exists.")
+
+        pw_hash: str | None = None
+        pw_salt: str | None = None
+        if password is not None:
+            pw_hash, pw_salt = hash_password(password)
+        elif auth_provider == "password":
+            raise ValueError("Password is required for password-based accounts.")
+
+        uid = f"usr_{uuid.uuid4().hex[:12]}"
+        now = _utc_now()
+        user_doc: dict[str, Any] = {
+            "user_id": uid,
+            "tenant_id": tenant_id,
+            "email": norm_email,
+            "display_name": display_name.strip() or norm_email.split("@", 1)[0],
+            "role": role.value,
+            "auth_provider": auth_provider,
+            "password_hash": pw_hash,
+            "password_salt": pw_salt,
+            "created_at": now,
+            "updated_at": now,
+        }
+        batch = self._db.batch()
+        batch.set(self._users_col(tenant_id).document(uid), user_doc)
+        batch.set(
+            idx_ref,
+            {"email": norm_email, "tenant_id": tenant_id, "user_id": uid, "created_at": now},
+        )
+        batch.commit()
+        return self._doc_to_user(user_doc)
+
+    def authenticate_user(self, email: str, password: str) -> UserRecord | None:
+        norm_email = email.strip().lower()
+        if not norm_email or not password:
+            return None
+        idx_snap = self._email_index_ref(norm_email).get()
+        if not idx_snap.exists:
+            return None
+        idx = idx_snap.to_dict() or {}
+        tid = str(idx.get("tenant_id", "")).strip()
+        uid = str(idx.get("user_id", "")).strip()
+        if not tid or not uid:
+            return None
+        u_snap = self._users_col(tid).document(uid).get()
+        if not u_snap.exists:
+            return None
+        data = u_snap.to_dict() or {}
+        pw_hash = str(data.get("password_hash") or "")
+        pw_salt = str(data.get("password_salt") or "")
+        if not pw_hash or not pw_salt:
+            return None
+        if not verify_password(password, pw_hash, pw_salt):
+            return None
+        return self._doc_to_user(data)
+
+    def get_user_by_email(self, email: str) -> UserRecord | None:
+        norm_email = email.strip().lower()
+        if not norm_email:
+            return None
+        idx_snap = self._email_index_ref(norm_email).get()
+        if not idx_snap.exists:
+            return None
+        idx = idx_snap.to_dict() or {}
+        tid = str(idx.get("tenant_id", "")).strip()
+        uid = str(idx.get("user_id", "")).strip()
+        if not tid or not uid:
+            return None
+        return self.get_user(tid, uid)
+
+    def get_user(self, tenant_id: str, user_id: str) -> UserRecord | None:
+        snap = self._users_col(tenant_id).document(self._safe_id(user_id, "user_id")).get()
+        if not snap.exists:
+            return None
+        return self._doc_to_user(snap.to_dict() or {})
+
+    def list_users(self, tenant_id: str) -> list[UserRecord]:
+        users = [
+            self._doc_to_user(snap.to_dict() or {})
+            for snap in self._users_col(tenant_id).stream()
+        ]
+        users.sort(key=lambda u: u.created_at)
+        return users
+
+    def update_user_role(
+        self, tenant_id: str, user_id: str, role: Role
+    ) -> UserRecord | None:
+        ref = self._users_col(tenant_id).document(self._safe_id(user_id, "user_id"))
+        snap = ref.get()
+        if not snap.exists:
+            return None
+        cur = self._doc_to_user(snap.to_dict() or {})
+        if cur.role == Role.OWNER and role != Role.OWNER:
+            owners = [u for u in self.list_users(tenant_id) if u.role == Role.OWNER]
+            if len(owners) <= 1:
+                raise ValueError("Cannot demote the last remaining owner of a tenant.")
+        ref.set({"role": role.value, "updated_at": _utc_now()}, merge=True)
+        return self.get_user(tenant_id, user_id)
+
+    def delete_user(self, tenant_id: str, user_id: str) -> bool:
+        ref = self._users_col(tenant_id).document(self._safe_id(user_id, "user_id"))
+        snap = ref.get()
+        if not snap.exists:
+            return False
+        cur = self._doc_to_user(snap.to_dict() or {})
+        if cur.role == Role.OWNER:
+            owners = [u for u in self.list_users(tenant_id) if u.role == Role.OWNER]
+            if len(owners) <= 1:
+                raise ValueError("Cannot remove the last remaining owner of a tenant.")
+        self._batch_delete_refs([ref, self._email_index_ref(cur.email)])
+        return True
+
+    def get_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int:
+        mk = month_key or current_month_key()
+        snap = self._quota_ref(tenant_id, mk).get()
+        if not snap.exists:
+            return 0
+        data = snap.to_dict() or {}
+        return int(data.get("solve_count", 0))
+
+    def increment_monthly_solve_count(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> int:
+        self.get_or_create_tenant(tenant_id)
+        mk = month_key or current_month_key()
+        q_ref = self._quota_ref(tenant_id, mk)
+        now = _utc_now()
+        if hasattr(self._db, "transaction"):
+            from google.cloud import firestore
+
+            q_ref.set(
+                {
+                    "month_key": mk,
+                    "solve_count": firestore.Increment(1),
+                    "updated_at": now,
+                },
+                merge=True,
+            )
+            return self.get_monthly_solve_count(tenant_id, mk)
+        cur = self.get_monthly_solve_count(tenant_id, mk)
+        nxt = cur + 1
+        q_ref.set({"month_key": mk, "solve_count": nxt, "updated_at": now}, merge=True)
+        return nxt
+
+    def get_quota_status(
+        self, tenant_id: str, month_key: str | None = None
+    ) -> QuotaStatus:
+        mk = month_key or current_month_key()
+        tenant = self.get_or_create_tenant(tenant_id)
+        plan_spec = resolve_plan_spec(tenant.plan)
+        limit = (
+            tenant.monthly_quota_override
+            if tenant.monthly_quota_override is not None
+            else plan_spec.monthly_solve_quota
+        )
+        used = self.get_monthly_solve_count(tenant_id, mk)
+        return QuotaStatus(
+            tenant_id=tenant_id,
+            plan_id=plan_spec.plan_id,
+            month_key=mk,
+            solves_used=used,
+            solves_limit=limit,
+            solves_remaining=max(0, limit - used),
+            exceeded=used >= limit,
+        )
+
+    # ------------------------------------------------------------------
     # EU GDPR Articles 17 & 20: Portability Export & Full Cascade Erasure
     # ------------------------------------------------------------------
     def export_tenant_data(self, tenant_id: str) -> TenantExportBundle:
-        """GDPR Article 20 portable JSON export for a tenant (excludes API key secrets)."""
+        """GDPR Article 20 portable JSON export for a tenant (excludes secrets & hashes)."""
         tenant = self.get_or_create_tenant(tenant_id)
+        members = self.list_users(tenant_id)
         projects = self.list_projects(tenant_id)
         revisions_by_project: dict[str, list[RevisionRecord]] = {}
         for proj in projects:
@@ -657,6 +959,7 @@ class FirestoreWorkspaceStore:
         return TenantExportBundle(
             exported_at_utc=_utc_now(),
             tenant=tenant,
+            members=members,
             projects=projects,
             revisions_by_project=revisions_by_project,
             usage=usage,
@@ -673,9 +976,20 @@ class FirestoreWorkspaceStore:
         # Belt-and-suspenders sweep of any remaining GCS blobs under this tenant's prefix
         self._blobs.delete_prefix(f"tenants/{tenant_id}/")
 
+        user_refs: list[Any] = []
+        for u_snap in self._users_col(tenant_id).stream():
+            u_data = u_snap.to_dict() or {}
+            email = str(u_data.get("email", "")).strip().lower()
+            if email:
+                user_refs.append(self._email_index_ref(email))
+            user_refs.append(u_snap.reference)
+        self._batch_delete_refs(user_refs)
+
+        meta_refs = [m_snap.reference for m_snap in t_ref.collection("meta").stream()]
+        self._batch_delete_refs(meta_refs)
+
         usage_refs = [evt_snap.reference for evt_snap in self._usage_col(tenant_id).stream()]
         self._batch_delete_refs(usage_refs)
-        self._usage_summary_ref(tenant_id).delete()
 
         if existed:
             t_ref.delete()

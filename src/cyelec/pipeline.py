@@ -558,6 +558,7 @@ def export_phase3_deliverables(
     export_pdf: bool = False,
 ) -> dict[str, Path]:
     """Write complete EAC pack: Phase 1/2 outputs + SLD SVG/DXF/QET + cover HTML + manifest."""
+    from cyelec.render.eac_forms import export_eac_application_form
     from cyelec.render.eac_pack import (
         render_eac_submission_pack_html,
         write_deliverables_manifest,
@@ -568,6 +569,9 @@ def export_phase3_deliverables(
     from cyelec.render.sld import export_sld_deliverables
 
     outputs = export_phase2_deliverables(result, out_dir)
+
+    eac_form_outputs = export_eac_application_form(result, out_dir, export_pdf=export_pdf)
+    outputs.update(eac_form_outputs)
 
     floorplan_svg_path = out_dir / "floorplan_overlay.svg"
     floorplan_svg_text = render_floorplan_svg(result)

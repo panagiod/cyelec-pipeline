@@ -515,7 +515,72 @@ def render_etek_workbench_html(
             <span id="wsStatus" style="color:var(--muted);"></span>
           </div>
           <div id="revListBox" style="margin-bottom:12px;"></div>
-          <div id="revDiffBox"></div>
+          <div id="revDiffBox" style="margin-bottom:14px;"></div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+                      gap:12px;border-top:1px solid var(--border);padding-top:12px;">
+            <div class="panel" style="margin:0;">
+              <h2>Firm Sign In / Self-Serve Registration (JWT)</h2>
+              <div id="authBadge" style="font-size:11.5px;color:var(--muted);margin-bottom:6px;">
+                Not signed in via JWT (using X-API-Key or Demo mode).
+              </div>
+              <input id="authFirm" placeholder="Firm Name (for new signup)"
+                style="margin-bottom:6px;" />
+              <input id="authEmail" type="email" placeholder="Work Email"
+                style="margin-bottom:6px;" />
+              <input id="authPass" type="password" placeholder="Password (min 8 chars)"
+                style="margin-bottom:8px;" />
+              <div class="fp-toolbar" style="margin:0;">
+                <button class="btn btn-primary btn-sm" onclick="firmLogin()">Sign In</button>
+                <button class="btn btn-secondary btn-sm" onclick="firmRegister()">
+                  Register Firm
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="firmLogout()">Sign Out</button>
+              </div>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>Plan, Monthly Solve Quota &amp; Stripe Billing</h2>
+              <div id="subBox" style="font-size:12px;margin-bottom:8px;color:var(--muted);">
+                Click Refresh Billing to inspect plan &amp; monthly solves.
+              </div>
+              <div class="fp-toolbar" style="margin:0;">
+                <button class="btn btn-secondary btn-sm" onclick="loadSubscriptionAndTeam()">
+                  Refresh Billing &amp; Team
+                </button>
+                <button class="btn btn-primary btn-sm" onclick="startCheckout('pilot')">
+                  Pilot €29/mo
+                </button>
+                <button class="btn btn-primary btn-sm" onclick="startCheckout('pro')">
+                  Pro €99/mo
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="openBillingPortal()">
+                  Billing Portal
+                </button>
+              </div>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>Firm Team Seats (Owner / Engineer / Viewer)</h2>
+              <div id="teamBox" style="font-size:11.5px;margin-bottom:8px;color:var(--muted);">
+                No firm seats loaded.
+              </div>
+              <input id="memEmail" type="email" placeholder="Member Email"
+                style="margin-bottom:4px;" />
+              <input id="memName" placeholder="Full Name" style="margin-bottom:4px;" />
+              <div class="row2" style="margin-bottom:6px;">
+                <input id="memPass" type="password" placeholder="Temp Password (8+)" />
+                <select id="memRole">
+                  <option value="engineer">Engineer</option>
+                  <option value="viewer">Viewer (Read-Only)</option>
+                  <option value="owner">Co-Owner</option>
+                </select>
+              </div>
+              <button class="btn btn-secondary btn-sm" onclick="addTeamMember()">
+                Add Team Seat (Owner)
+              </button>
+            </div>
+          </div>
         </div>
 
         <div id="tabGuide" class="tab-pane">
@@ -855,6 +920,9 @@ def render_etek_workbench_html(
 
     function authHeaders(isJson) {{
       const h = {{ 'X-Tenant-ID': document.getElementById('tenantId').value || 'anonymous' }};
+      let jwt = '';
+      try {{ jwt = (sessionStorage.getItem('cyelec_jwt') || '').trim(); }} catch (_) {{}}
+      if (jwt) h['Authorization'] = `Bearer ${{jwt}}`;
       const key = (document.getElementById('apiKeyInput').value || '').trim();
       if (key) h['X-API-Key'] = key;
       if (isJson) h['Content-Type'] = 'application/json';
@@ -1207,6 +1275,122 @@ def render_etek_workbench_html(
           <th>Circuit</th><th>Change</th><th>Rev ${{a}}</th><th>Rev ${{b}}</th>
         </tr></thead><tbody>${{cRows || '<tr><td colspan="4">No circuit deltas.</td></tr>'}}
         </tbody></table>`;
+    }}
+
+    async function firmRegister() {{
+      const st = document.getElementById('wsStatus');
+      const body = {{
+        firm_name: document.getElementById('authFirm').value.trim(),
+        email: document.getElementById('authEmail').value.trim(),
+        password: document.getElementById('authPass').value,
+        display_name: document.getElementById('authFirm').value.trim()
+      }};
+      const resp = await fetch('/v1/auth/register', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body)
+      }});
+      if (!resp.ok) {{ st.textContent = `Register failed: ${{await resp.text()}}`; return; }}
+      const data = await resp.json();
+      try {{ sessionStorage.setItem('cyelec_jwt', data.access_token); }} catch (_) {{}}
+      document.getElementById('tenantId').value = data.tenant.tenant_id;
+      document.getElementById('authBadge').textContent =
+        `Signed in: ${{data.user.email}} (${{data.user.role.toUpperCase()}})`;
+      st.textContent = `Registered firm ${{data.tenant.display_name}}.`;
+      await loadSubscriptionAndTeam();
+    }}
+
+    async function firmLogin() {{
+      const st = document.getElementById('wsStatus');
+      const body = {{
+        email: document.getElementById('authEmail').value.trim(),
+        password: document.getElementById('authPass').value
+      }};
+      const resp = await fetch('/v1/auth/login', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(body)
+      }});
+      if (!resp.ok) {{ st.textContent = `Sign in failed: ${{await resp.text()}}`; return; }}
+      const data = await resp.json();
+      try {{ sessionStorage.setItem('cyelec_jwt', data.access_token); }} catch (_) {{}}
+      document.getElementById('tenantId').value = data.tenant.tenant_id;
+      document.getElementById('authBadge').textContent =
+        `Signed in: ${{data.user.email}} (${{data.user.role.toUpperCase()}})`;
+      st.textContent = `Welcome back, ${{data.user.display_name}}.`;
+      await loadSubscriptionAndTeam();
+    }}
+
+    function firmLogout() {{
+      try {{ sessionStorage.removeItem('cyelec_jwt'); }} catch (_) {{}}
+      document.getElementById('authBadge').textContent = 'Signed out of JWT session.';
+      document.getElementById('wsStatus').textContent = 'Signed out.';
+    }}
+
+    async function loadSubscriptionAndTeam() {{
+      const subBox = document.getElementById('subBox');
+      const teamBox = document.getElementById('teamBox');
+      const sResp = await fetch('/v1/billing/subscription', {{ headers: authHeaders(false) }});
+      if (sResp.ok) {{
+        const s = await sResp.json();
+        const q = s.quota;
+        subBox.innerHTML = `<strong>${{escapeHtml(s.plan.display_name)}}</strong>
+          (<code>${{escapeHtml(s.plan.plan_id)}}</code> · ${{escapeHtml(s.subscription_status)}})
+          <br/>Monthly Solves (${{escapeHtml(q.month_key)}}):
+          <strong>${{q.solves_used}} / ${{q.solves_limit}}</strong>
+          &nbsp;|&nbsp; Seats: <strong>${{s.seats_used}} / ${{s.seats_limit}}</strong>`;
+      }}
+      const tResp = await fetch('/v1/team/members', {{ headers: authHeaders(false) }});
+      if (tResp.ok) {{
+        const members = await tResp.json();
+        teamBox.innerHTML = members.length
+          ? members.map(m =>
+              `<div><code>${{escapeHtml(m.role)}}</code> — ${{escapeHtml(m.email)}}
+               (${{escapeHtml(m.display_name)}})</div>`
+            ).join('')
+          : 'No user accounts registered on this tenant yet.';
+      }}
+    }}
+
+    async function addTeamMember() {{
+      const st = document.getElementById('wsStatus');
+      const body = {{
+        email: document.getElementById('memEmail').value.trim(),
+        display_name: document.getElementById('memName').value.trim(),
+        password: document.getElementById('memPass').value,
+        role: document.getElementById('memRole').value
+      }};
+      const resp = await fetch('/v1/team/members', {{
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify(body)
+      }});
+      if (!resp.ok) {{ st.textContent = `Add seat failed: ${{await resp.text()}}`; return; }}
+      st.textContent = `Added ${{body.role}} seat for ${{body.email}}.`;
+      await loadSubscriptionAndTeam();
+    }}
+
+    async function startCheckout(planId) {{
+      const st = document.getElementById('wsStatus');
+      const resp = await fetch('/v1/billing/checkout', {{
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({{ plan_id: planId }})
+      }});
+      if (!resp.ok) {{ st.textContent = `Checkout unavailable: ${{await resp.text()}}`; return; }}
+      const data = await resp.json();
+      if (data.checkout_url) window.open(data.checkout_url, '_blank', 'noopener');
+    }}
+
+    async function openBillingPortal() {{
+      const st = document.getElementById('wsStatus');
+      const resp = await fetch('/v1/billing/portal', {{
+        method: 'POST',
+        headers: authHeaders(false)
+      }});
+      if (!resp.ok) {{ st.textContent = `Portal unavailable: ${{await resp.text()}}`; return; }}
+      const data = await resp.json();
+      if (data.portal_url) window.open(data.portal_url, '_blank', 'noopener');
     }}
 
     window.addEventListener('DOMContentLoaded', () => {{
