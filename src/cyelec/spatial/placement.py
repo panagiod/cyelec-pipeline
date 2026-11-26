@@ -727,11 +727,30 @@ def place_electrical_devices(
 
     # 6. EAC Meter Cabinet & TT Earth Inspection Pit Site Markers on exterior wall nearest DB
     if building.rooms:
+        if building.sub_boards:
+            primary_floor = next(
+                (sb.floor for sb in building.sub_boards if sb.floor == "GF"),
+                building.sub_boards[0].floor,
+            )
+            primary_rooms = [
+                r for r in building.rooms if r.floor == primary_floor
+            ] or building.rooms
+            primary_polys = [
+                Polygon([(p.x_mm, p.y_mm) for p in r.polygon_mm]) for r in primary_rooms
+            ]
+            site_union = unary_union(primary_polys)
+            site_outer = site_union.boundary
+            site_centroid = site_union.centroid
+            ref_room_id = primary_rooms[0].id
+        else:
+            site_outer = outer_ring
+            site_centroid = unary_union(all_room_polys).centroid
+            ref_room_id = building.rooms[0].id
+
         db_pt = Point(building.db_anchor.location_mm.x_mm, building.db_anchor.location_mm.y_mm)
-        ext_pt = nearest_points(outer_ring, db_pt)[0]
-        bldg_centroid = unary_union(all_room_polys).centroid
-        out_dx = float(ext_pt.x) - float(bldg_centroid.x)
-        out_dy = float(ext_pt.y) - float(bldg_centroid.y)
+        ext_pt = nearest_points(site_outer, db_pt)[0]
+        out_dx = float(ext_pt.x) - float(site_centroid.x)
+        out_dy = float(ext_pt.y) - float(site_centroid.y)
         out_norm = max(math.hypot(out_dx, out_dy), 1.0)
         ux, uy = out_dx / out_norm, out_dy / out_norm
         mtr_loc = Point2D(
@@ -742,7 +761,6 @@ def place_electrical_devices(
             x_mm=round(float(ext_pt.x) + ux * 700.0 - uy * 350.0, 1),
             y_mm=round(float(ext_pt.y) + uy * 700.0 + ux * 350.0, 1),
         )
-        ref_room_id = building.rooms[0].id
         devices.append(
             PlacedDevice(
                 device_id=_next_dev("MTR"),

@@ -160,19 +160,30 @@ def build_conduit_graph(
             continue
         device_nodes[dev.device_id] = _attach_node_to_graph(graph, dev.location_mm, kind="device")
 
-    # 4. Ensure global connectivity if any disconnected components exist (e.g. detached outbuilding)
-    components = list(nx.connected_components(graph))
-    if len(components) > 1:
-        main_comp = next((c for c in components if db_node in c), components[0])
-        for comp in components:
-            if comp is main_comp:
-                continue
-            best_pair = min(
-                ((u, v) for u in main_comp for v in comp),
-                key=lambda pair: _dist_m(pair[0], pair[1]),
-            )
-            _add_weighted_edge(graph, best_pair[0], best_pair[1], penalty=1.25, kind="bridge")
-            main_comp = main_comp | comp
+    # 4. Ensure global connectivity via closest-pair MST (keeps intra-floor detached rooms local
+    # before bridging across wide empty gaps between side-by-side floor clusters)
+    components = [set(c) for c in nx.connected_components(graph)]
+    while len(components) > 1:
+        best_dist = float("inf")
+        best_i, best_j = 0, 1
+        best_pair: tuple[tuple[int, int], tuple[int, int]] | None = None
+        for i in range(len(components)):
+            for j in range(i + 1, len(components)):
+                pair = min(
+                    ((u, v) for u in components[i] for v in components[j]),
+                    key=lambda p: _dist_m(p[0], p[1]),
+                )
+                d = _dist_m(pair[0], pair[1])
+                if d < best_dist:
+                    best_dist = d
+                    best_i, best_j = i, j
+                    best_pair = pair
+        if best_pair is None:
+            break
+        bridge_pen = 5.0 if best_dist > 1.5 else 1.25
+        _add_weighted_edge(graph, best_pair[0], best_pair[1], penalty=bridge_pen, kind="bridge")
+        components[best_i] = components[best_i] | components[best_j]
+        components.pop(best_j)
 
     return graph, db_node, device_nodes
 

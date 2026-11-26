@@ -764,7 +764,8 @@ def render_electrical_layout_dxf(
     )
 
     # For multi-floor buildings, also create one dedicated true-scale print sheet per floor!
-    distinct_floors = sorted({r.floor for r in all_rooms})
+    sb_order = [sb.floor for sb in result.design.building.sub_boards]
+    distinct_floors = list(dict.fromkeys([*sb_order, *(r.floor for r in all_rooms)]))
     if len(distinct_floors) >= 2:
         for f_idx, flr in enumerate(distinct_floors, start=1):
             flr_rooms = [r for r in all_rooms if r.floor == flr]

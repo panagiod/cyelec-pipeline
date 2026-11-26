@@ -20,6 +20,7 @@ from ezdxf.filemanagement import readfile as read_dxf
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import polygonize, snap, unary_union
 
+from cyelec.ingest.plan_splitter import split_side_by_side_plans
 from cyelec.ingest.room_classifier import (
     RoomClassifierFallback,
     classify_room_label,
@@ -505,6 +506,7 @@ def ingest_dxf(
     pv_capacity_kva: float = 0.0,
     tier2_fallback: RoomClassifierFallback | None = None,
     layer_mapping: DxfLayerMapping | None = None,
+    auto_split_multi_plan: bool = True,
 ) -> tuple[BuildingModel, list[ReviewFlag]]:
     """Ingest a DXF floorplan into a validated BuildingModel plus ingestion ReviewFlags."""
     if not dxf_path.is_file():
@@ -879,6 +881,7 @@ def ingest_dxf(
 
     rooms: list[Room] = []
     room_poly_pairs: list[tuple[str, Polygon]] = []
+    room_flags_by_id: dict[str, list[ReviewFlag]] = defaultdict(list)
     tmpl_std = std.room_templates
 
     for idx, poly in enumerate(room_raw_polys, start=1):
@@ -958,7 +961,7 @@ def ingest_dxf(
                     best_label, best_cls = next(
                         c for c in candidates if c[1].normalized_type == pref
                     )
-                    flags.append(
+                    room_flags_by_id[rid].append(
                         ReviewFlag(
                             code="OPEN_PLAN_MULTI_LABEL_ROOM",
                             severity=ReviewSeverity.INFO,
@@ -980,7 +983,7 @@ def ingest_dxf(
             cls_res = best_cls
         else:
             raw_label = f"Unnamed Room {idx}"
-            flags.append(
+            room_flags_by_id[rid].append(
                 ReviewFlag(
                     code="ROOM_LABEL_MISSING",
                     severity=ReviewSeverity.WARNING,
@@ -999,7 +1002,7 @@ def ingest_dxf(
             )
 
         if cls_res.flag is not None and inside_texts:
-            flags.append(cls_res.flag)
+            room_flags_by_id[rid].append(cls_res.flag)
 
         rt = tmpl_std.rooms[cls_res.normalized_type]
         ring_coords = list(poly.exterior.coords)[:-1]
@@ -1024,6 +1027,67 @@ def ingest_dxf(
                 fixtures=[],
             )
         )
+
+    # Automatic side-by-side / stacked multi-plan cluster splitting & non-floor sheet exclusion
+    sub_boards: list[SubBoardSpec] = []
+    auto_split_db_anchor: DistributionBoardAnchor | None = None
+    excluded_room_ids: set[str] = set()
+    room_id_remap: dict[str, str] = {r.id: r.id for r in rooms}
+    did_auto_split_floors = False
+
+    if auto_split_multi_plan:
+        split_res = split_side_by_side_plans(
+            rooms=rooms,
+            room_poly_pairs=room_poly_pairs,
+            text_labels=text_labels,
+            db_points=db_points,
+        )
+        rooms = split_res.rooms
+        room_poly_pairs = split_res.room_poly_pairs
+        room_raw_polys = [poly for _rid, poly in room_poly_pairs]
+        sub_boards = split_res.sub_boards
+        auto_split_db_anchor = split_res.db_anchor
+        excluded_room_ids = split_res.excluded_room_ids
+        room_id_remap = split_res.room_id_remap
+        did_auto_split_floors = split_res.did_split_floors
+
+        if split_res.did_exclude_non_floor and room_raw_polys:
+            retained_union = unary_union(room_raw_polys)
+            wall_lines = [
+                (p0, p1)
+                for p0, p1 in wall_lines
+                if retained_union.distance(
+                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
+                )
+                <= 1000.0
+            ]
+            door_arcs = [
+                arc
+                for arc in door_arcs
+                if retained_union.distance(Point(arc[0].x_mm, arc[0].y_mm)) <= 1000.0
+            ]
+            window_lines = [
+                (p0, p1)
+                for p0, p1 in window_lines
+                if retained_union.distance(
+                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
+                )
+                <= 1000.0
+            ]
+
+    for old_rid, r_flags in room_flags_by_id.items():
+        if old_rid in excluded_room_ids:
+            continue
+        new_rid = room_id_remap.get(old_rid, old_rid)
+        for rf in r_flags:
+            if new_rid != old_rid and f"Room {old_rid} " in rf.message:
+                updated_msg = rf.message.replace(f"Room {old_rid} ", f"Room {new_rid} ")
+                flags.append(rf.model_copy(update={"message": updated_msg}))
+            else:
+                flags.append(rf)
+
+    if auto_split_multi_plan:
+        flags.extend(split_res.flags)
 
     rooms_by_id = {r.id: r for r in rooms}
 
@@ -1126,7 +1190,9 @@ def ingest_dxf(
         )
 
     # Distribution Board Anchor
-    if db_points:
+    if auto_split_db_anchor is not None:
+        db_anchor = auto_split_db_anchor
+    elif db_points:
         db_id = "DB1"
         for label, _ in db_points:
             if label and label != "DB1":
@@ -1174,7 +1240,17 @@ def ingest_dxf(
             )
         )
 
-    resolved_type = building_type or _infer_building_type(rooms)
+    inferred_type = _infer_building_type(rooms)
+    if building_type is not None:
+        resolved_type = building_type
+    elif did_auto_split_floors and inferred_type not in (
+        BuildingType.OFFICE,
+        BuildingType.SHOP,
+        BuildingType.WORKSHOP,
+    ):
+        resolved_type = BuildingType.INDEPENDENT_HOUSE
+    else:
+        resolved_type = inferred_type
     total_area = round(sum(r.area_m2 for r in rooms), 4)
 
     model = BuildingModel(
@@ -1187,6 +1263,7 @@ def ingest_dxf(
         doors=doors,
         windows=windows,
         db_anchor=db_anchor,
+        sub_boards=sub_boards,
         pv_capacity_kva=pv_capacity_kva,
         source_file=str(dxf_path),
         source_sha256=sha256,
@@ -1237,6 +1314,7 @@ def ingest_multi_floor_dxf(
             building_type=building_type,
             tier2_fallback=tier2_fallback,
             layer_mapping=layer_mapping,
+            auto_split_multi_plan=False,
         )
         hasher.update(f"{floor}:{f_model.source_sha256 or ''}".encode())
         combined_flags.extend(f_flags)
