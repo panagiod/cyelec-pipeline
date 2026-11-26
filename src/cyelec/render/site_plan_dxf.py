@@ -331,6 +331,22 @@ def render_site_plan_dxf(result: Phase2DesignResult) -> Drawing:
     return doc
 
 
+def _wrap_svg_bullet(text: str, max_chars: int = 52) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if len(cand) <= max_chars or not cur:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = f"  {w}"
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def render_site_plan_svg(result: Phase2DesignResult) -> str:
     """Render E-104 Site Works, Trenching, Earthing & IEC 62305-2 LPS sheet as vector SVG."""
     d = result.design
@@ -343,23 +359,31 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
     lps_ad = f"{lps.collection_area_ad_m2:.0f} m²" if lps else "N/A"
     lps_color = "#c53030" if (lps and lps.lps_required) else "#2f855a"
     eth_title = info["earthing_type"].replace("_", " ").title()
-    w_s = 'style="fill:#fff;font-size:9px;font-weight:700;"'
-    w_sm = 'style="fill:#fff;font-size:8.5px;font-weight:700;"'
+    w_s = 'class="wlbl"'
+    w_sm = 'class="wsm"'
+
+    verdict_lines = _wrap_svg_bullet(f"• Verdict: {lps_verdict}", max_chars=52)
+    spd_lines = _wrap_svg_bullet(f"• Surge Protection: {lps_spd}", max_chars=54)
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 740" width="1120" height="740">',
-        "  <style>",
-        '    text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
-        "    .hdr { font-size: 15px; font-weight: 700; fill: #1b365d; }",
-        "    .sub { font-size: 10.5px; fill: #4a5568; }",
-        "    .sec { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
-        "    .lbl { font-size: 9.5px; font-weight: 600; }",
-        "    .txt { font-size: 9.5px; fill: #2d3748; }",
-        "  </style>",
-        '  <rect x="0" y="0" width="1120" height="740" fill="#ffffff" />',
         (
-            '  <rect x="14" y="14" width="1092" height="712" '
+            '<svg xmlns="http://www.w3.org/2000/svg" class="cy-e104" '
+            'viewBox="0 0 1120 755" width="1120" height="755">'
+        ),
+        "  <style>",
+        '    .cy-e104 text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
+        "    .cy-e104 .hdr { font-size: 15px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e104 .sub { font-size: 10.5px; fill: #4a5568; }",
+        "    .cy-e104 .sec { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e104 .lbl { font-size: 9.5px; font-weight: 600; }",
+        "    .cy-e104 .txt { font-size: 9.3px; fill: #2d3748; }",
+        "    .cy-e104 .wlbl { font-size: 9px; font-weight: 700; fill: #ffffff; }",
+        "    .cy-e104 .wsm { font-size: 8.5px; font-weight: 700; fill: #ffffff; }",
+        "  </style>",
+        '  <rect x="0" y="0" width="1120" height="755" fill="#ffffff" />',
+        (
+            '  <rect x="14" y="14" width="1092" height="727" '
             'fill="none" stroke="#1b365d" stroke-width="2" />'
         ),
         (
@@ -373,19 +397,19 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
         ),
         '  <line x1="14" y1="68" x2="1106" y2="68" stroke="#cbd5e0" stroke-width="1.5" />',
         (
-            '  <rect x="42" y="94" width="620" height="530" fill="#f7fafc" '
+            '  <rect x="42" y="94" width="620" height="538" fill="#f7fafc" '
             'stroke="#4a5568" stroke-width="2" stroke-dasharray="10,4" />'
         ),
         (
-            f'  <text x="52" y="112" class="lbl" fill="#4a5568">'
+            f'  <text x="52" y="112" class="lbl" style="fill:#4a5568;">'
             f'PLOT BOUNDARY ({info["plot_w"]}m x {info["plot_l"]}m) — VERIFY ON SITE PLAN</text>'
         ),
         (
-            '  <rect x="42" y="638" width="620" height="66" '
+            '  <rect x="42" y="646" width="620" height="68" '
             'fill="#edf2f7" stroke="#a0aec0" stroke-width="1.5" />'
         ),
         (
-            '  <text x="352" y="675" text-anchor="middle" class="sec">'
+            '  <text x="352" y="684" text-anchor="middle" class="sec">'
             "PUBLIC STREET — EAC (AHK) LV NETWORK &amp; CYTA FIBER CORRIDOR</text>"
         ),
         (
@@ -403,7 +427,7 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
         if info["earthing_type"] == "foundation_ring"
         else "",
         (
-            '  <text x="148" y="188" class="lbl" fill="#2f855a">'
+            '  <text x="148" y="188" class="lbl" style="fill:#2f855a;">'
             "FOUNDATION / RING EARTH ELECTRODE (30x3.5mm Cu/Galv Tape + Test Links)</text>"
         )
         if info["earthing_type"] == "foundation_ring"
@@ -413,32 +437,32 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
         '  <rect x="330" y="390" width="84" height="34" rx="3" fill="#2b6cb0" />',
         f'  <text x="372" y="411" text-anchor="middle" {w_s}>9U RACK</text>',
         (
-            '  <rect x="194" y="582" width="80" height="34" rx="3" '
+            '  <rect x="194" y="588" width="80" height="34" rx="3" '
             'fill="#c53030" stroke="#742a2a" stroke-width="1.5" />'
         ),
-        f'  <text x="234" y="603" text-anchor="middle" {w_s}>EAC METER</text>',
+        f'  <text x="234" y="609" text-anchor="middle" {w_s}>EAC METER</text>',
         (
-            '  <line x1="234" y1="582" x2="234" y2="424" '
+            '  <line x1="234" y1="588" x2="234" y2="424" '
             'stroke="#c53030" stroke-width="4" stroke-dasharray="8,4" />'
         ),
         (
-            '  <text x="242" y="520" class="lbl" fill="#c53030">'
+            '  <text x="242" y="520" class="lbl" style="fill:#c53030;">'
             f'2xØ110mm HDPE EAC Duct ({info["trench_m"]}m, -750mm)</text>'
         ),
-        '  <circle cx="146" cy="599" r="16" fill="#c6f6d5" stroke="#2f855a" stroke-width="2" />',
+        '  <circle cx="146" cy="605" r="16" fill="#c6f6d5" stroke="#2f855a" stroke-width="2" />',
         (
-            '  <text x="146" y="602" text-anchor="middle" '
+            '  <text x="146" y="608" text-anchor="middle" '
             'style="fill:#22543d;font-size:8px;font-weight:700;">EARTH</text>'
         ),
-        '  <line x1="146" y1="583" x2="146" y2="464" stroke="#2f855a" stroke-width="2.5" />',
-        '  <rect x="338" y="584" width="68" height="30" rx="3" fill="#2b6cb0" />',
-        f'  <text x="372" y="603" text-anchor="middle" {w_s}>CYTA PIT</text>',
+        '  <line x1="146" y1="589" x2="146" y2="464" stroke="#2f855a" stroke-width="2.5" />',
+        '  <rect x="338" y="590" width="68" height="30" rx="3" fill="#2b6cb0" />',
+        f'  <text x="372" y="609" text-anchor="middle" {w_s}>CYTA PIT</text>',
         (
-            '  <line x1="372" y1="584" x2="372" y2="424" '
+            '  <line x1="372" y1="590" x2="372" y2="424" '
             'stroke="#2b6cb0" stroke-width="3" stroke-dasharray="6,4" />'
         ),
         (
-            '  <text x="380" y="545" class="lbl" fill="#2b6cb0">'
+            '  <text x="380" y="545" class="lbl" style="fill:#2b6cb0;">'
             f'2xØ32mm Fiber Duct ({info["trench_m"]}m)</text>'
         ),
     ]
@@ -453,13 +477,13 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             'fill="#ebf8ff" stroke="#3182ce" stroke-width="2" />'
         )
         parts.append(
-            '  <text x="594" y="305" text-anchor="middle" class="lbl" fill="#2b6cb0">'
+            '  <text x="594" y="305" text-anchor="middle" class="lbl" style="fill:#2b6cb0;">'
             "POOL SEC.702</text>"
         )
     if info["has_gate"]:
-        parts.append('  <rect x="506" y="586" width="136" height="26" rx="3" fill="#805ad5" />')
+        parts.append('  <rect x="506" y="592" width="136" height="26" rx="3" fill="#805ad5" />')
         parts.append(
-            f'  <text x="574" y="603" text-anchor="middle" {w_sm}>GATE MOTOR + INTERCOM</text>'
+            f'  <text x="574" y="609" text-anchor="middle" {w_sm}>GATE MOTOR + INTERCOM</text>'
         )
     if info["has_pv"]:
         parts.append(
@@ -467,7 +491,7 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             'fill="#fefcbf" stroke="#b7791f" stroke-width="1.5" />'
         )
         parts.append(
-            '  <text x="340" y="254" text-anchor="middle" class="lbl" fill="#975a16">'
+            '  <text x="340" y="254" text-anchor="middle" class="lbl" style="fill:#975a16;">'
             f'ROOF PV PROVISION: {info["pv_kva"]:g} kVA (AC+DC RISER + SPD)</text>'
         )
 
@@ -478,93 +502,117 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             'fill="#fefcbf" stroke="#d69e2e" stroke-width="2" />'
         )
 
-    # Right Technical Schedule Panel
+    # Right Technical Schedule Panel (wrapped cleanly inside x=684..1088)
     ng_v = d.residential_brief.lightning_flash_density_ng
     hm_v = d.residential_brief.building_height_m
     parts.extend(
         [
             (
-                '  <rect x="684" y="94" width="404" height="610" rx="6" '
+                '  <rect x="684" y="94" width="404" height="620" rx="6" '
                 'fill="#f8fafc" stroke="#cbd5e0" stroke-width="1.5" />'
             ),
-            '  <text x="702" y="122" class="sec">A. UNDERGROUND DUCTS &amp; SITE WORKS</text>',
+            '  <text x="700" y="120" class="sec">A. UNDERGROUND DUCTS &amp; SITE WORKS</text>',
             (
-                '  <text x="702" y="146" class="txt">'
+                '  <text x="700" y="143" class="txt">'
                 f'• EAC Incoming Duct: 2xØ110mm HDPE ({info["trench_m"]}m, -750mm)</text>'
             ),
             (
-                '  <text x="702" y="166" class="txt">'
+                '  <text x="700" y="162" class="txt">'
                 f'• Telecom / Cyta Duct: 2xØ32mm HDPE + draw pit ({info["trench_m"]}m)</text>'
             ),
             (
-                '  <text x="702" y="186" class="txt">'
+                '  <text x="700" y="181" class="txt">'
                 f"• Earthing Electrode: {esc(d.earthing_system.value)} — {esc(eth_title)}</text>"
             ),
             (
-                '  <text x="702" y="206" class="txt">'
+                '  <text x="700" y="200" class="txt">'
                 "• Main Bonding: 10mm² Cu to water, gas &amp; solar metalwork</text>"
             ),
             (
-                '  <text x="702" y="226" class="txt">'
+                '  <text x="700" y="219" class="txt">'
                 f'• External Lighting: {info["n_bollards"]}x IP65 Bollards (Photocell/Timer)</text>'
             ),
             (
-                '  <text x="702" y="246" class="txt">'
+                '  <text x="700" y="238" class="txt">'
                 f'• Exterior Security: {info["n_cams"]}x IP67 PoE CCTV Cameras (Cat6)</text>'
             ),
-            '  <line x1="702" y1="268" x2="1070" y2="268" stroke="#cbd5e0" stroke-width="1" />',
-            '  <text x="702" y="294" class="sec">B. IEC 62305-2 LIGHTNING RISK ASSESSMENT</text>',
+            '  <line x1="700" y1="256" x2="1072" y2="256" stroke="#cbd5e0" stroke-width="1" />',
+            '  <text x="700" y="280" class="sec">B. IEC 62305-2 LIGHTNING RISK ASSESSMENT</text>',
             (
-                '  <text x="702" y="318" class="txt">'
+                '  <text x="700" y="303" class="txt">'
                 f"• Cyprus Flash Density Ng: {ng_v:.2f} flashes/km²/yr</text>"
             ),
             (
-                '  <text x="702" y="338" class="txt">'
+                '  <text x="700" y="322" class="txt">'
                 f"• Equivalent Collection Area Ad: {esc(lps_ad)} (H = {hm_v:.1f} m)</text>"
             ),
             (
-                '  <text x="702" y="358" class="txt">'
+                '  <text x="700" y="341" class="txt">'
                 f"• Calculated Risk R1: {esc(lps_r1)} (Tolerable RT = 1.00e-05)</text>"
             ),
+        ]
+    )
+    ly_cur = 363
+    for vl in verdict_lines:
+        parts.append(
+            f'  <text x="700" y="{ly_cur}" class="lbl" style="fill:{lps_color};">{esc(vl)}</text>'
+        )
+        ly_cur += 16
+    ly_cur += 2
+    for sl in spd_lines:
+        parts.append(f'  <text x="700" y="{ly_cur}" class="txt">{esc(sl)}</text>')
+        ly_cur += 15
+    div_y = max(ly_cur + 8, 434)
+    sec_c_y = div_y + 24
+    tr_y = sec_c_y + 18
+    parts.extend(
+        [
             (
-                f'  <text x="702" y="382" class="lbl" fill="{lps_color}">'
-                f"• Verdict: {esc(lps_verdict)}</text>"
+                f'  <line x1="700" y1="{div_y}" x2="1072" y2="{div_y}" '
+                'stroke="#cbd5e0" stroke-width="1" />'
             ),
-            f'  <text x="702" y="404" class="txt">• Surge Protection: {esc(lps_spd)}</text>',
-            '  <line x1="702" y1="428" x2="1070" y2="428" stroke="#cbd5e0" stroke-width="1" />',
-            '  <text x="702" y="454" class="sec">C. TRENCH CROSS-SECTION DETAIL (N.T.S.)</text>',
             (
-                '  <rect x="720" y="472" width="330" height="190" '
+                f'  <text x="700" y="{sec_c_y}" class="sec">'
+                "C. TRENCH CROSS-SECTION DETAIL (N.T.S.)</text>"
+            ),
+            (
+                f'  <rect x="720" y="{tr_y}" width="330" height="190" '
                 'fill="#ffffff" stroke="#a0aec0" stroke-width="1" />'
             ),
-            '  <line x1="720" y1="504" x2="1050" y2="504" stroke="#2f855a" stroke-width="2" />',
             (
-                '  <text x="730" y="496" class="lbl" fill="#2f855a">'
+                f'  <line x1="720" y1="{tr_y + 32}" x2="1050" y2="{tr_y + 32}" '
+                'stroke="#2f855a" stroke-width="2" />'
+            ),
+            (
+                f'  <text x="730" y="{tr_y + 24}" class="lbl" style="fill:#2f855a;">'
                 "FINISHED GROUND LEVEL (FGL 0.00)</text>"
             ),
             (
-                '  <line x1="730" y1="552" x2="1040" y2="552" '
+                f'  <line x1="730" y1="{tr_y + 80}" x2="1040" y2="{tr_y + 80}" '
                 'stroke="#d69e2e" stroke-width="3" stroke-dasharray="12,4" />'
             ),
-            '  <text x="742" y="544" class="txt">WARNING TAPE (-350mm): DANGER ELECTRICITY</text>',
             (
-                '  <circle cx="810" cy="616" r="16" '
+                f'  <text x="742" y="{tr_y + 72}" class="txt">'
+                "WARNING TAPE (-350mm): DANGER ELECTRICITY</text>"
+            ),
+            (
+                f'  <circle cx="810" cy="{tr_y + 144}" r="16" '
                 'fill="#fed7d7" stroke="#c53030" stroke-width="2" />'
             ),
             (
-                '  <circle cx="852" cy="616" r="16" '
+                f'  <circle cx="852" cy="{tr_y + 144}" r="16" '
                 'fill="#fed7d7" stroke="#c53030" stroke-width="2" />'
             ),
-            '  <text x="774" y="648" class="txt">2xØ110mm EAC (-750mm)</text>',
+            f'  <text x="774" y="{tr_y + 176}" class="txt">2xØ110mm EAC (-750mm)</text>',
             (
-                '  <circle cx="965" cy="622" r="10" '
+                f'  <circle cx="965" cy="{tr_y + 150}" r="10" '
                 'fill="#bee3f8" stroke="#2b6cb0" stroke-width="2" />'
             ),
             (
-                '  <circle cx="995" cy="622" r="10" '
+                f'  <circle cx="995" cy="{tr_y + 150}" r="10" '
                 'fill="#bee3f8" stroke="#2b6cb0" stroke-width="2" />'
             ),
-            '  <text x="938" y="648" class="txt">2xØ32mm Cyta</text>',
+            f'  <text x="938" y="{tr_y + 176}" class="txt">2xØ32mm Cyta</text>',
             "</svg>",
         ]
     )

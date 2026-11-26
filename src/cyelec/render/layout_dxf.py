@@ -19,7 +19,7 @@ from ezdxf.lldxf.const import DXFError
 
 from cyelec.models.building import Room
 from cyelec.models.electrical import CircuitCategory
-from cyelec.models.spatial import DeviceType, Phase2DesignResult
+from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
 from cyelec.synth.sample_plan import render_building_to_dxf
 
 LayoutDiscipline = Literal["combined", "lighting", "power", "elv"]
@@ -697,6 +697,32 @@ def render_electrical_layout_dxf(
         db_anchors.append((sb.board_id, sb.location_mm))
 
     occupied_boxes: list[tuple[float, float, float, float]] = []
+    # Seed occupied_boxes with existing architectural TEXT/MTEXT so E-* labels never overlap them
+    for ent in msp:
+        etype = ent.dxftype()
+        if etype not in ("TEXT", "MTEXT"):
+            continue
+        try:
+            ins = ent.dxf.insert
+            ex, ey = float(ins.x), float(ins.y)
+            if etype == "TEXT":
+                txt = str(ent.dxf.text or "")
+                th = max(float(getattr(ent.dxf, "height", 0.0) or _s(80.0)), _s(40.0))
+            else:
+                txt = str(ent.plain_text() if hasattr(ent, "plain_text") else "")
+                th = max(float(getattr(ent.dxf, "char_height", 0.0) or _s(80.0)), _s(40.0))
+            first_ln = txt.splitlines()[0] if txt else ""
+            if not first_ln:
+                continue
+            tw = max(th * 0.65 * min(len(first_ln), 32), th * 2.0)
+            n_lines = max(1, min(len(txt.splitlines()), 3))
+            pad_a = _s(20.0)
+            occupied_boxes.append(
+                (ex - pad_a, ey - pad_a, ex + tw + pad_a, ey + th * 1.25 * n_lines + pad_a)
+            )
+        except Exception:
+            continue
+
     for db_id, db_pt in db_anchors:
         dx, dy = _s(db_pt.x_mm), _s(db_pt.y_mm)
         msp.add_blockref("CYELEC_DB", (dx, dy), dxfattribs={"layer": "E-TITLE"})
@@ -731,6 +757,7 @@ def render_electrical_layout_dxf(
     # 2. Cyprus Home-Run Arrows + Loop Arcs (full NetworkX routes kept on E-ROUTE-CONDUIT)
     circuit_map = {c.spec.circuit_id: c for c in result.design.circuits}
     circuit_cat_map = {c.spec.circuit_id: c.spec.category for c in result.design.circuits}
+    room_floor: dict[str, str] = {r.id: r.floor for r in result.design.building.rooms}
     drafting_style = result.design.residential_brief.conduit_drafting_style
     use_homerun_style = drafting_style == "homerun_arcs"
 
@@ -754,8 +781,10 @@ def render_electrical_layout_dxf(
     board_locs: dict[str, tuple[float, float]] = {
         db_anchor.id: (db_anchor.location_mm.x_mm, db_anchor.location_mm.y_mm)
     }
+    board_id_by_floor: dict[str, str] = {}
     for sb in result.design.building.sub_boards:
         board_locs[sb.board_id] = (sb.location_mm.x_mm, sb.location_mm.y_mm)
+        board_id_by_floor[sb.floor] = sb.board_id
 
     # Index coincident corridor segments so parallel runs fan out perpendicularly (35 mm pitch)
     seg_circuits: dict[tuple[tuple[int, int], tuple[int, int]], list[str]] = defaultdict(list)
@@ -821,73 +850,75 @@ def render_electrical_layout_dxf(
                         callout = f"{rc.circuit_id}:{conduit_d} {cores}x{solved_c.cable_mm2:g}"
                         trunk_callout_anchors.append((hx, hy, callout, cond_layer))
 
-        # Cyprus Consultant Home-Run Drafting: clean daisy-chain arcs + Home-Run Arrow toward DB
+        # Cyprus Consultant Home-Run Drafting: strict per-floor daisy-chain arcs + Home-Run Arrow
         if use_homerun_style:
             c_devs = [devs_by_id_all[did] for did in rc.device_ids if did in devs_by_id_all]
-            # Filter devices to current discipline
             if discipline == "lighting":
                 c_devs = [d for d in c_devs if d.device_type in _LIGHTING_DEVICE_TYPES]
             elif discipline == "power":
                 c_devs = [d for d in c_devs if d.device_type in _POWER_DEVICE_TYPES]
             if c_devs:
-                db_xy = board_locs.get(
-                    solved_c.spec.board_id if solved_c else db_anchor.id,
-                    (db_anchor.location_mm.x_mm, db_anchor.location_mm.y_mm),
-                )
-                # Order devices nearest to DB first for clean daisy-chain arcs
-                ordered = sorted(
-                    c_devs,
-                    key=lambda d: math.hypot(
-                        d.location_mm.x_mm - db_xy[0], d.location_mm.y_mm - db_xy[1]
-                    ),
-                )
-                # Connect consecutive power/socket/shutter devices with clean curved arcs
-                if cond_layer != "E-COND-LITE" and len(ordered) >= 2:
-                    for a_dev, b_dev in zip(ordered, ordered[1:], strict=False):
-                        dist_mm = math.hypot(
-                            b_dev.location_mm.x_mm - a_dev.location_mm.x_mm,
-                            b_dev.location_mm.y_mm - a_dev.location_mm.y_mm,
-                        )
-                        if 100.0 <= dist_mm <= 6500.0:
-                            _add_dashed_curve(
-                                msp,
-                                (_s(a_dev.location_mm.x_mm), _s(a_dev.location_mm.y_mm)),
-                                (_s(b_dev.location_mm.x_mm), _s(b_dev.location_mm.y_mm)),
-                                layer=cond_layer,
-                                bulge_frac=0.14,
-                                dash_count=7,
-                            )
-                # Draw crisp Home-Run Arrow stub from first device pointing toward its DB
-                first_d = ordered[0]
-                fx, fy = _s(first_d.location_mm.x_mm), _s(first_d.location_mm.y_mm)
-                dx_db = _s(db_xy[0]) - fx
-                dy_db = _s(db_xy[1]) - fy
-                d_len = math.hypot(dx_db, dy_db)
-                ux, uy = (dx_db / d_len, dy_db / d_len) if d_len > 1e-3 else (1.0, 0.0)
-                stub = _s(520.0)
-                hx, hy = fx + ux * stub, fy + uy * stub
-                msp.add_line((fx, fy), (hx, hy), dxfattribs={"layer": cond_layer})
-                tick = _s(90.0)
-                msp.add_line(
-                    (hx, hy),
-                    (hx - ux * tick - uy * tick * 0.6, hy - uy * tick + ux * tick * 0.6),
-                    dxfattribs={"layer": cond_layer},
-                )
-                msp.add_line(
-                    (hx, hy),
-                    (hx - ux * tick + uy * tick * 0.6, hy - uy * tick - ux * tick * 0.6),
-                    dxfattribs={"layer": cond_layer},
-                )
-                if solved_c is not None and discipline != "combined":
-                    cores = 5 if solved_c.spec.is_three_phase else 3
-                    conduit_d = "25mm" if solved_c.cable_mm2 >= 4.0 else "20mm"
-                    b_tag = solved_c.spec.board_id
-                    callout = (
-                        f"->{b_tag} {rc.circuit_id}:{conduit_d} {cores}x{solved_c.cable_mm2:g}"
+                devs_by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
+                for cd in c_devs:
+                    devs_by_flr[room_floor.get(cd.room_id, "GF")].append(cd)
+                for flr, f_devs in devs_by_flr.items():
+                    target_bid = board_id_by_floor.get(flr) or (
+                        solved_c.spec.board_id if solved_c else db_anchor.id
                     )
-                    trunk_callout_anchors.append((hx, hy, callout, cond_layer))
+                    db_xy = board_locs.get(
+                        target_bid,
+                        (db_anchor.location_mm.x_mm, db_anchor.location_mm.y_mm),
+                    )
+                    ordered = sorted(
+                        f_devs,
+                        key=lambda d: math.hypot(
+                            d.location_mm.x_mm - db_xy[0], d.location_mm.y_mm - db_xy[1]
+                        ),
+                    )
+                    if cond_layer != "E-COND-LITE" and len(ordered) >= 2:
+                        for a_dev, b_dev in zip(ordered, ordered[1:], strict=False):
+                            dist_mm = math.hypot(
+                                b_dev.location_mm.x_mm - a_dev.location_mm.x_mm,
+                                b_dev.location_mm.y_mm - a_dev.location_mm.y_mm,
+                            )
+                            if 100.0 <= dist_mm <= 6500.0:
+                                _add_dashed_curve(
+                                    msp,
+                                    (_s(a_dev.location_mm.x_mm), _s(a_dev.location_mm.y_mm)),
+                                    (_s(b_dev.location_mm.x_mm), _s(b_dev.location_mm.y_mm)),
+                                    layer=cond_layer,
+                                    bulge_frac=0.14,
+                                    dash_count=7,
+                                )
+                    first_d = ordered[0]
+                    fx, fy = _s(first_d.location_mm.x_mm), _s(first_d.location_mm.y_mm)
+                    dx_db = _s(db_xy[0]) - fx
+                    dy_db = _s(db_xy[1]) - fy
+                    d_len = math.hypot(dx_db, dy_db)
+                    ux, uy = (dx_db / d_len, dy_db / d_len) if d_len > 1e-3 else (1.0, 0.0)
+                    stub = _s(520.0)
+                    hx, hy = fx + ux * stub, fy + uy * stub
+                    msp.add_line((fx, fy), (hx, hy), dxfattribs={"layer": cond_layer})
+                    tick = _s(90.0)
+                    msp.add_line(
+                        (hx, hy),
+                        (hx - ux * tick - uy * tick * 0.6, hy - uy * tick + ux * tick * 0.6),
+                        dxfattribs={"layer": cond_layer},
+                    )
+                    msp.add_line(
+                        (hx, hy),
+                        (hx - ux * tick + uy * tick * 0.6, hy - uy * tick - ux * tick * 0.6),
+                        dxfattribs={"layer": cond_layer},
+                    )
+                    if solved_c is not None and discipline != "combined":
+                        cores = 5 if solved_c.spec.is_three_phase else 3
+                        conduit_d = "25mm" if solved_c.cable_mm2 >= 4.0 else "20mm"
+                        callout = (
+                            f"->{target_bid} {rc.circuit_id}:{conduit_d} "
+                            f"{cores}x{solved_c.cable_mm2:g}"
+                        )
+                        trunk_callout_anchors.append((hx, hy, callout, cond_layer))
             elif rc.segments:
-                # Fallback home-run tick at DB departure if circuit had no indoor devices
                 s0 = rc.segments[0]
                 sx1, sy1 = _s(s0.start_mm.x_mm), _s(s0.start_mm.y_mm)
                 sx2, sy2 = _s(s0.end_mm.x_mm), _s(s0.end_mm.y_mm)
@@ -1080,50 +1111,56 @@ def render_electrical_layout_dxf(
                 t_dev = dev_by_id.get(tid)
                 if t_dev is None:
                     continue
+                if room_floor.get(t_dev.room_id, "GF") != room_floor.get(sw_dev.room_id, "GF"):
+                    continue
                 p_tgt = (_s(t_dev.location_mm.x_mm), _s(t_dev.location_mm.y_mm))
                 bulge = 0.16 if idx % 2 == 0 else -0.16
                 _add_dashed_curve(msp, p_sw, p_tgt, layer="E-SWIT-LEG", bulge_frac=bulge)
 
-    # 3b-elv. On E-103 ELV sheet, draw interlinked smoke/heat detector loop arcs & KNX bus arcs
+    # 3b-elv. On E-103 ELV sheet, draw per-floor interlinked smoke/heat & KNX bus arcs
     if discipline == "elv":
-        smokes = [
-            d
-            for d in active_devices
-            if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR)
-        ]
-        for a_d, b_d in zip(smokes, smokes[1:], strict=False):
-            if (
-                math.hypot(
-                    b_d.location_mm.x_mm - a_d.location_mm.x_mm,
-                    b_d.location_mm.y_mm - a_d.location_mm.y_mm,
-                )
-                <= 8500.0
-            ):
-                _add_dashed_curve(
-                    msp,
-                    (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
-                    (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
-                    layer="E-ELV-SMOKE",
-                    bulge_frac=0.14,
-                    dash_count=7,
-                )
-        knx_devs = [d for d in active_devices if d.device_type == DeviceType.KNX_KEYPAD]
-        for a_d, b_d in zip(knx_devs, knx_devs[1:], strict=False):
-            if (
-                math.hypot(
-                    b_d.location_mm.x_mm - a_d.location_mm.x_mm,
-                    b_d.location_mm.y_mm - a_d.location_mm.y_mm,
-                )
-                <= 8500.0
-            ):
-                _add_dashed_curve(
-                    msp,
-                    (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
-                    (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
-                    layer="E-KNX",
-                    bulge_frac=-0.14,
-                    dash_count=7,
-                )
+        smokes_by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
+        for d in active_devices:
+            if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
+                smokes_by_flr[room_floor.get(d.room_id, "GF")].append(d)
+        for flr_smokes in smokes_by_flr.values():
+            for a_d, b_d in zip(flr_smokes, flr_smokes[1:], strict=False):
+                if (
+                    math.hypot(
+                        b_d.location_mm.x_mm - a_d.location_mm.x_mm,
+                        b_d.location_mm.y_mm - a_d.location_mm.y_mm,
+                    )
+                    <= 8500.0
+                ):
+                    _add_dashed_curve(
+                        msp,
+                        (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
+                        (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
+                        layer="E-ELV-SMOKE",
+                        bulge_frac=0.14,
+                        dash_count=7,
+                    )
+        knx_by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
+        for d in active_devices:
+            if d.device_type == DeviceType.KNX_KEYPAD:
+                knx_by_flr[room_floor.get(d.room_id, "GF")].append(d)
+        for flr_knx in knx_by_flr.values():
+            for a_d, b_d in zip(flr_knx, flr_knx[1:], strict=False):
+                if (
+                    math.hypot(
+                        b_d.location_mm.x_mm - a_d.location_mm.x_mm,
+                        b_d.location_mm.y_mm - a_d.location_mm.y_mm,
+                    )
+                    <= 8500.0
+                ):
+                    _add_dashed_curve(
+                        msp,
+                        (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
+                        (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
+                        layer="E-KNX",
+                        bulge_frac=-0.14,
+                        dash_count=7,
+                    )
 
     # 3c. De-collided conduit size & wire-count callouts on discipline-specific sheets
     for cx, cy, callout, cond_layer in trunk_callout_anchors:

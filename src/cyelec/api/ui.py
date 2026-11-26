@@ -94,14 +94,17 @@ def render_etek_workbench_html(
       color: #ffffff;
       padding: 10px 20px;
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       align-items: center;
+      gap: 10px;
       border-bottom: 3px solid #0f2342;
     }}
     .brand-lockup {{
       display: flex;
       align-items: center;
       gap: 10px;
+      min-width: 0;
     }}
     .brand-logo {{
       width: 34px;
@@ -109,11 +112,13 @@ def render_etek_workbench_html(
       border-radius: 7px;
       border: 1px solid rgba(56, 189, 248, 0.45);
       display: block;
+      flex-shrink: 0;
     }}
     .hdr-right {{
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }}
     .hdr-link {{
       color: #ffffff;
@@ -124,23 +129,28 @@ def render_etek_workbench_html(
       border-radius: 5px;
       border: 1px solid rgba(56, 189, 248, 0.5);
       background: rgba(2, 132, 199, 0.35);
+      white-space: nowrap;
     }}
     .hdr-link:hover {{ background: rgba(2, 132, 199, 0.6); }}
     header h1 {{ margin: 0; font-size: 16px; letter-spacing: 0.2px; }}
-    header .meta {{ font-size: 11px; opacity: 0.85; }}
+    header .meta {{ font-size: 11px; opacity: 0.85; white-space: nowrap; }}
     .layout {{
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: 332px minmax(0, 1fr);
       gap: 16px;
       padding: 16px;
       min-height: calc(100vh - 54px);
+      align-items: start;
     }}
+    main {{ min-width: 0; }}
+    aside.panel {{ min-width: 0; }}
     .panel {{
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 6px;
       padding: 14px;
       box-shadow: 0 1px 2px rgba(16,42,67,0.04);
+      min-width: 0;
     }}
     .panel h2 {{
       margin: 0 0 10px 0;
@@ -165,6 +175,43 @@ def render_etek_workbench_html(
       border-radius: 4px;
       font-size: 12px;
       background: #fff;
+      max-width: 100%;
+    }}
+    .row2 {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }}
+    .row2 > div {{ min-width: 0; }}
+    .sidebar-actions {{
+      position: sticky;
+      bottom: 0;
+      background: var(--card);
+      margin: 12px -14px -14px -14px;
+      padding: 10px 14px 14px 14px;
+      border-top: 1px solid var(--border);
+      box-shadow: 0 -4px 12px rgba(16, 42, 67, 0.06);
+      border-radius: 0 0 6px 6px;
+      z-index: 6;
+    }}
+    .file-pill {{
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 6px;
+      padding: 5px 8px;
+      background: #eff6ff;
+      border: 1px solid #93c5fd;
+      border-radius: 4px;
+      font-size: 11px;
+      color: #1e3a8a;
+    }}
+    .file-pill span {{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
     }}
     .btn {{
       display: inline-block;
@@ -176,16 +223,19 @@ def render_etek_workbench_html(
       cursor: pointer;
       margin-top: 8px;
       font-size: 12px;
+      transition: background 0.12s, opacity 0.12s;
     }}
+    .btn:disabled {{ opacity: 0.6; cursor: wait; }}
     .btn-sm {{ width: auto; padding: 5px 10px; margin-top: 0; font-size: 11.5px; }}
+    .btn-xs {{ width: auto; padding: 3px 7px; margin-top: 0; font-size: 11px; }}
     .btn-primary {{ background: var(--navy); color: #fff; }}
-    .btn-primary:hover {{ background: var(--navy-light); }}
+    .btn-primary:hover:not(:disabled) {{ background: var(--navy-light); }}
     .btn-secondary {{ background: #e2e8f0; color: var(--navy); }}
-    .btn-secondary:hover {{ background: #cbd5e0; }}
+    .btn-secondary:hover:not(:disabled) {{ background: #cbd5e0; }}
     .btn-active {{ background: #c53030; color: #fff; }}
     .kpi-grid {{
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 10px;
       margin-bottom: 14px;
     }}
@@ -195,18 +245,25 @@ def render_etek_workbench_html(
       border-left: 4px solid var(--navy);
       border-radius: 6px;
       padding: 9px 11px;
+      min-width: 0;
     }}
     .kpi .k {{ font-size: 10px; color: var(--muted); text-transform: uppercase; }}
-    .kpi .v {{ font-size: 14px; font-weight: 700; color: var(--navy); margin-top: 3px; }}
+    .kpi .v {{
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--navy);
+      margin-top: 3px;
+      overflow-wrap: anywhere;
+    }}
     .tabs {{
       display: flex;
       flex-wrap: wrap;
-      gap: 6px;
+      gap: 4px;
       margin-bottom: 12px;
       border-bottom: 2px solid var(--border);
     }}
     .tab {{
-      padding: 8px 13px;
+      padding: 8px 11px;
       cursor: pointer;
       font-weight: 600;
       color: var(--muted);
@@ -216,8 +273,10 @@ def render_etek_workbench_html(
       border-top: none;
       border-left: none;
       border-right: none;
-      font-size: 12px;
+      font-size: 11.8px;
+      white-space: nowrap;
     }}
+    .tab:hover {{ color: var(--navy); }}
     .tab.active {{ color: var(--navy); border-bottom-color: var(--navy); }}
     .tab-pane {{ display: none; }}
     .tab-pane.active {{ display: block; }}
@@ -225,7 +284,7 @@ def render_etek_workbench_html(
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 8px;
+      gap: 7px;
       background: #f8fafc;
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -233,16 +292,70 @@ def render_etek_workbench_html(
       margin-bottom: 8px;
       font-size: 11.5px;
     }}
+    .zoom-group {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: auto;
+    }}
+    .zoom-pct {{
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--navy);
+      min-width: 38px;
+      text-align: center;
+    }}
     .svg-box {{
       background: #fff;
       border: 1px solid var(--border);
       border-radius: 4px;
       padding: 8px;
       overflow: auto;
-      max-height: 70vh;
+      max-height: 72vh;
     }}
     .svg-box.db-mode svg {{ cursor: crosshair; }}
     .svg-box svg {{ width: 100%; height: auto; display: block; }}
+    .pending-bar {{
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 12px;
+      margin-bottom: 10px;
+      background: #fffbeb;
+      border: 1px solid #f59e0b;
+      border-radius: 5px;
+      font-size: 12px;
+      color: #92400e;
+    }}
+    .s5-strip {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+      align-items: center;
+    }}
+    .s5-chip {{
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 6px 10px;
+      font-size: 11.2px;
+    }}
+    .boq-sec-row td {{
+      background: #e6eef8 !important;
+      color: var(--navy);
+      font-weight: 700;
+      font-size: 11.5px;
+      letter-spacing: 0.2px;
+    }}
+    .boq-sub-row td {{
+      background: #f8fafc !important;
+      font-weight: 600;
+      color: #334155;
+    }}
+    .tbl-wrap {{ overflow-x: auto; width: 100%; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 11.5px; }}
     th, td {{ border: 1px solid var(--border); padding: 5px 7px; text-align: left; }}
     th {{ background: var(--navy); color: #fff; }}
@@ -269,8 +382,11 @@ def render_etek_workbench_html(
     }}
     .bar-track {{ background: #e2e8f0; height: 14px; border-radius: 3px; overflow: hidden; }}
     .bar-fill {{ height: 100%; }}
-    .status-line {{ font-size: 11.5px; color: var(--muted); margin-top: 8px; }}
-    .mini-input {{ width: 66px; padding: 3px 4px; font-size: 11px; }}
+    .status-line {{ font-size: 11.5px; color: var(--muted); margin-top: 8px; line-height: 1.35; }}
+    .status-line.status-err {{ color: #c53030; font-weight: 600; }}
+    .status-line.status-ok {{ color: #155724; }}
+    .mini-input {{ width: 64px; padding: 3px 5px; font-size: 11px; }}
+    .phase-sel {{ min-width: 96px; width: 96px; padding: 3px 5px; font-size: 11px; }}
     .layer-box {{
       margin-top: 8px;
       padding: 8px;
@@ -281,13 +397,14 @@ def render_etek_workbench_html(
     }}
     .layer-row {{
       display: grid;
-      grid-template-columns: 1fr 94px;
+      grid-template-columns: minmax(0, 1fr) 128px;
       gap: 6px;
       align-items: center;
       margin: 4px 0;
       font-size: 11px;
     }}
-    .auth-backdrop {{
+    .layer-row span {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .auth-backdrop, .fs-backdrop {{
       position: fixed;
       inset: 0;
       background: rgba(16, 42, 67, 0.72);
@@ -297,7 +414,48 @@ def render_etek_workbench_html(
       z-index: 9999;
       padding: 16px;
     }}
-    .auth-backdrop.open {{ display: flex; }}
+    .auth-backdrop.open, .fs-backdrop.open {{ display: flex; }}
+    .fs-modal {{
+      background: #ffffff;
+      border-radius: 8px;
+      width: 96vw;
+      height: 92vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+    }}
+    .fs-hdr {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 14px;
+      background: var(--navy);
+      color: #fff;
+    }}
+    .fs-body {{
+      flex: 1;
+      overflow: auto;
+      padding: 12px;
+      background: #f8fafc;
+    }}
+    .fs-body svg {{ display: block; height: auto; background: #fff; margin: 0 auto; }}
+    .auth-gate-banner {{
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      background: #eff6ff;
+      border: 1px solid #93c5fd;
+      border-left: 4px solid var(--navy);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 14px;
+      color: #1e3a8a;
+    }}
     .auth-card {{
       background: #ffffff;
       border-radius: 10px;
@@ -329,6 +487,35 @@ def render_etek_workbench_html(
       font-size: 11.5px;
       color: #ffffff;
       cursor: pointer;
+      white-space: nowrap;
+    }}
+    @media (max-width: 1120px) {{
+      .layout {{ grid-template-columns: 290px minmax(0, 1fr); gap: 12px; padding: 12px; }}
+      .kpi-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+    }}
+    @media (max-width: 820px) {{
+      .layout {{ grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 10px; }}
+      .kpi-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .tabs {{
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 2px;
+      }}
+      .sidebar-actions {{
+        position: static;
+        margin: 12px 0 0 0;
+        padding: 10px 0 0 0;
+        box-shadow: none;
+      }}
+      .zoom-group {{ margin-left: 0; }}
+    }}
+    @media (max-width: 480px) {{
+      header {{ padding: 10px 12px; }}
+      header h1 {{ font-size: 14px; }}
+      .kpi-grid {{ grid-template-columns: 1fr; }}
+      .row2 {{ grid-template-columns: 1fr; }}
+      .fp-toolbar select, .fp-toolbar input {{ width: 100% !important; }}
     }}
   </style>
 </head>
@@ -380,6 +567,25 @@ def render_etek_workbench_html(
     </div>
   </div>
 
+  <div id="fsModal" class="fs-backdrop" onclick="if(event.target===this)closeFullscreenSvg()">
+    <div class="fs-modal">
+      <div class="fs-hdr">
+        <strong id="fsTitle" style="font-size:13.5px;">Drawing Sheet Viewer</strong>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-xs" onclick="zoomSvg('fsBody', -25)">−</button>
+          <span id="zoomLbl_fsBody" class="zoom-pct" style="color:#fff;">100%</span>
+          <button class="btn btn-secondary btn-xs" onclick="zoomSvg('fsBody', 25)">+</button>
+          <button class="btn btn-secondary btn-xs" onclick="resetZoomSvg('fsBody')">Fit</button>
+          <button class="btn btn-secondary btn-xs" onclick="downloadCurrentFsSvg()">
+            Save SVG
+          </button>
+          <button class="btn btn-active btn-xs" onclick="closeFullscreenSvg()">Close (Esc)</button>
+        </div>
+      </div>
+      <div id="fsBody" class="fs-body"></div>
+    </div>
+  </div>
+
   <header>
     <div class="brand-lockup">
       <img src="/logo.png" alt="CyElec" class="brand-logo" width="34" height="34" />
@@ -414,6 +620,11 @@ def render_etek_workbench_html(
 
       <label for="dxfFile">{upload_label}</label>
       <input id="dxfFile" type="file" accept="{upload_accept}" multiple />
+      <div id="fileStatusRow" class="file-pill">
+        <span id="fileStatusTxt"></span>
+        <button id="btnClearFiles" type="button" class="btn btn-secondary btn-xs"
+          onclick="clearUploadedFiles()">Clear File</button>
+      </div>
       <div id="multiFloorBox" class="layer-box">
         <strong style="font-size:11px;color:#1b365d;">
           Multi-Floor Combiner (MDB -&gt; Sub-DBs)
@@ -617,12 +828,26 @@ def render_etek_workbench_html(
         <input id="eacHmyReg" placeholder="e.g., HMY-A-1420" />
       </details>
 
-      <button class="btn btn-primary" onclick="runSolve()">Run Deterministic Solve</button>
-      <button class="btn btn-secondary" onclick="downloadBundle()">Download EAC ZIP Pack</button>
-      <div id="statusLine" class="status-line">Ready. Click Run Deterministic Solve.</div>
+      <div class="sidebar-actions">
+        <button id="btnRunSolve" class="btn btn-primary" style="margin-top:0;"
+          onclick="runSolve()">Run Deterministic Solve</button>
+        <button id="btnDownloadZip" class="btn btn-secondary"
+          onclick="downloadBundle()">Download EAC ZIP Pack</button>
+        <div id="statusLine" class="status-line">Ready. Click Run Deterministic Solve.</div>
+      </div>
     </aside>
 
     <main>
+      <div id="authGateBanner" class="auth-gate-banner">
+        <div>
+          <strong>ETEK Firm Sign-In Required:</strong>
+          Sign in or create a firm account to run solves and export EAC submission packs.
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openAuthModal('login')">
+          Sign In / Register
+        </button>
+      </div>
+
       <div class="kpi-grid">
         <div class="kpi">
           <div class="k">Recommended EAC Supply</div><div class="v" id="kSupply">-</div>
@@ -664,7 +889,9 @@ def render_etek_workbench_html(
           <button class="tab" onclick="openTab('tabBoq', this)">
             Bill of Quantities (EUR)
           </button>
-          <button class="tab" onclick="openTab('tabFlags', this)">ETEK Review Flags</button>
+          <button id="tabBtnFlags" class="tab" onclick="openTab('tabFlags', this)">
+            ETEK Review Flags
+          </button>
           <button class="tab" onclick="openTab('tabWorkspace', this); loadProjects();">
             Workspace &amp; Revision Diff
           </button>
@@ -674,9 +901,21 @@ def render_etek_workbench_html(
         </div>
 
         <div id="tabCircuits" class="tab-pane active">
-          <div id="balanceBars" style="margin-bottom:14px;"></div>
-          <div id="subMainsBox" style="margin-bottom:14px;"></div>
-          <div style="overflow-x:auto;">
+          <div id="balanceBars" style="margin-bottom:12px;"></div>
+          <div id="stage5EngSummary" style="margin-bottom:12px;"></div>
+          <div id="subMainsBox" style="margin-bottom:12px;"></div>
+          <div id="pendingEditsBar" class="pending-bar">
+            <span id="pendingEditsTxt">Pending circuit edits.</span>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-primary btn-xs" onclick="runSolve()">
+                Apply &amp; Re-Solve
+              </button>
+              <button class="btn btn-secondary btn-xs" onclick="clearCircuitEdits()">
+                Discard Edits
+              </button>
+            </div>
+          </div>
+          <div class="tbl-wrap">
             <table>
               <thead>
                 <tr>
@@ -702,8 +941,8 @@ def render_etek_workbench_html(
               onclick="selectDrawingSheet('power')">E-102 Power &amp; Plant</button>
             <button id="btnSheetElv" class="btn btn-secondary btn-sm"
               onclick="selectDrawingSheet('elv')">E-103 ELV &amp; Security</button>
-            <span style="margin-left:6px;">|</span>
-            <select id="anchorTargetSel" style="width:138px;" title="Select key anchor to relocate"
+            <span style="margin-left:4px;">|</span>
+            <select id="anchorTargetSel" style="width:176px;" title="Select key anchor to relocate"
               onchange="updateAnchorBtnLabel()">
               <option value="db">Anchor: DB1 / MDB</option>
               <option value="meter">Anchor: EAC Meter</option>
@@ -723,34 +962,122 @@ def render_etek_workbench_html(
                 Apply &amp; Re-Solve
               </button>
             </span>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('floorplanSvg', -25)">−</button>
+              <span id="zoomLbl_floorplanSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('floorplanSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('floorplanSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('floorplanSvg', 'Drawing Sheet (E-100..E-103)')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('floorplanSvg', 'floorplan_sheet.svg')">Save SVG</button>
+            </div>
           </div>
           <div id="floorplanSvg" class="svg-box">Run a solve to render floorplan overlay.</div>
         </div>
 
         <div id="tabSite" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-104 Site Works, Underground Trenching, Earthing &amp; LPS</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('siteSvg', -25)">−</button>
+              <span id="zoomLbl_siteSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('siteSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('siteSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('siteSvg', 'E-104 Site Works & Earthing')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('siteSvg', 'E104_site_earthing_plan.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
           <div id="siteSvg" class="svg-box">
             Run a solve to render E-104 Site Works, Underground Trenching, Earthing &amp; LPS.
           </div>
         </div>
 
         <div id="tabSld" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-201 Single-Line Diagram (IEC 60617 / BS 7671)</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('sldSvg', -25)">−</button>
+              <span id="zoomLbl_sldSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('sldSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs" onclick="resetZoomSvg('sldSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('sldSvg', 'E-201 Single-Line Diagram')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('sldSvg', 'E201_single_line_diagram.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
           <div id="sldSvg" class="svg-box">Run a solve to render Single-Line Diagram.</div>
         </div>
 
         <div id="tabRiser" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-202 Vertical Riser Diagram &amp; Physical 18mm DIN-Rail DB Elevation</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('riserSvg', -25)">−</button>
+              <span id="zoomLbl_riserSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('riserSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('riserSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('riserSvg', 'E-202 Riser & DIN-Rail DB')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('riserSvg', 'E202_riser_and_db_layout.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
           <div id="riserSvg" class="svg-box">
             Run a solve to render E-202 Vertical Riser Diagram &amp; 18mm DIN-Rail DB Elevation.
           </div>
         </div>
 
         <div id="tabDetails" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-301 Construction Details, Earthing &amp; General Notes</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('detailsSvg', -25)">−</button>
+              <span id="zoomLbl_detailsSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('detailsSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('detailsSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('detailsSvg', 'E-301 Construction Details & Notes')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('detailsSvg', 'E301_details_notes.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
           <div id="detailsSvg" class="svg-box">
             Run a solve to render E-301 Construction Details, Earthing &amp; General Notes.
           </div>
         </div>
 
         <div id="tabBoq" class="tab-pane">
-          <div style="overflow-x:auto;">
+          <div class="tbl-wrap">
             <table>
               <thead>
                 <tr>
@@ -764,15 +1091,17 @@ def render_etek_workbench_html(
         </div>
 
         <div id="tabFlags" class="tab-pane">
-          <table>
-            <thead>
-              <tr>
-                <th>Severity</th><th>Code</th><th>Category</th>
-                <th>Circuit</th><th>Regulation</th><th>Details</th>
-              </tr>
-            </thead>
-            <tbody id="flagsBody"></tbody>
-          </table>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Severity</th><th>Code</th><th>Category</th>
+                  <th>Circuit</th><th>Regulation</th><th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="flagsBody"></tbody>
+            </table>
+          </div>
         </div>
 
         <div id="tabWorkspace" class="tab-pane">
@@ -903,6 +1232,10 @@ def render_etek_workbench_html(
     let dbRelocateMode = false;
     let selectedRoomId = null;
     const layerRoleChoices = {{}};
+    const svgZoomState = {{}};
+    let currentFsFileName = 'drawing.svg';
+    let isSolving = false;
+    let isDownloading = false;
 
     function escapeHtml(value) {{
       return String(value == null ? '' : value)
@@ -913,11 +1246,130 @@ def render_etek_workbench_html(
         .replace(/'/g, '&#39;');
     }}
 
+    function setStatus(msg, kind) {{
+      const el = document.getElementById('statusLine');
+      if (!el) return;
+      el.textContent = msg;
+      const cls = kind === 'err' ? ' status-err' : (kind === 'ok' ? ' status-ok' : '');
+      el.className = 'status-line' + cls;
+    }}
+
     function openTab(id, btn) {{
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
       document.getElementById(id).classList.add('active');
       btn.classList.add('active');
+    }}
+
+    function applyZoomToBox(boxId) {{
+      const pct = svgZoomState[boxId] || 100;
+      const box = document.getElementById(boxId);
+      const lbl = document.getElementById('zoomLbl_' + boxId);
+      if (lbl) lbl.textContent = pct + '%';
+      if (!box) return;
+      const svg = box.querySelector('svg');
+      if (svg) {{
+        svg.style.width = pct + '%';
+        svg.style.maxWidth = 'none';
+      }}
+    }}
+
+    function zoomSvg(boxId, delta) {{
+      const cur = svgZoomState[boxId] || 100;
+      svgZoomState[boxId] = Math.min(350, Math.max(50, cur + delta));
+      applyZoomToBox(boxId);
+    }}
+
+    function resetZoomSvg(boxId) {{
+      svgZoomState[boxId] = 100;
+      applyZoomToBox(boxId);
+    }}
+
+    function openFullscreenSvg(boxId, title) {{
+      const src = document.getElementById(boxId);
+      if (!src || !src.querySelector('svg')) return;
+      document.getElementById('fsTitle').textContent = title || 'Drawing Sheet Viewer';
+      const body = document.getElementById('fsBody');
+      body.innerHTML = src.innerHTML;
+      currentFsFileName = (boxId || 'sheet') + '.svg';
+      svgZoomState.fsBody = 100;
+      applyZoomToBox('fsBody');
+      document.getElementById('fsModal').classList.add('open');
+    }}
+
+    function closeFullscreenSvg() {{
+      document.getElementById('fsModal').classList.remove('open');
+    }}
+
+    function downloadSvgBox(boxId, filename) {{
+      const box = document.getElementById(boxId);
+      if (!box) return;
+      const svg = box.querySelector('svg');
+      if (!svg) return;
+      const clone = svg.cloneNode(true);
+      clone.style.width = '';
+      clone.style.maxWidth = '';
+      const raw = new XMLSerializer().serializeToString(clone);
+      const blob = new Blob([raw], {{ type: 'image/svg+xml;charset=utf-8' }});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'drawing.svg';
+      a.click();
+      URL.revokeObjectURL(url);
+    }}
+
+    function downloadCurrentFsSvg() {{
+      downloadSvgBox('fsBody', currentFsFileName);
+    }}
+
+    function updatePendingEditsBar() {{
+      const cnt = Object.keys(circuitOverrides).length;
+      const bar = document.getElementById('pendingEditsBar');
+      const txt = document.getElementById('pendingEditsTxt');
+      if (!bar || !txt) return;
+      if (cnt > 0) {{
+        txt.textContent =
+          `${{cnt}} pending circuit override(s) staged — ` +
+          'click Apply & Re-Solve to recalculate BS 7671 checks and SLD.';
+        bar.style.display = 'flex';
+      }} else {{
+        bar.style.display = 'none';
+      }}
+    }}
+
+    function clearCircuitEdits() {{
+      Object.keys(circuitOverrides).forEach(k => delete circuitOverrides[k]);
+      updatePendingEditsBar();
+      runSolve();
+    }}
+
+    function clearDesignOverrides() {{
+      Object.keys(circuitOverrides).forEach(k => delete circuitOverrides[k]);
+      Object.keys(roomTypeOverrides).forEach(k => delete roomTypeOverrides[k]);
+      dbLocationOverride = null;
+      meterLocationOverride = null;
+      earthPitLocationOverride = null;
+      telecomLocationOverride = null;
+      selectedRoomId = null;
+      const reb = document.getElementById('roomEditBox');
+      if (reb) reb.style.display = 'none';
+      if (dbRelocateMode) toggleDbMode();
+      updatePendingEditsBar();
+    }}
+
+    function clearUploadedFiles() {{
+      const fi = document.getElementById('dxfFile');
+      if (fi) fi.value = '';
+      document.getElementById('fileStatusRow').style.display = 'none';
+      document.getElementById('fileStatusTxt').textContent = '';
+      document.getElementById('multiFloorBox').style.display = 'none';
+      document.getElementById('multiFloorRows').innerHTML = '';
+      document.getElementById('layerWizard').style.display = 'none';
+      document.getElementById('layerRows').innerHTML = '';
+      Object.keys(layerRoleChoices).forEach(k => delete layerRoleChoices[k]);
+      clearDesignOverrides();
+      runSolve();
     }}
 
     function updateAnchorBtnLabel() {{
@@ -1071,6 +1523,7 @@ def render_etek_workbench_html(
         circuitOverrides[cid][field] = (field === 'grouping_count') ? parseInt(val, 10) : val;
       }}
       if (Object.keys(circuitOverrides[cid]).length <= 1) delete circuitOverrides[cid];
+      updatePendingEditsBar();
     }}
 
     function selectDrawingSheet(sheetKey) {{
@@ -1080,6 +1533,7 @@ def render_etek_workbench_html(
       const sheets = window._cyelecSheets || {{}};
       document.getElementById('floorplanSvg').innerHTML =
         sheets[key] || sheets.combined || 'Run a solve to render floorplan overlay.';
+      applyZoomToBox('floorplanSvg');
       const btnMap = {{
         combined: 'btnSheetCombined',
         lighting: 'btnSheetLighting',
@@ -1092,6 +1546,75 @@ def render_etek_workbench_html(
         el.classList.toggle('btn-primary', k === key);
         el.classList.toggle('btn-secondary', k !== key);
       }});
+    }}
+
+    function renderStage5EngineeringSummary(d) {{
+      const box = document.getElementById('stage5EngSummary');
+      if (!box) return;
+      const chips = [];
+      const lps = d.lightning_risk;
+      if (lps) {{
+        const cls = lps.lps_required ? 'b-warn' : 'b-pass';
+        const vTxt = lps.lps_required ? 'LPS Class IV Req.' : 'No External LPS';
+        chips.push(
+          `<div class="s5-chip"><strong>IEC 62305-2:</strong>
+            <span class="badge ${{cls}}">${{escapeHtml(vTxt)}}</span>
+            R1=${{Number(lps.risk_r1).toExponential(2)}} ·
+            ${{escapeHtml(lps.spd_requirement)}}</div>`
+        );
+      }}
+      const boards = d.din_rail_boards || [];
+      if (boards.length > 0) {{
+        const bStr = boards.map(b => {{
+          const bid = escapeHtml(b.board_id);
+          const cap = `${{b.total_modules_used}}/${{b.total_modules_capacity}}M`;
+          return `<code>${{bid}}</code> ${{cap}} (${{Math.round(b.spare_pct)}}% spare)`;
+        }}).join(' · ');
+        const allSel = boards.every(b => b.selectivity_pass);
+        chips.push(
+          `<div class="s5-chip"><strong>DIN-Rail DBs:</strong> ${{bStr}}
+            <span class="badge ${{allSel ? 'b-pass' : 'b-fail'}}">
+              ${{allSel ? 'Selectivity PASS' : 'Check Icu'}}
+            </span></div>`
+        );
+      }}
+      const lumens = d.lumen_checks || [];
+      let luxHtml = '';
+      if (lumens.length > 0) {{
+        const okCnt = lumens.filter(x => x.compliant).length;
+        const lCls = (okCnt === lumens.length) ? 'b-pass' : 'b-warn';
+        const lRows = lumens.map(lc => {{
+          const cnt = Number(lc.luminaire_count || 0);
+          const watts = Number(lc.watts_per_fixture || 0);
+          const totLm = Math.round(cnt * Number(lc.lumens_per_fixture || 0));
+          return `<tr>
+          <td>${{escapeHtml(lc.room_label)}}</td>
+          <td class="r">${{Number(lc.area_m2).toFixed(1)}} m²</td>
+          <td class="c">${{cnt}} × ${{watts.toFixed(0)}}W</td>
+          <td class="r">${{totLm}} lm</td>
+          <td class="r">${{lc.target_lux}} lx</td>
+          <td class="r"><strong>${{Number(lc.achieved_lux).toFixed(0)}} lx</strong></td>
+          <td class="c"><span class="badge ${{lc.compliant ? 'b-pass' : 'b-warn'}}">
+            ${{lc.compliant ? 'PASS' : 'LOW'}}</span></td>
+        </tr>`;
+        }}).join('');
+        luxHtml = `<details style="margin-top:6px;border:1px solid var(--border);
+            border-radius:5px;padding:6px 10px;background:#f8fafc;">
+          <summary style="cursor:pointer;font-weight:700;font-size:11.5px;color:var(--navy);">
+            CIBSE / BS EN 12464-1 Room Photometrics (Lumen Method):
+            <span class="badge ${{lCls}}">${{okCnt}}/${{lumens.length}} Compliant</span>
+          </summary>
+          <div class="tbl-wrap" style="margin-top:8px;">
+            <table><thead><tr>
+              <th>Room</th><th class="r">Area</th><th class="c">Luminaires</th>
+              <th class="r">Flux</th><th class="r">Target</th><th class="r">Achieved</th>
+              <th class="c">Check</th>
+            </tr></thead><tbody>${{lRows}}</tbody></table>
+          </div>
+        </details>`;
+      }}
+      const strip = chips.length ? `<div class="s5-strip">${{chips.join('')}}</div>` : '';
+      box.innerHTML = strip + luxHtml;
     }}
 
     function renderResult(data) {{
@@ -1108,8 +1631,9 @@ def render_etek_workbench_html(
       document.getElementById('kBal').textContent = pb
         ? `${{pb.imbalance_pct.toFixed(2)}}% | ${{sp.total_conduit_m.toFixed(1)}} m`
         : `1P | ${{sp.total_conduit_m.toFixed(1)}} m`;
+      const isBlankBoq = Boolean(boq && (boq.is_tender_blank_rates || boq.tender_blank_rates));
       document.getElementById('kBoq').textContent = boq
-        ? (boq.tender_blank_rates
+        ? (isBlankBoq
             ? 'Tender BOQ (Unpriced)'
             : `€${{boq.grand_total_eur.toLocaleString('en-US', {{minimumFractionDigits:2}})}}`)
         : '-';
@@ -1118,6 +1642,10 @@ def render_etek_workbench_html(
       const wrn = d.review_flags.filter(f => f.severity === 'warning').length;
       const inf = d.review_flags.filter(f => f.severity === 'info').length;
       document.getElementById('kFlags').textContent = `${{blk}} Blk / ${{wrn}} Wrn / ${{inf}} Info`;
+      const tabFlagsBtn = document.getElementById('tabBtnFlags');
+      if (tabFlagsBtn) {{
+        tabFlagsBtn.textContent = `ETEK Review Flags (${{blk}}B/${{wrn}}W)`;
+      }}
 
       if (pb) {{
         const mx = Math.max(pb.max_phase_current_a, 1);
@@ -1135,6 +1663,8 @@ def render_etek_workbench_html(
         document.getElementById('balanceBars').innerHTML = '';
       }}
 
+      renderStage5EngineeringSummary(d);
+
       if (d.sub_mains && d.sub_mains.length > 0) {{
         const rows = d.sub_mains.map(sm => `<tr>
           <td><strong>${{escapeHtml(sm.board_id)}}</strong></td>
@@ -1148,12 +1678,12 @@ def render_etek_workbench_html(
           <td class="r">${{sm.downstream_ipf_ka != null
             ? sm.downstream_ipf_ka.toFixed(2) + ' kA' : '-'}}</td>
         </tr>`).join('');
-        document.getElementById('subMainsBox').innerHTML = `<table>
+        document.getElementById('subMainsBox').innerHTML = `<div class="tbl-wrap"><table>
           <thead><tr>
             <th>Sub-Board</th><th>Parent</th><th class="c">Floor</th><th>Upstream Protection</th>
             <th class="c">Sub-Main Cable</th><th class="r">Sub ΔV</th>
             <th class="r">Cumul. L/P ΔV</th><th class="r">Sub Ipf</th>
-          </tr></thead><tbody>${{rows}}</tbody></table>`;
+          </tr></thead><tbody>${{rows}}</tbody></table></div>`;
       }} else {{
         document.getElementById('subMainsBox').innerHTML = '';
       }}
@@ -1169,7 +1699,7 @@ def render_etek_workbench_html(
         const curPhase = ov.phase || 'AUTO';
         const curCg = Number(ov.grouping_count || s.grouping_count);
         const phSelect = s.is_three_phase ? '3P' : `
-          <select class="mini-input" data-cid="${{cid}}" data-field="phase">
+          <select class="phase-sel" data-cid="${{cid}}" data-field="phase">
             <option value="AUTO" ${{curPhase==='AUTO'?'selected':''}}>Auto (${{phVal}})</option>
             <option value="L1" ${{curPhase==='L1'?'selected':''}}>L1</option>
             <option value="L2" ${{curPhase==='L2'?'selected':''}}>L2</option>
@@ -1193,6 +1723,7 @@ def render_etek_workbench_html(
           <td class="c"><span class="badge ${{bCls}}">${{c.overall_pass?'PASS':'FAIL'}}</span></td>
         </tr>`;
       }}).join('');
+      updatePendingEditsBar();
 
       window._cyelecSheets = {{
         combined: data.floorplan_svg || '',
@@ -1203,32 +1734,110 @@ def render_etek_workbench_html(
       selectDrawingSheet(window._cyelecActiveSheet || 'combined');
       document.getElementById('siteSvg').innerHTML =
         data.site_svg || 'E-104 Site & Earthing sheet unavailable.';
+      applyZoomToBox('siteSvg');
       document.getElementById('sldSvg').innerHTML = data.sld_svg || '';
+      applyZoomToBox('sldSvg');
       document.getElementById('riserSvg').innerHTML =
         data.riser_svg || 'E-202 Riser & DIN-Rail DB sheet unavailable.';
+      applyZoomToBox('riserSvg');
       document.getElementById('detailsSvg').innerHTML =
         data.details_svg || 'Details sheet unavailable.';
+      applyZoomToBox('detailsSvg');
 
       if (boq && boq.items) {{
         const lang = document.getElementById('reportLang').value;
         const vatPct = Math.round((boq.vat_rate != null ? boq.vat_rate : 0.19) * 100);
-        const blank = Boolean(boq.tender_blank_rates);
-        const bRows = boq.items.map(it => {{
-          const txt = lang === 'el'
-            ? it.description_el
-            : (lang === 'bilingual'
-                ? `${{it.description_en}} / ${{it.description_el}}`
-                : it.description_en);
-          return `<tr>
-            <td><code>${{escapeHtml(it.item_no)}}</code></td>
-            <td>${{escapeHtml(it.category)}}</td>
-            <td>${{escapeHtml(txt)}}</td>
-            <td class="c">${{escapeHtml(it.unit)}}</td>
-            <td class="r">${{it.quantity.toFixed(2)}}</td>
-            <td class="r">${{blank ? '<em>Tender</em>' : '€' + it.unit_rate_eur.toFixed(2)}}</td>
-            <td class="r">${{blank ? '<em>Formula</em>' : '€' + it.total_eur.toFixed(2)}}</td>
-          </tr>`;
-        }}).join('');
+        const blank = Boolean(boq.is_tender_blank_rates || boq.tender_blank_rates);
+        const SEC_TITLES = {{
+          '01': 'SEC 01 — Switchgear & Distribution Boards',
+          '02': 'SEC 02 — Cables & Containment',
+          '03': 'SEC 03 — Lighting & Switching',
+          '04': 'SEC 04 — Power Outlets & Fixed Accessories',
+          '05': 'SEC 05 — Mechanical, HVAC, Shutters & Plant',
+          '06': 'SEC 06 — ELV, Security, Intercom & Life Safety',
+          '07': 'SEC 07 — Earthing, Bonding & Lightning Protection',
+          '08': 'SEC 08 — External Site Works & Trenching',
+          '09': 'SEC 09 — Smart Home / KNX Automation',
+          '10': 'SEC 10 — Testing, Commissioning & As-Builts (HMY 58)',
+        }};
+        const mapSec = (it) => {{
+          const cat = String(it.category || '').toLowerCase();
+          const desc = String(it.description_en || '').toLowerCase();
+          if (cat.includes('switchgear') || cat.includes('board')) return '01';
+          if (cat.includes('cable') || cat.includes('containment') || cat.includes('conduit'))
+            return '02';
+          const litKeys = [
+            'luminaire', 'switch', 'mirror light', 'dimmer', 'pendant', 'emergency', 'exhaust fan',
+          ];
+          if (cat.includes('lighting') || litKeys.some(k => desc.includes(k))) {{
+            const isFixed =
+              desc.includes('water heater') ||
+              desc.includes('cooker') ||
+              desc.includes('shutter');
+            if (isFixed) return desc.includes('shutter') ? '05' : '04';
+            return '03';
+          }}
+          const mechKeys = [
+            'split a/c', 'shutter', 'heat pump', 'vrv', 'pump', 'gate', 'pool',
+            'ev charger', 'pv ac',
+          ];
+          if (
+            cat.includes('mechanical') ||
+            cat.includes('plant') ||
+            mechKeys.some(k => desc.includes(k))
+          ) return '05';
+          if (
+            cat.includes('elv') || cat.includes('security') ||
+            desc.includes('fire alarm') || desc.includes('smoke')
+          ) return '06';
+          if (cat.includes('earthing') || desc.includes('lightning') || desc.includes('bonding'))
+            return '07';
+          if (cat.includes('site') || desc.includes('trench') || desc.includes('bollard'))
+            return '08';
+          if (cat.includes('knx')) return '09';
+          if (cat.includes('testing') || cat.includes('commissioning')) return '10';
+          return '04';
+        }};
+        const groups = new Map();
+        for (const it of boq.items) {{
+          const code = mapSec(it);
+          if (!groups.has(code)) groups.set(code, []);
+          groups.get(code).push(it);
+        }}
+        const rowsHtml = [];
+        const SEC_ORDER = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'];
+        for (const code of SEC_ORDER) {{
+          const secItems = groups.get(code);
+          if (!secItems || !secItems.length) continue;
+          const secHdr = SEC_TITLES[code];
+          rowsHtml.push(
+            `<tr class="boq-sec-row"><td colspan="7">${{escapeHtml(secHdr)}}</td></tr>`
+          );
+          let secSum = 0;
+          for (const it of secItems) {{
+            secSum += Number(it.total_eur || 0);
+            const txt = lang === 'el'
+              ? it.description_el
+              : (lang === 'bilingual'
+                  ? `${{it.description_en}} / ${{it.description_el}}`
+                  : it.description_en);
+            rowsHtml.push(`<tr>
+              <td><code>${{escapeHtml(it.item_no)}}</code></td>
+              <td>${{escapeHtml(it.category)}}</td>
+              <td>${{escapeHtml(txt)}}</td>
+              <td class="c">${{escapeHtml(it.unit)}}</td>
+              <td class="r">${{it.quantity.toFixed(2)}}</td>
+              <td class="r">${{blank ? '<em>Tender</em>' : '€' + it.unit_rate_eur.toFixed(2)}}</td>
+              <td class="r">${{blank ? '<em>Formula</em>' : '€' + it.total_eur.toFixed(2)}}</td>
+            </tr>`);
+          }}
+          if (!blank) {{
+            rowsHtml.push(`<tr class="boq-sub-row">
+              <td colspan="6" class="r">Section Subtotal (SEC ${{code}})</td>
+              <td class="r">€${{secSum.toFixed(2)}}</td>
+            </tr>`);
+          }}
+        }}
         const totals = blank
           ? `<tr><td colspan="7" class="r"><strong>Unpriced Tender BOQ Mode:
               Excel export leaves Column G blank with live =ROUND(F*G,2) &amp;
@@ -1239,7 +1848,7 @@ def render_etek_workbench_html(
             <td class="r"><strong>€${{boq.vat_eur.toFixed(2)}}</strong></td></tr>
           <tr><td colspan="6" class="r"><strong>GRAND TOTAL (EUR incl. VAT)</strong></td>
             <td class="r"><strong>€${{boq.grand_total_eur.toFixed(2)}}</strong></td></tr>`;
-        document.getElementById('boqBody').innerHTML = bRows + totals;
+        document.getElementById('boqBody').innerHTML = rowsHtml.join('') + totals;
       }}
 
       const rank = {{ blocker: 0, warning: 1, info: 2 }};
@@ -1309,6 +1918,26 @@ def render_etek_workbench_html(
       document.getElementById('roomEditBox').style.display = 'inline-flex';
     }});
 
+    // Delegated click listener for Team Seat Reset Password (clean, XSS-safe, no inline onclick)
+    document.getElementById('teamBox').addEventListener('click', (ev) => {{
+      const btn = ev.target.closest('button[data-reset-uid]');
+      if (!btn) return;
+      resetMemberPassword(btn.dataset.resetUid, btn.dataset.resetEmail || '');
+    }});
+
+    // Keyboard shortcuts: Escape closes Fullscreen SVG modal; Enter submits Auth Modal
+    document.addEventListener('keydown', (ev) => {{
+      if (ev.key === 'Escape') {{
+        closeFullscreenSvg();
+      }}
+    }});
+    document.getElementById('authModal').addEventListener('keydown', (ev) => {{
+      if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') {{
+        ev.preventDefault();
+        submitAuthModal();
+      }}
+    }});
+
     function authHeaders(isJson) {{
       const h = {{ 'X-Tenant-ID': document.getElementById('tenantId').value || 'anonymous' }};
       let jwt = '';
@@ -1324,6 +1953,17 @@ def render_etek_workbench_html(
       try {{ sessionStorage.setItem('cyelec_api_key', ev.target.value.trim()); }} catch (_) {{}}
     }});
 
+    // Switching benchmark clears stale overrides & uploaded file, then solves automatically
+    document.getElementById('benchmarkSel').addEventListener('change', () => {{
+      const fi = document.getElementById('dxfFile');
+      if (fi && fi.files.length > 0) {{
+        clearUploadedFiles();
+        return;
+      }}
+      clearDesignOverrides();
+      runSolve();
+    }});
+
     // Multi-Floor selector + DXF Layer Mapping Wizard trigger on file select
     document.getElementById('dxfFile').addEventListener('change', async (ev) => {{
       const files = ev.target.files;
@@ -1331,7 +1971,19 @@ def render_etek_workbench_html(
       const mfRows = document.getElementById('multiFloorRows');
       const box = document.getElementById('layerWizard');
       const rows = document.getElementById('layerRows');
+      const fRow = document.getElementById('fileStatusRow');
+      const fTxt = document.getElementById('fileStatusTxt');
       Object.keys(layerRoleChoices).forEach(k => delete layerRoleChoices[k]);
+      clearDesignOverrides();
+
+      if (files.length > 0) {{
+        const names = Array.from(files).map(x => x.name).join(', ');
+        fTxt.textContent = files.length === 1 ? names : `${{files.length}} files: ${{names}}`;
+        fRow.style.display = 'flex';
+      }} else {{
+        fRow.style.display = 'none';
+        fTxt.textContent = '';
+      }}
 
       if (files.length > 1) {{
         mfRows.innerHTML = Array.from(files).map((fl, i) => {{
@@ -1392,7 +2044,6 @@ def render_etek_workbench_html(
     }});
 
     async function saveFirmDefaults() {{
-      const status = document.getElementById('statusLine');
       const ov = collectOverrides();
       const vat = parseFloat(document.getElementById('vatRateSel').value || '0.19');
       const payload = {{
@@ -1407,15 +2058,20 @@ def render_etek_workbench_html(
           body: JSON.stringify(payload)
         }});
         if (!resp.ok) throw new Error(await resp.text());
-        status.textContent = 'Saved tenant firm branding, language & VAT defaults.';
+        setStatus('Saved tenant firm branding, language & VAT defaults.', 'ok');
       }} catch (err) {{
-        status.textContent = `Save defaults failed: ${{err.message}}`;
+        setStatus(`Save defaults failed: ${{err.message}}`, 'err');
       }}
     }}
 
     async function runSolve() {{
-      const status = document.getElementById('statusLine');
-      status.textContent = 'Running deterministic BS 7671 / EAC / NetworkX solve...';
+      if (isSolving) return;
+      isSolving = true;
+      const runBtn = document.getElementById('btnRunSolve');
+      const zipBtn = document.getElementById('btnDownloadZip');
+      if (runBtn) {{ runBtn.disabled = true; runBtn.textContent = 'Solving...'; }}
+      if (zipBtn) zipBtn.disabled = true;
+      setStatus('Running deterministic BS 7671 / EAC / NetworkX solve...', '');
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
 
@@ -1456,64 +2112,89 @@ def render_etek_workbench_html(
             body: JSON.stringify(overrides)
           }});
         }}
-        if (!resp.ok) throw new Error(await resp.text());
+        if (!resp.ok) {{
+          let errTxt = await resp.text();
+          try {{ errTxt = JSON.parse(errTxt).detail || errTxt; }} catch (_) {{}}
+          throw new Error(errTxt);
+        }}
         const data = await resp.json();
         renderResult(data);
         const ms = resp.headers.get('X-Process-Time-Ms') || '?';
         const sha = data.result.design.provenance.input_sha256.slice(0, 12);
-        status.textContent = `Solved cleanly in ${{ms}} ms (SHA-256: ${{sha}}).`;
+        setStatus(`Solved cleanly in ${{ms}} ms (SHA-256: ${{sha}}).`, 'ok');
       }} catch (err) {{
-        status.textContent = `Error: ${{err.message}}`;
+        setStatus(`Solve failed: ${{err.message}}`, 'err');
+      }} finally {{
+        isSolving = false;
+        if (runBtn) {{ runBtn.disabled = false; runBtn.textContent = 'Run Deterministic Solve'; }}
+        if (zipBtn) zipBtn.disabled = false;
       }}
     }}
 
     async function downloadBundle() {{
+      if (isDownloading) return;
+      isDownloading = true;
+      const zipBtn = document.getElementById('btnDownloadZip');
+      if (zipBtn) {{ zipBtn.disabled = true; zipBtn.textContent = 'Building EAC ZIP Pack...'; }}
+      setStatus('Generating complete EAC DXF / SVG / PDF / Excel ZIP pack...', '');
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
-      let resp;
-      if (fileInput.files.length > 1) {{
-        const fd = new FormData();
-        for (const fl of fileInput.files) fd.append('files', fl);
-        const meta = collectMultiFloorMeta(fileInput.files);
-        fd.append('floors_json', JSON.stringify(meta.labels));
-        if (Object.keys(meta.submains).length > 0) {{
-          fd.append('submain_lengths_json', JSON.stringify(meta.submains));
+      try {{
+        let resp;
+        if (fileInput.files.length > 1) {{
+          const fd = new FormData();
+          for (const fl of fileInput.files) fd.append('files', fl);
+          const meta = collectMultiFloorMeta(fileInput.files);
+          fd.append('floors_json', JSON.stringify(meta.labels));
+          if (Object.keys(meta.submains).length > 0) {{
+            fd.append('submain_lengths_json', JSON.stringify(meta.submains));
+          }}
+          fd.append('overrides_json', JSON.stringify(overrides));
+          const lm = collectLayerMapping();
+          if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
+          resp = await fetch('/v1/solve/dxf/multifloor/bundle', {{
+            method: 'POST',
+            headers: authHeaders(false),
+            body: fd
+          }});
+        }} else if (fileInput.files.length === 1) {{
+          const fd = new FormData();
+          fd.append('file', fileInput.files[0]);
+          fd.append('overrides_json', JSON.stringify(overrides));
+          const lm = collectLayerMapping();
+          if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
+          resp = await fetch('/v1/solve/dxf/bundle', {{
+            method: 'POST',
+            headers: authHeaders(false),
+            body: fd
+          }});
+        }} else {{
+          const tmpl = document.getElementById('benchmarkSel').value;
+          resp = await fetch(`/v1/solve/benchmark/${{tmpl}}/bundle`, {{
+            method: 'POST',
+            headers: authHeaders(true),
+            body: JSON.stringify(overrides)
+          }});
         }}
-        fd.append('overrides_json', JSON.stringify(overrides));
-        const lm = collectLayerMapping();
-        if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
-        resp = await fetch('/v1/solve/dxf/multifloor/bundle', {{
-          method: 'POST',
-          headers: authHeaders(false),
-          body: fd
-        }});
-      }} else if (fileInput.files.length === 1) {{
-        const fd = new FormData();
-        fd.append('file', fileInput.files[0]);
-        fd.append('overrides_json', JSON.stringify(overrides));
-        const lm = collectLayerMapping();
-        if (lm) fd.append('layer_mapping_json', JSON.stringify(lm));
-        resp = await fetch('/v1/solve/dxf/bundle', {{
-          method: 'POST',
-          headers: authHeaders(false),
-          body: fd
-        }});
-      }} else {{
-        const tmpl = document.getElementById('benchmarkSel').value;
-        resp = await fetch(`/v1/solve/benchmark/${{tmpl}}/bundle`, {{
-          method: 'POST',
-          headers: authHeaders(true),
-          body: JSON.stringify(overrides)
-        }});
+        if (!resp.ok) {{
+          let errTxt = await resp.text();
+          try {{ errTxt = JSON.parse(errTxt).detail || errTxt; }} catch (_) {{}}
+          throw new Error(errTxt);
+        }}
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'eac_submission_pack.zip';
+        a.click();
+        URL.revokeObjectURL(url);
+        setStatus('Downloaded eac_submission_pack.zip cleanly.', 'ok');
+      }} catch (err) {{
+        setStatus(`Bundle download failed: ${{err.message}}`, 'err');
+      }} finally {{
+        isDownloading = false;
+        if (zipBtn) {{ zipBtn.disabled = false; zipBtn.textContent = 'Download EAC ZIP Pack'; }}
       }}
-      if (!resp.ok) {{ alert('Bundle failed: ' + await resp.text()); return; }}
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'eac_submission_pack.zip';
-      a.click();
-      URL.revokeObjectURL(url);
     }}
 
     async function loadProjects() {{
@@ -1627,11 +2308,11 @@ def render_etek_workbench_html(
         <td class="r">€${{r.boq_grand_total_eur.toFixed(2)}}</td>
         <td>${{escapeHtml(r.created_at)}}</td>
       </tr>`).join('');
-      document.getElementById('revListBox').innerHTML = `<table>
+      document.getElementById('revListBox').innerHTML = `<div class="tbl-wrap"><table>
         <thead><tr>
           <th>Rev</th><th>Input SHA</th><th>Supply Tier</th>
           <th class="r">Div. kVA</th><th class="r">BOQ (EUR)</th><th>Timestamp</th>
-        </tr></thead><tbody>${{rows}}</tbody></table>`;
+        </tr></thead><tbody>${{rows}}</tbody></table></div>`;
     }}
 
     async function diffLatestRevisions() {{
@@ -1663,10 +2344,10 @@ def render_etek_workbench_html(
       box.innerHTML = `<p><strong>Diff Rev ${{a}} -&gt; Rev ${{b}}:</strong>
         ΔkVA=${{diff.diversified_kva_delta}} | ΔConduit=${{diff.conduit_m_delta}} m |
         ΔBOQ=€${{diff.boq_eur_delta.toFixed(2)}}</p>
-        <table><thead><tr>
+        <div class="tbl-wrap"><table><thead><tr>
           <th>Circuit</th><th>Change</th><th>Rev ${{a}}</th><th>Rev ${{b}}</th>
         </tr></thead><tbody>${{cRows || '<tr><td colspan="4">No circuit deltas.</td></tr>'}}
-        </tbody></table>`;
+        </tbody></table></div>`;
     }}
 
     const AUTH_REQUIRED = {auth_req_js};
@@ -1682,6 +2363,15 @@ def render_etek_workbench_html(
 
     function closeAuthModal() {{
       document.getElementById('authModal').classList.remove('open');
+      let hasJwt = false;
+      try {{
+        hasJwt = Boolean((sessionStorage.getItem('cyelec_jwt') || '').trim());
+      }} catch (_) {{}}
+      const hasKey = Boolean((document.getElementById('apiKeyInput').value || '').trim());
+      const banner = document.getElementById('authGateBanner');
+      if (banner) {{
+        banner.style.display = (AUTH_REQUIRED && !hasJwt && !hasKey) ? 'flex' : 'none';
+      }}
     }}
 
     function switchAuthModalTab(mode) {{
@@ -1714,6 +2404,11 @@ def render_etek_workbench_html(
         }}
       }}
       if (t.report_language) document.getElementById('reportLang').value = t.report_language;
+      if (t.boq_rate_overrides && t.boq_rate_overrides.vat_rate != null) {{
+        const vSel = document.getElementById('vatRateSel');
+        const vStr = Number(t.boq_rate_overrides.vat_rate).toFixed(2);
+        if (vSel && Array.from(vSel.options).some(o => o.value === vStr)) vSel.value = vStr;
+      }}
       const roleStr = (u.role || 'owner').toUpperCase();
       const emailStr = u.email || t.display_name || t.tenant_id || 'Signed In';
       const qStr = q ? ` · ${{q.solves_used}}/${{q.solves_limit}} solves` : '';
@@ -1721,6 +2416,8 @@ def render_etek_workbench_html(
         `Signed in: ${{emailStr}} (${{roleStr}})${{qStr}}`;
       document.getElementById('hdrAccountBtn').textContent =
         `${{emailStr}} (${{roleStr}})${{qStr}}`;
+      const banner = document.getElementById('authGateBanner');
+      if (banner) banner.style.display = 'none';
       closeAuthModal();
     }}
 
@@ -1860,9 +2557,9 @@ def render_etek_workbench_html(
                            gap:6px;margin:3px 0;">
                 <span><code>${{escapeHtml(m.role)}}</code> — ${{escapeHtml(m.email)}}
                 (${{escapeHtml(m.display_name)}})</span>
-                <button class="btn btn-secondary btn-sm"
-                  onclick="resetMemberPassword('${{escapeHtml(m.user_id)}}',
-                  '${{escapeHtml(m.email)}}')">Reset PW</button>
+                <button class="btn btn-secondary btn-xs"
+                  data-reset-uid="${{escapeHtml(m.user_id)}}"
+                  data-reset-email="${{escapeHtml(m.email)}}">Reset PW</button>
               </div>`
             ).join('')
           : 'No user accounts registered on this tenant yet.';
@@ -1932,8 +2629,7 @@ def render_etek_workbench_html(
       }}
 
       if (AUTH_REQUIRED && !savedKey) {{
-        document.getElementById('statusLine').textContent =
-          'Sign in or create your firm account to start designing.';
+        setStatus('Sign in or create your firm account to start designing.', '');
         openAuthModal('login');
         return;
       }}

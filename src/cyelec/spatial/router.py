@@ -514,19 +514,32 @@ def route_circuits(
             if spec.room_ids and spec.room_ids[0] in rooms_by_id
             else 2900.0
         )
-        riser_count = 2 if spec.topology == CircuitTopology.RING_FINAL else 1
-        vertical_m = riser_count * max(0.5, (ceiling_mm - db_mounting_height_mm) / 1000.0)
-        if off_floor_count > 0:
-            vertical_m += 3.5 + 1.5 * min(off_floor_count, 4)
-        for dev in c_devs:
-            if dev.device_type == DeviceType.LUMINAIRE:
-                vertical_m += 0.25  # Ceiling rose tail
-            else:
-                drop_m = max(0.3, (ceiling_mm - dev.mounting_height_mm) / 1000.0)
-                # Ring final sockets drop down AND back up (2x drop per socket)
-                vertical_m += (
-                    2.0 * drop_m if spec.topology == CircuitTopology.RING_FINAL else drop_m
-                )
+        if spec.topology == CircuitTopology.RING_FINAL:
+            # Cyprus masonry ring final: 2 legs drop from DB to floor screed + rise/return stub
+            # at each socket box from floor screed (typically +450 mm -> 0.90 m per twin socket).
+            vertical_m = 2.0 * max(0.8, db_mounting_height_mm / 1000.0)
+            if off_floor_count > 0:
+                vertical_m += 3.5 + 1.5 * min(off_floor_count, 4)
+            for dev in same_floor_devs:
+                stub_h = min(max(0.3, dev.mounting_height_mm / 1000.0), 1.2)
+                vertical_m += 2.0 * stub_h
+        else:
+            riser_count = 1
+            vertical_m = riser_count * max(0.5, (ceiling_mm - db_mounting_height_mm) / 1000.0)
+            if off_floor_count > 0:
+                vertical_m += 3.5 + 1.5 * min(off_floor_count, 4)
+            for dev in same_floor_devs:
+                if dev.device_type in (
+                    DeviceType.LUMINAIRE,
+                    DeviceType.PENDANT_LIGHT,
+                    DeviceType.SMOKE_DETECTOR,
+                    DeviceType.HEAT_DETECTOR,
+                    DeviceType.WIFI_AP,
+                ):
+                    vertical_m += 0.25  # Ceiling rose tail
+                else:
+                    drop_m = max(0.3, (ceiling_mm - dev.mounting_height_mm) / 1000.0)
+                    vertical_m += drop_m
 
         circuit_edge_sets[spec.circuit_id] = used_edges
         for ekey in used_edges:

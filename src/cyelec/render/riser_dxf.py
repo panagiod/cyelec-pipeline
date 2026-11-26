@@ -8,7 +8,7 @@ from pathlib import Path
 from ezdxf.document import Drawing
 from ezdxf.filemanagement import new as new_dxf
 
-from cyelec.models.electrical import ElectricalDesignResult
+from cyelec.models.electrical import DinRailBoardLayout, ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
 
 
@@ -69,14 +69,16 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
     elv_x = 128.0
     earth_x = 180.0
 
-    # Vertical spines
+    # Vertical spines (ELV terminates cleanly at top habitable floor, not dangling toward roof)
+    y_top_floor = y_bot + max(len(levels) - 2, 1) * step_y
     msp.add_line((pwr_x, y_bot + 6), (pwr_x, y_top - 4), dxfattribs={"layer": "E-RISER-PWR"})
-    msp.add_line((elv_x, y_bot + 6), (elv_x, y_top - 12), dxfattribs={"layer": "E-RISER-ELV"})
+    msp.add_line((elv_x, y_bot + 6), (elv_x, y_top_floor + 5), dxfattribs={"layer": "E-RISER-ELV"})
     msp.add_line(
         (earth_x, y_bot + 6), (earth_x, y_top - 4), dxfattribs={"layer": "E-RISER-EARTHING"}
     )
 
     sm_by_floor = {sm.floor: sm for sm in design.sub_mains}
+    tier_short = eac.recommended_supply_tier.split("(")[0].strip()
     for idx, lvl in enumerate(levels):
         ly = y_bot + idx * step_y
         msp.add_line((10.0, ly), (204.0, ly), dxfattribs={"layer": "E-DIN-SPARE"})
@@ -86,7 +88,7 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
 
         if lvl == "SITE / STREET":
             msp.add_text(
-                f"EAC METER ({eac.recommended_supply_tier[:10]})",
+                f"EAC METER ({tier_short})",
                 dxfattribs={"layer": "E-RISER-PWR", "height": 2.1},
             ).set_placement((pwr_x - 18.0, ly + 4.0))
             msp.add_text(
@@ -181,11 +183,11 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
                     (rx0 + used_w, y_cur + 2.5),
                     dxfattribs={"layer": "E-RISER-PWR"},
                 )
-            row_txt = f"R{row.row_no} ({row.modules_used}/{row.modules_capacity}M): " + ", ".join(
-                row.items[:5]
+            row_txt = _pack_din_row_label(
+                row.row_no, row.modules_used, row.modules_capacity, row.items, 80
             )
             msp.add_text(
-                row_txt[:82], dxfattribs={"layer": "E-TITLE", "height": 1.7}
+                row_txt, dxfattribs={"layer": "E-TITLE", "height": 1.7}
             ).set_placement((rx0 + 2.0, y_cur - 2.0))
             y_cur -= 8.8
         y_cur -= 4.5
@@ -204,6 +206,43 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
     return doc
 
 
+def _wrap_riser_text(text: str, max_chars: int = 76) -> list[str]:
+    words = text.split()
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if len(cand) <= max_chars or not cur:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _pack_din_row_label(
+    row_no: int, used: int, cap: int, items: list[str], max_chars: int = 86
+) -> str:
+    """Pack whole DIN-rail circuit items into a single crisp row label without mid-word cuts."""
+    prefix = f"Row {row_no} ({used}/{cap}M): "
+    chosen: list[str] = []
+    for idx, itm in enumerate(items):
+        rem = len(items) - idx - 1
+        suffix = f" (+{rem} more)" if rem > 0 else ""
+        cand = prefix + ", ".join([*chosen, itm]) + suffix
+        if len(cand) <= max_chars or not chosen:
+            chosen.append(itm)
+        else:
+            break
+    rem_final = len(items) - len(chosen)
+    out = prefix + ", ".join(chosen)
+    if rem_final > 0:
+        out += f" (+{rem_final} more)"
+    return out
+
+
 def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult) -> str:
     """Render E-202 Vertical Riser Diagram & Physical 18mm DIN-Rail DB Elevation as SVG."""
     design = _unwrap(result)
@@ -213,23 +252,37 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
     floors = [sb.floor for sb in b.sub_boards] if b.sub_boards else ["GF"]
     levels = ["SITE / STREET", *floors, "ROOF"]
     sm_by_floor = {sm.floor: sm for sm in design.sub_mains}
+    tier_short = eac.recommended_supply_tier.split("(")[0].strip()
 
-    svg_w = 1180
-    svg_h = max(760, 180 + len(boards) * 215)
-    w_lbl = 'style="fill:#fff;font-size:8.5px;font-weight:700;"'
+    # Pre-compute exact right-pane height so cards never clip at the bottom
+    board_blocks: list[tuple[DinRailBoardLayout, list[str], float]] = []
+    total_boards_h = 112.0
+    for brd in boards:
+        sel_full = (
+            f"Ipf={brd.incoming_ipf_ka:.1f} kA <= Icu={brd.min_device_icu_ka:.0f} kA | "
+            f"{brd.selectivity_note}"
+        )
+        sel_lines = _wrap_riser_text(sel_full, max_chars=74)
+        bh = 56.0 + len(sel_lines) * 14.0 + len(brd.rows) * 31.0 + 12.0
+        board_blocks.append((brd, sel_lines, bh))
+        total_boards_h += bh + 16.0
+
+    svg_w = 1190
+    svg_h = int(max(760, total_boards_h + 24.0))
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_w} {svg_h}" '
-            f'width="{svg_w}" height="{svg_h}">'
+            f'<svg xmlns="http://www.w3.org/2000/svg" class="cy-e202" '
+            f'viewBox="0 0 {svg_w} {svg_h}" width="{svg_w}" height="{svg_h}">'
         ),
         "  <style>",
-        '    text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
-        "    .hdr { font-size: 15px; font-weight: 700; fill: #1b365d; }",
-        "    .sub { font-size: 10px; fill: #4a5568; }",
-        "    .sec { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
-        "    .lbl { font-size: 9.2px; font-weight: 700; }",
-        "    .txt { font-size: 8.8px; fill: #2d3748; }",
+        '    .cy-e202 text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
+        "    .cy-e202 .hdr { font-size: 15px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e202 .sub { font-size: 10px; fill: #4a5568; }",
+        "    .cy-e202 .sec { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e202 .lbl { font-size: 9px; font-weight: 700; }",
+        "    .cy-e202 .wlbl { font-size: 8.5px; font-weight: 700; fill: #ffffff; }",
+        "    .cy-e202 .txt { font-size: 8.7px; fill: #2d3748; }",
         "  </style>",
         f'  <rect x="0" y="0" width="{svg_w}" height="{svg_h}" fill="#ffffff" />',
         (
@@ -258,15 +311,16 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
 
     y_top, y_bot = 135.0, min(680.0, svg_h - 60.0)
     step_y = (y_bot - y_top) / max(len(levels) - 1, 1)
-    pwr_x, elv_x, ear_x = 185.0, 355.0, 485.0
+    y_elv_top = y_bot - max(len(levels) - 2, 1) * step_y - 14.0
+    pwr_x, elv_x, ear_x = 185.0, 355.0, 488.0
 
-    # Vertical riser bus lines
+    # Vertical riser bus lines (ELV stops cleanly at highest habitable floor, not dangling)
     parts.append(
         f'  <line x1="{pwr_x}" y1="{y_top}" x2="{pwr_x}" y2="{y_bot}" '
         'stroke="#c53030" stroke-width="3.5" />'
     )
     parts.append(
-        f'  <line x1="{elv_x}" y1="{y_top + 45}" x2="{elv_x}" y2="{y_bot}" '
+        f'  <line x1="{elv_x}" y1="{y_elv_top:.1f}" x2="{elv_x}" y2="{y_bot}" '
         'stroke="#2b6cb0" stroke-width="2.5" stroke-dasharray="6,3" />'
     )
     parts.append(
@@ -282,31 +336,31 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             'stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4,4" />'
         )
         parts.append(
-            f'  <text x="28" y="{ly - 6:.1f}" class="lbl" fill="#4a5568">{esc(lvl)}</text>'
+            f'  <text x="28" y="{ly - 6:.1f}" class="lbl" style="fill:#4a5568;">{esc(lvl)}</text>'
         )
         if lvl == "SITE / STREET":
             parts.append(
-                f'  <rect x="{pwr_x - 58}" y="{ly - 26}" width="116" height="24" '
+                f'  <rect x="{pwr_x - 66}" y="{ly - 26}" width="132" height="24" '
                 'rx="4" fill="#c53030" />'
             )
             parts.append(
-                f'  <text x="{pwr_x}" y="{ly - 11}" text-anchor="middle" {w_lbl}>'
-                f"EAC METER ({esc(eac.recommended_supply_tier[:8])})</text>"
+                f'  <text x="{pwr_x}" y="{ly - 11}" text-anchor="middle" class="wlbl">'
+                f"EAC METER ({esc(tier_short)})</text>"
             )
             parts.append(
                 f'  <rect x="{elv_x - 46}" y="{ly - 26}" width="92" height="24" '
                 'rx="4" fill="#2b6cb0" />'
             )
             parts.append(
-                f'  <text x="{elv_x}" y="{ly - 11}" text-anchor="middle" {w_lbl}>'
+                f'  <text x="{elv_x}" y="{ly - 11}" text-anchor="middle" class="wlbl">'
                 "CYTA FIBER PIT</text>"
             )
             parts.append(
-                f'  <rect x="{ear_x - 46}" y="{ly - 26}" width="92" height="24" '
+                f'  <rect x="{ear_x - 48}" y="{ly - 26}" width="96" height="24" '
                 'rx="4" fill="#2f855a" />'
             )
             parts.append(
-                f'  <text x="{ear_x}" y="{ly - 11}" text-anchor="middle" {w_lbl}>'
+                f'  <text x="{ear_x}" y="{ly - 11}" text-anchor="middle" class="wlbl">'
                 "EARTH ELECTRODE</text>"
             )
         elif lvl == "ROOF":
@@ -320,7 +374,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 'rx="4" fill="#d69e2e" />'
             )
             parts.append(
-                f'  <text x="{pwr_x}" y="{ly - 10}" text-anchor="middle" {w_lbl}>'
+                f'  <text x="{pwr_x}" y="{ly - 10}" text-anchor="middle" class="wlbl">'
                 f"{esc(pv_s)}</text>"
             )
             lps_s = (
@@ -329,11 +383,11 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 else "ROOF BONDING"
             )
             parts.append(
-                f'  <rect x="{ear_x - 46}" y="{ly - 24}" width="92" height="22" '
+                f'  <rect x="{ear_x - 48}" y="{ly - 24}" width="96" height="22" '
                 'rx="4" fill="#2f855a" />'
             )
             parts.append(
-                f'  <text x="{ear_x}" y="{ly - 10}" text-anchor="middle" {w_lbl}>'
+                f'  <text x="{ear_x}" y="{ly - 10}" text-anchor="middle" class="wlbl">'
                 f"{esc(lps_s)}</text>"
             )
         else:
@@ -349,7 +403,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             )
             parts.append(
                 f'  <text x="{pwr_x}" y="{ly - 11}" text-anchor="middle" '
-                f'class="lbl" fill="#9b2c2c">{esc(p_lbl)}</text>'
+                f'class="lbl" style="fill:#9b2c2c;">{esc(p_lbl)}</text>'
             )
             e_lbl = "9U RACK + NVR + ALARM" if idx == 1 else f"WIFI AP + DATA ({lvl})"
             parts.append(
@@ -358,16 +412,16 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             )
             parts.append(
                 f'  <text x="{elv_x}" y="{ly - 11}" text-anchor="middle" '
-                f'class="lbl" fill="#2c5282">{esc(e_lbl)}</text>'
+                f'class="lbl" style="fill:#2c5282;">{esc(e_lbl)}</text>'
             )
             g_lbl = "MET / 10mm² BOND" if idx == 1 else "PE RISER 10mm²"
             parts.append(
-                f'  <rect x="{ear_x - 46}" y="{ly - 26}" width="92" height="24" rx="4" '
+                f'  <rect x="{ear_x - 48}" y="{ly - 26}" width="96" height="24" rx="4" '
                 'fill="#f0fff4" stroke="#2f855a" stroke-width="1.4" />'
             )
             parts.append(
                 f'  <text x="{ear_x}" y="{ly - 11}" text-anchor="middle" '
-                f'class="lbl" fill="#22543d">{esc(g_lbl)}</text>'
+                f'class="lbl" style="fill:#22543d;">{esc(g_lbl)}</text>'
             )
 
     # Right Pane: Physical 18mm DIN-Rail DB Elevations
@@ -376,10 +430,9 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         "B. PHYSICAL 18mm DIN-RAIL DB ELEVATION &amp; SELECTIVITY CASCADE</text>"
     )
     y_b = 108.0
-    for brd in boards:
-        box_h = 68.0 + len(brd.rows) * 32.0
+    for brd, sel_lines, box_h in board_blocks:
         parts.append(
-            f'  <rect x="580" y="{y_b:.1f}" width="576" height="{box_h:.1f}" rx="6" '
+            f'  <rect x="580" y="{y_b:.1f}" width="584" height="{box_h:.1f}" rx="6" '
             'fill="#f8fafc" stroke="#cbd5e0" stroke-width="1.5" />'
         )
         parts.append(
@@ -391,14 +444,16 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             f'  <text x="594" y="{y_b + 35:.1f}" class="txt">{esc(brd.enclosure_spec)}</text>'
         )
         sel_col = "#2f855a" if brd.selectivity_pass else "#c53030"
-        parts.append(
-            f'  <text x="594" y="{y_b + 50:.1f}" class="lbl" fill="{sel_col}">'
-            f"Ipf={brd.incoming_ipf_ka:.1f} kA &lt;= Icu={brd.min_device_icu_ka:.0f} kA | "
-            f"{esc(brd.selectivity_note)}</text>"
-        )
-        ry = y_b + 62.0
+        sy = y_b + 50.0
+        for sline in sel_lines:
+            parts.append(
+                f'  <text x="594" y="{sy:.1f}" class="lbl" style="fill:{sel_col};">'
+                f"{esc(sline)}</text>"
+            )
+            sy += 14.0
+        ry = sy + 2.0
         for row in brd.rows:
-            rail_w = 548.0
+            rail_w = 556.0
             used_w = rail_w * (row.modules_used / max(float(row.modules_capacity), 1.0))
             parts.append(
                 f'  <rect x="594" y="{ry:.1f}" width="{rail_w:.1f}" height="24" rx="3" '
@@ -409,14 +464,11 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                     f'  <rect x="594" y="{ry:.1f}" width="{used_w:.1f}" height="24" rx="3" '
                     'fill="#bee3f8" stroke="#2b6cb0" stroke-width="1" />'
                 )
-            row_lbl = (
-                f"Row {row.row_no} ({row.modules_used}/{row.modules_capacity}M): "
-                + ", ".join(row.items[:5])
+            row_lbl = _pack_din_row_label(
+                row.row_no, row.modules_used, row.modules_capacity, row.items, max_chars=84
             )
-            if len(row.items) > 5:
-                row_lbl += f" +{len(row.items) - 5} more"
             parts.append(
-                f'  <text x="602" y="{ry + 15:.1f}" class="txt">{esc(row_lbl[:92])}</text>'
+                f'  <text x="602" y="{ry + 15:.1f}" class="txt">{esc(row_lbl)}</text>'
             )
             ry += 30.0
         y_b += box_h + 16.0

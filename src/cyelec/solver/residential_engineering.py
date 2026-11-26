@@ -39,7 +39,7 @@ _TARGET_LUX_BY_ROOM: dict[RoomType, int] = {
     RoomType.WC: 150,
     RoomType.CORRIDOR: 100,
     RoomType.UTILITY: 200,
-    RoomType.VERANDA: 80,
+    RoomType.VERANDA: 100,
     RoomType.STORAGE: 100,
     RoomType.OPEN_OFFICE: 500,
     RoomType.MEETING_ROOM: 500,
@@ -64,6 +64,57 @@ def _utilization_factor_from_room(area_m2: float, ceiling_height_mm: float) -> f
     # Typical residential ceiling/wall reflectance (70/50/20) LED downlight UF curve
     uf = 0.52 + 0.24 * (1.0 - math.exp(-0.85 * room_index_k))
     return round(min(0.82, max(0.50, uf)), 2)
+
+
+_BASE_FIXTURE_WATTS: dict[RoomType, float] = {
+    RoomType.LIVING_ROOM: 18.0,
+    RoomType.KITCHEN: 20.0,
+    RoomType.KITCHEN_LIVING: 20.0,
+    RoomType.MASTER_BEDROOM: 15.0,
+    RoomType.BEDROOM: 15.0,
+    RoomType.BATHROOM: 15.0,
+    RoomType.ENSUITE: 15.0,
+    RoomType.WC: 12.0,
+    RoomType.CORRIDOR: 12.0,
+    RoomType.UTILITY: 15.0,
+    RoomType.VERANDA: 12.0,
+    RoomType.STORAGE: 12.0,
+    RoomType.OPEN_OFFICE: 40.0,
+    RoomType.MEETING_ROOM: 40.0,
+    RoomType.SERVER_ROOM: 28.0,
+    RoomType.RETAIL_FLOOR: 40.0,
+    RoomType.WAREHOUSE: 50.0,
+    RoomType.PLANT_ROOM: 24.0,
+    RoomType.STAIRWELL: 15.0,
+    RoomType.LIFT_SHAFT: 15.0,
+}
+
+
+def size_room_luminaires(
+    room_type: RoomType,
+    area_m2: float,
+    ceiling_height_mm: float,
+    min_points: int = 1,
+) -> tuple[int, float, int, int]:
+    """Size luminaire count, watts, lumens & target lux via CIBSE / BS EN 12464-1 Lumen Method."""
+    target_lux = _TARGET_LUX_BY_ROOM.get(room_type, 150)
+    watts = _BASE_FIXTURE_WATTS.get(room_type, 15.0)
+    # Step up fixture lumen package for very large halls/open-plan spaces (>55 m²)
+    if area_m2 >= 55.0 and watts < 24.0:
+        watts = 24.0
+    uf = _utilization_factor_from_room(area_m2, ceiling_height_mm)
+    mf = _MAINTENANCE_FACTOR
+    lumens = int(round(watts * _LED_EFFICACY_LM_PER_W))
+    eff_lm_per_fix = max(lumens * uf * mf, 100.0)
+    needed = max(1, min_points, int(math.ceil((target_lux * area_m2) / eff_lm_per_fix)))
+    max_fixtures = 24 if area_m2 >= 60.0 else 16
+    if needed > max_fixtures:
+        # Scale fixture lumen output (e.g. 60W commercial linear / high-output LED panel)
+        req_total_lm = (target_lux * area_m2) / max(uf * mf, 0.35)
+        lumens = int(math.ceil(req_total_lm / max_fixtures / 50.0) * 50)
+        watts = round(lumens / _LED_EFFICACY_LM_PER_W, 1)
+        needed = max_fixtures
+    return needed, watts, lumens, target_lux
 
 
 def compute_room_lumen_checks(

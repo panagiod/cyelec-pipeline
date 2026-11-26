@@ -105,9 +105,15 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
         "A. GENERAL ELECTRICAL NOTES (CYS HD 384 / BS 7671 18TH ED. A2 / EAC)",
         dxfattribs={"layer": "E-NOTES", "height": 3.0},
     ).set_placement((8.0, h_tot - 22.0))
+    notes_dxf = list(GENERAL_NOTES_CYPRUS)
+    if design.lightning_risk and design.lightning_risk.lps_required:
+        notes_dxf[3] = (
+            "4. PROTECTION: INDIVIDUAL 30MA TYPE A RCBO PER FINAL CIRCUIT; "
+            "TYPE 1+2 SPD (12.5KA 10/350US) AT ORIGIN."
+        )
     y_cursor = h_tot - 29.0
-    for note in GENERAL_NOTES_CYPRUS:
-        msp.add_text(note[:96], dxfattribs={"layer": "E-TITLE", "height": 2.2}).set_placement(
+    for note in notes_dxf:
+        msp.add_text(note[:92], dxfattribs={"layer": "E-TITLE", "height": 2.1}).set_placement(
             (8.0, y_cursor)
         )
         y_cursor -= 7.2
@@ -124,22 +130,22 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
         "ACCESSORY / EQUIPMENT", dxfattribs={"layer": "E-DETAIL", "height": 2.3}
     ).set_placement((8.0, y_row))
     msp.add_text("HEIGHT", dxfattribs={"layer": "E-DETAIL", "height": 2.3}).set_placement(
-        (106.0, y_row)
+        (104.0, y_row)
     )
     msp.add_text("REQUIREMENT", dxfattribs={"layer": "E-DETAIL", "height": 2.3}).set_placement(
-        (142.0, y_row)
+        (144.0, y_row)
     )
     msp.add_line((8.0, y_row - 2.0), (194.0, y_row - 2.0), dxfattribs={"layer": "E-TITLE"})
     y_row -= 7.0
     for item, height_s, req_s in MOUNTING_HEIGHTS_CYPRUS:
-        msp.add_text(item[:42], dxfattribs={"layer": "E-TITLE", "height": 2.1}).set_placement(
+        msp.add_text(item[:40], dxfattribs={"layer": "E-TITLE", "height": 2.0}).set_placement(
             (8.0, y_row)
         )
-        msp.add_text(height_s, dxfattribs={"layer": "E-NOTES", "height": 2.1}).set_placement(
-            (106.0, y_row)
+        msp.add_text(height_s, dxfattribs={"layer": "E-NOTES", "height": 2.0}).set_placement(
+            (104.0, y_row)
         )
-        msp.add_text(req_s[:28], dxfattribs={"layer": "E-TITLE", "height": 2.0}).set_placement(
-            (142.0, y_row)
+        msp.add_text(req_s[:26], dxfattribs={"layer": "E-TITLE", "height": 1.9}).set_placement(
+            (144.0, y_row)
         )
         y_row -= 7.6
 
@@ -196,9 +202,9 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
         (224.0, "10mm2 GAS / STEEL"),
         (210.0, "16mm2 TO MDB/DB1"),
     ):
-        msp.add_line((344.0, 238.0), (356.0, by), dxfattribs={"layer": "E-EARTHING"})
-        msp.add_text(blbl, dxfattribs={"layer": "E-TITLE", "height": 2.0}).set_placement(
-            (358.0, by - 1.0)
+        msp.add_line((344.0, 238.0), (354.0, by), dxfattribs={"layer": "E-EARTHING"})
+        msp.add_text(blbl, dxfattribs={"layer": "E-TITLE", "height": 1.9}).set_placement(
+            (356.0, by - 1.0)
         )
 
     # DETAIL 2 (mid right, x=204..394, y=92..174): EAC Meter Cabinet & Underground Duct
@@ -340,6 +346,23 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
     return doc
 
 
+def _wrap_note_lines(text: str, max_chars: int = 86) -> list[str]:
+    """Word-wrap a note string cleanly to stay within a fixed SVG column width."""
+    words = text.split()
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if len(cand) <= max_chars or not cur:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = f"   {w}"
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult) -> str:
     """Render print-ready A3 landscape SVG of E-301 Construction Details & General Notes."""
     design = _unwrap_design(result)
@@ -349,7 +372,8 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     firm = escape(br.firm_name if br and br.firm_name else "ETEK Licensed Electrical Practice")
     eng = escape(br.engineer_name if br and br.engineer_name else "ETEK Review Pending")
     reg = escape(br.etek_reg_no if br and br.etek_reg_no else "ETEK-E")
-    proj = escape(design.building.project_name)
+    proj = escape(design.building.project_name[:38])
+    tier_s = escape(eac.recommended_supply_tier)
     excl_m = eac.bathroom_socket_exclusion_m
     main_a = eac.recommended_main_breaker_a
     tail_mm2 = 16 if main_a <= 63 else 25
@@ -360,162 +384,180 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     )
     sha_short = design.provenance.input_sha256[:16]
     ra_ohm = f"{design.ze_or_ra_ohm:.0f}"
+    lps_req = bool(design.lightning_risk and design.lightning_risk.lps_required)
 
-    notes_svg = "\n".join(
-        f'<text x="36" y="{112 + i * 24}" font-size="11.5" fill="#1e293b">{escape(n)}</text>'
-        for i, n in enumerate(GENERAL_NOTES_CYPRUS)
-    )
-    mh_rows = []
+    notes_list = list(GENERAL_NOTES_CYPRUS)
+    if lps_req:
+        notes_list[3] = (
+            "4. PROTECTION: INDIVIDUAL 30MA TYPE A RCBO PER FINAL CIRCUIT; "
+            "TYPE 1+2 SPD (12.5KA 10/350US) AT ORIGIN (IEC 62305-2 / REG 443.4)."
+        )
+
+    note_els: list[str] = []
+    ny = 109
+    for note in notes_list:
+        for line in _wrap_note_lines(note, max_chars=82):
+            note_els.append(f'  <text x="34" y="{ny}" class="note">{escape(line)}</text>')
+            ny += 14
+        ny += 4
+    notes_svg = "\n".join(note_els)
+
+    tbl_title_y = max(ny + 18, 434)
+    tbl_hdr_y = tbl_title_y + 8
+    mh_rows: list[str] = []
     for i, (item, h_s, req_s) in enumerate(MOUNTING_HEIGHTS_CYPRUS):
-        ry = 414 + i * 26
+        ry = tbl_hdr_y + 40 + i * 26
         bg = "#f8fafc" if i % 2 == 0 else "#ffffff"
         mh_rows.append(
-            f'<rect x="32" y="{ry - 16}" width="576" height="24" fill="{bg}" stroke="#e2e8f0"/>'
-            f'<text x="40" y="{ry}" font-size="11" fill="#0f172a">{escape(item)}</text>'
-            f'<text x="320" y="{ry}" font-size="11" font-weight="700" fill="#1b365d">'
-            f"{escape(h_s)}</text>"
-            f'<text x="438" y="{ry}" font-size="10.5" fill="#475569">{escape(req_s)}</text>'
+            f'  <rect x="30" y="{ry - 17}" width="606" height="26" fill="{bg}" stroke="#e2e8f0"/>'
+            f'  <text x="38" y="{ry}" class="td">{escape(item)}</text>'
+            f'  <text x="314" y="{ry}" class="td-h">{escape(h_s)}</text>'
+            f'  <text x="444" y="{ry}" class="td-m">{escape(req_s)}</text>'
         )
     mh_svg = "\n".join(mh_rows)
 
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1260 891"
-     width="1260" height="891" font-family="DejaVu Sans, Arial, sans-serif">
-  <rect x="0" y="0" width="1260" height="891" fill="#ffffff"/>
-  <rect x="18" y="18" width="1224" height="855" fill="none" stroke="#1b365d" stroke-width="2.2"/>
-  <rect x="18" y="18" width="1224" height="48" fill="#1b365d"/>
-  <text x="34" y="48" font-size="18" font-weight="700" fill="#ffffff">
-    E-301 — CYPRUS EAC (ΑΗΚ) &amp; BS 7671 CONSTRUCTION DETAILS, EARTHING &amp; GENERAL NOTES
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" class="cy-e301" viewBox="0 0 1320 900"
+     width="1320" height="900">
+  <style>
+    .cy-e301 text {{ font-family: "DejaVu Sans", Arial, sans-serif; }}
+    .cy-e301 .wtitle {{ font-size: 15px; font-weight: 700; fill: #ffffff; }}
+    .cy-e301 .wsub {{ font-size: 10.5px; fill: #cbd5e1; }}
+    .cy-e301 .sec {{ font-size: 12px; font-weight: 700; fill: #1b365d; }}
+    .cy-e301 .note {{ font-size: 9.8px; fill: #1e293b; }}
+    .cy-e301 .th {{ font-size: 10.5px; font-weight: 700; fill: #ffffff; }}
+    .cy-e301 .td {{ font-size: 10px; fill: #0f172a; }}
+    .cy-e301 .td-h {{ font-size: 10px; font-weight: 700; fill: #1b365d; }}
+    .cy-e301 .td-m {{ font-size: 9.5px; fill: #475569; }}
+    .cy-e301 .d1-h {{ font-size: 11.5px; font-weight: 700; fill: #14532d; }}
+    .cy-e301 .d2-h {{ font-size: 11.5px; font-weight: 700; fill: #1e3a8a; }}
+    .cy-e301 .d3-h {{ font-size: 11.5px; font-weight: 700; fill: #991b1b; }}
+    .cy-e301 .dlbl {{ font-size: 10.2px; font-weight: 700; fill: #0f172a; }}
+    .cy-e301 .dtxt {{ font-size: 10px; fill: #334155; }}
+    .cy-e301 .dgrn {{ font-size: 10.5px; font-weight: 700; fill: #15803d; }}
+    .cy-e301 .damb {{ font-size: 10px; font-weight: 700; fill: #b45309; }}
+    .cy-e301 .tb-h {{ font-size: 12.5px; font-weight: 700; fill: #1b365d; }}
+    .cy-e301 .tb-s {{ font-size: 11px; fill: #334155; }}
+    .cy-e301 .tb-m {{ font-size: 10px; fill: #64748b; }}
+  </style>
+  <rect x="0" y="0" width="1320" height="900" fill="#ffffff"/>
+  <rect x="18" y="18" width="1284" height="864" fill="none" stroke="#1b365d" stroke-width="2.2"/>
+  <rect x="18" y="18" width="1284" height="48" fill="#1b365d"/>
+  <text x="34" y="48" class="wtitle">
+    E-301 — CYPRUS EAC (ΑΗΚ) &amp; BS 7671 DETAILS, EARTHING &amp; NOTES
   </text>
-  <text x="1226" y="47" text-anchor="end" font-size="12" fill="#cbd5e1">
-    {proj} · {escape(eac.recommended_supply_tier)} · {design.earthing_system.value}
+  <text x="1286" y="47" text-anchor="end" class="wsub">
+    {proj} · {tier_s} · {design.earthing_system.value}
   </text>
 
-  <!-- Left Column: General Notes + Mounting Heights Table -->
-  <text x="36" y="88" font-size="13.5" font-weight="700" fill="#1b365d">
-    A. GENERAL ELECTRICAL NOTES (ΓΕΝΙΚΕΣ ΣΗΜΕΙΩΣΕΙΣ — CYS HD 384 / BS 7671 18TH ED. A2 / ΑΗΚ)
+  <!-- Left Column (x=30..636): General Notes + Mounting Heights Table -->
+  <text x="34" y="87" class="sec">
+    A. GENERAL ELECTRICAL NOTES / ΓΕΝΙΚΕΣ ΣΗΜΕΙΩΣΕΙΣ (BS 7671 / CYS HD 384 / ΑΗΚ)
   </text>
-  <line x1="32" y1="94" x2="608" y2="94" stroke="#1b365d" stroke-width="1.2"/>
-  {notes_svg}
+  <line x1="30" y1="93" x2="636" y2="93" stroke="#1b365d" stroke-width="1.2"/>
+{notes_svg}
 
-  <text x="36" y="378" font-size="13.5" font-weight="700" fill="#1b365d">
-    B. STANDARD CYPRUS MOUNTING HEIGHTS SCHEDULE (ΥΨΗ ΤΟΠΟΘΕΤΗΣΗΣ ΑΠΟ ΤΕΛΙΚΟ ΔΑΠΕΔΟ)
+  <text x="34" y="{tbl_title_y}" class="sec">
+    B. STANDARD CYPRUS MOUNTING HEIGHTS SCHEDULE (ABOVE FINISHED FLOOR LEVEL)
   </text>
-  <rect x="32" y="384" width="576" height="22" fill="#1b365d"/>
-  <text x="40" y="399" font-size="11" font-weight="700" fill="#ffffff">Accessory / Equipment</text>
-  <text x="320" y="399" font-size="11" font-weight="700" fill="#ffffff">Mounting Height</text>
-  <text x="438" y="399" font-size="11" font-weight="700" fill="#ffffff">Installation Note</text>
-  {mh_svg}
+  <rect x="30" y="{tbl_hdr_y}" width="606" height="23" fill="#1b365d"/>
+  <text x="38" y="{tbl_hdr_y + 15}" class="th">Accessory / Equipment</text>
+  <text x="314" y="{tbl_hdr_y + 15}" class="th">Mounting Height</text>
+  <text x="444" y="{tbl_hdr_y + 15}" class="th">Installation Note</text>
+{mh_svg}
 
+  <!-- Right Column (x=658..1290): 3 Standard Vector Details -->
   <!-- Detail 1: TT Earth Inspection Pit & Main Protective Bonding -->
-  <rect x="630" y="76" width="596" height="236" fill="#fcfdfd" stroke="#1b365d" stroke-width="1.4"/>
-  <rect x="630" y="76" width="596" height="26" fill="#e6f4ea"/>
-  <text x="644" y="94" font-size="12.5" font-weight="700" fill="#14532d">
+  <rect x="658" y="76" width="632" height="226" fill="#fcfdfd" stroke="#1b365d" stroke-width="1.4"/>
+  <rect x="658" y="76" width="632" height="26" fill="#e6f4ea"/>
+  <text x="672" y="94" class="d1-h">
     DETAIL 1 — TT COPPER EARTH ROD PIT &amp; EQUIPOTENTIAL BONDING (BS 7671 CH. 54)
   </text>
-  <line x1="650" y1="186" x2="910" y2="186" stroke="#64748b" stroke-width="2"/>
-  <text x="654" y="180" font-size="10.5" fill="#475569">Finished Ground Level (FGL)</text>
-  <rect x="748" y="186" width="56" height="44" fill="#e2e8f0" stroke="#334155" stroke-width="1.5"/>
-  <line x1="776" y1="202" x2="776" y2="298" stroke="#15803d" stroke-width="4"/>
-  <circle cx="776" cy="202" r="5" fill="#15803d"/>
-  <text x="794" y="254" font-size="11" font-weight="700" fill="#15803d">
-    Ø16×1200mm Cu Earth Rod
-  </text>
-  <text x="794" y="272" font-size="10.5" fill="#334155">
-    Concrete Inspection Pit (Ra ≤ {ra_ohm} Ω)
-  </text>
-  <polyline points="776,202 776,144 960,144" fill="none" stroke="#15803d" stroke-width="2.6"/>
-  <text x="802" y="138" font-size="11" font-weight="700" fill="#15803d">
-    16 mm² Cu Main Earth Conductor (MEC)
-  </text>
-  <rect x="960" y="128" width="76" height="32" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
-  <text x="998" y="149" text-anchor="middle" font-size="13" font-weight="700" fill="#14532d">
-    MET
-  </text>
-  <line x1="1036" y1="138" x2="1084" y2="128" stroke="#15803d" stroke-width="2"/>
-  <text x="1090" y="132" font-size="11" fill="#0f172a">10 mm² Cu → Water Pipe</text>
-  <line x1="1036" y1="146" x2="1084" y2="162" stroke="#15803d" stroke-width="2"/>
-  <text x="1090" y="166" font-size="11" fill="#0f172a">10 mm² Cu → Gas / Steel</text>
-  <line x1="1036" y1="154" x2="1084" y2="196" stroke="#15803d" stroke-width="2"/>
-  <text x="1090" y="200" font-size="11" fill="#0f172a">16 mm² Cu → MDB / DB1</text>
+  <line x1="676" y1="184" x2="914" y2="184" stroke="#64748b" stroke-width="2"/>
+  <text x="680" y="178" class="dtxt">Finished Ground Level (FGL)</text>
+  <rect x="768" y="184" width="54" height="42" fill="#e2e8f0" stroke="#334155" stroke-width="1.5"/>
+  <line x1="795" y1="198" x2="795" y2="288" stroke="#15803d" stroke-width="4"/>
+  <circle cx="795" cy="198" r="5" fill="#15803d"/>
+  <text x="812" y="248" class="dgrn">Ø16×1200mm Cu Earth Rod</text>
+  <text x="812" y="266" class="dtxt">Concrete Inspection Pit (Ra ≤ {ra_ohm} Ω)</text>
+  <polyline points="795,198 795,142 958,142" fill="none" stroke="#15803d" stroke-width="2.6"/>
+  <text x="798" y="135" class="dgrn">16 mm² Cu Main Earth (MEC)</text>
+  <rect x="958" y="126" width="70" height="32" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
+  <text x="993" y="147" text-anchor="middle" class="d1-h">MET</text>
+  <line x1="1028" y1="136" x2="1076" y2="126" stroke="#15803d" stroke-width="2"/>
+  <text x="1082" y="130" class="dlbl">10 mm² Cu → Water Pipe</text>
+  <line x1="1028" y1="144" x2="1076" y2="160" stroke="#15803d" stroke-width="2"/>
+  <text x="1082" y="164" class="dlbl">10 mm² Cu → Gas / Steel</text>
+  <line x1="1028" y1="152" x2="1076" y2="194" stroke="#15803d" stroke-width="2"/>
+  <text x="1082" y="198" class="dlbl">16 mm² Cu → MDB / DB1</text>
 
-  <!-- Detail 2: EAC Meter Cabinet & Incoming Duct -->
-  <rect x="630" y="328" width="596" height="220"
-        fill="#fcfdfd" stroke="#1b365d" stroke-width="1.4"/>
-  <rect x="630" y="328" width="596" height="26" fill="#eff6ff"/>
-  <text x="644" y="346" font-size="12.5" font-weight="700" fill="#1e3a8a">
+  <!-- Detail 2: EAC Meter Cabinet & Underground Duct -->
+  <rect x="658" y="318" width="632" height="222" fill="#fcfdfd"
+        stroke="#1b365d" stroke-width="1.4"/>
+  <rect x="658" y="318" width="632" height="26" fill="#eff6ff"/>
+  <text x="672" y="336" class="d2-h">
     DETAIL 2 — CYPRUS EAC METER CABINET (ΚΙΒΩΤΙΟ ΜΕΤΡΗΤΗ ΑΗΚ) &amp; INCOMING DUCT
   </text>
-  <rect x="664" y="376" width="166" height="96" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
-  <text x="747" y="408" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e3a8a">
-    EAC METER BOX
+  <rect x="684" y="362" width="168" height="92" fill="#dbeafe" stroke="#1e40af" stroke-width="2"/>
+  <text x="768" y="392" text-anchor="middle" class="d2-h">EAC METER BOX</text>
+  <text x="768" y="411" text-anchor="middle" class="dtxt">Plot Boundary · H=+1.5m FGL</text>
+  <text x="768" y="431" text-anchor="middle" class="dtxt">
+    EAC Cut-Out + {escape(eac.recommended_supply_tier.split("(")[0].strip())}
   </text>
-  <text x="747" y="428" text-anchor="middle" font-size="11" fill="#1e40af">
-    Plot Boundary · H=+1.5m FGL
+  <line x1="674" y1="472" x2="1274" y2="472" stroke="#64748b" stroke-width="1.8"/>
+  <polyline points="742,454 742,506 1054,506" fill="none" stroke="#b45309" stroke-width="3.2"/>
+  <text x="754" y="497" class="damb">
+    Ø100 mm Heavy-Duty PVC Duct (Min 600 mm cover + warning tape)
   </text>
-  <text x="747" y="448" text-anchor="middle" font-size="10.5" fill="#334155">
-    EAC Cut-Out + {escape(eac.recommended_supply_tier)}
+  <text x="754" y="523" class="dtxt">
+    Underground service entry from EAC LV street distribution pillar
   </text>
-  <line x1="646" y1="490" x2="1208" y2="490" stroke="#64748b" stroke-width="1.8"/>
-  <polyline points="720,472 720,524 1020,524" fill="none" stroke="#b45309" stroke-width="3.2"/>
-  <text x="734" y="516" font-size="11" font-weight="700" fill="#b45309">
-    Ø100 mm Heavy-Duty PVC Duct (Min 600 mm cover + warning tape) → EAC Street Pillar
-  </text>
-  <line x1="830" y1="424" x2="1050" y2="424" stroke="#15803d" stroke-width="3"/>
-  <text x="940" y="414" text-anchor="middle" font-size="11" font-weight="700" fill="#0f172a">
+  <line x1="852" y1="408" x2="1090" y2="408" stroke="#15803d" stroke-width="3"/>
+  <text x="971" y="398" text-anchor="middle" class="dlbl">
     4×{tail_mm2} mm² XLPE/PVC + 16 mm² E
   </text>
-  <rect x="1050" y="394" width="144" height="60" fill="#f1f5f9" stroke="#1b365d" stroke-width="2"/>
-  <text x="1122" y="421" text-anchor="middle" font-size="13" font-weight="700" fill="#1b365d">
-    MDB / DB1
-  </text>
-  <text x="1122" y="440" text-anchor="middle" font-size="10.5" fill="#475569">H=+1.6m FFL</text>
+  <rect x="1090" y="378" width="168" height="60" fill="#f1f5f9" stroke="#1b365d" stroke-width="2"/>
+  <text x="1174" y="405" text-anchor="middle" class="sec">MDB / DB1</text>
+  <text x="1174" y="424" text-anchor="middle" class="dtxt">H=+1.6m FFL (Indoor)</text>
 
   <!-- Detail 3: BS 7671 Section 701 Wet Zones Elevation -->
-  <rect x="630" y="564" width="596" height="218"
-        fill="#fcfdfd" stroke="#1b365d" stroke-width="1.4"/>
-  <rect x="630" y="564" width="596" height="26" fill="#fef2f2"/>
-  <text x="644" y="582" font-size="12.5" font-weight="700" fill="#991b1b">
+  <rect x="658" y="556" width="632" height="226" fill="#fcfdfd"
+        stroke="#1b365d" stroke-width="1.4"/>
+  <rect x="658" y="556" width="632" height="26" fill="#fef2f2"/>
+  <text x="672" y="574" class="d3-h">
     DETAIL 3 — BS 7671 SECTION 701 WET ZONES &amp; CYPRUS EAC {excl_m:.1f} m SOCKET EXCLUSION
   </text>
-  <rect x="656" y="716" width="136" height="44" fill="#fee2e2" stroke="#dc2626" stroke-width="1.8"/>
-  <text x="724" y="742" text-anchor="middle" font-size="11" font-weight="700" fill="#991b1b">
-    ZONE 0 (IPX7)
-  </text>
-  <rect x="656" y="612" width="136" height="104"
-        fill="#ffedd5" stroke="#ea580c" stroke-width="1.6"/>
-  <text x="724" y="656" text-anchor="middle" font-size="11.5" font-weight="700" fill="#9a3412">
-    ZONE 1 (2.25 m)
-  </text>
-  <text x="724" y="676" text-anchor="middle" font-size="10.5" fill="#9a3412">Min IPX4 / SELV</text>
-  <rect x="792" y="612" width="98" height="148" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.6"/>
-  <text x="841" y="676" text-anchor="middle" font-size="11" font-weight="700" fill="#854d0e">
-    ZONE 2
-  </text>
-  <text x="841" y="694" text-anchor="middle" font-size="10" fill="#854d0e">0.60 m (IPX4)</text>
-  <rect x="890" y="612" width="234" height="148" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"
+  <rect x="680" y="714" width="136" height="44" fill="#fee2e2" stroke="#dc2626" stroke-width="1.8"/>
+  <text x="748" y="740" text-anchor="middle" class="d3-h">ZONE 0 (IPX7)</text>
+  <rect x="680" y="604" width="136" height="110" fill="#ffedd5"
+        stroke="#ea580c" stroke-width="1.6"/>
+  <text x="748" y="652" text-anchor="middle" class="dlbl">ZONE 1 (2.25 m)</text>
+  <text x="748" y="672" text-anchor="middle" class="dtxt">Min IPX4 / SELV</text>
+  <rect x="816" y="604" width="102" height="154" fill="#fef9c3"
+        stroke="#ca8a04" stroke-width="1.6"/>
+  <text x="867" y="670" text-anchor="middle" class="dlbl">ZONE 2</text>
+  <text x="867" y="688" text-anchor="middle" class="dtxt">0.60 m (IPX4)</text>
+  <rect x="918" y="604" width="256" height="154" fill="#fae8ff" stroke="#a21caf" stroke-width="1.6"
         stroke-dasharray="6,4"/>
-  <text x="1007" y="674" text-anchor="middle" font-size="12" font-weight="700" fill="#86198f">
+  <text x="1046" y="668" text-anchor="middle" class="dlbl">
     EAC NO 13A SOCKETS ({excl_m:.1f} m)
   </text>
-  <text x="1007" y="696" text-anchor="middle" font-size="10.5" fill="#701a75">
+  <text x="1046" y="690" text-anchor="middle" class="dtxt">
     Switches &amp; 3P Fan Isolator Outside Wet Room
   </text>
-  <rect x="1124" y="612" width="84" height="148"
-        fill="#dcfce7" stroke="#15803d" stroke-width="1.5"/>
-  <text x="1166" y="688" text-anchor="middle" font-size="11" font-weight="700" fill="#166534">
-    13A OK
-  </text>
-  <line x1="644" y1="760" x2="1214" y2="760" stroke="#0f172a" stroke-width="2"/>
+  <rect x="1174" y="604" width="96" height="154" fill="#dcfce7"
+        stroke="#15803d" stroke-width="1.5"/>
+  <text x="1222" y="684" text-anchor="middle" class="dgrn">13A OK</text>
+  <line x1="672" y1="758" x2="1276" y2="758" stroke="#0f172a" stroke-width="2"/>
 
   <!-- Bottom Titleblock Strip -->
-  <rect x="18" y="798" width="1224" height="75" fill="#f8fafc" stroke="#1b365d" stroke-width="1.8"/>
-  <text x="34" y="822" font-size="13" font-weight="700" fill="#1b365d">
+  <rect x="18" y="800" width="1284" height="82" fill="#f8fafc" stroke="#1b365d" stroke-width="1.8"/>
+  <text x="34" y="824" class="tb-h">
     FIRM: {firm} &#160;|&#160; ENGINEER: {eng} ({reg})
   </text>
-  <text x="34" y="844" font-size="11.5" fill="#334155">
+  <text x="34" y="847" class="tb-s">
     CADASTRAL: {plot_str} &#160;|&#160; DRAWING: E-301 (ISO A3 — NOT TO SCALE)
   </text>
-  <text x="34" y="863" font-size="10.5" fill="#64748b">
+  <text x="34" y="868" class="tb-m">
     SHA256: {sha_short} · ETEK STATUTORY REVIEW &amp; STAMP REQUIRED BEFORE EAC SUBMISSION
   </text>
 </svg>

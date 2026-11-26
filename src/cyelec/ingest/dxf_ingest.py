@@ -881,16 +881,17 @@ def ingest_dxf(
         wall_derived = _polygonize_rooms_from_walls(
             wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
         )
+        existing_union = unary_union(room_raw_polys)
         added_hybrid = 0
         for cand in wall_derived:
             if cand.area < 1_000_000.0:
                 continue
-            overlaps_existing = any(
-                (cand.intersection(ex).area / max(cand.area, 1.0)) >= 0.25 for ex in room_raw_polys
-            )
-            if not overlaps_existing:
-                room_raw_polys.append(cand)
-                added_hybrid += 1
+            # Reject any candidate that overlaps existing rooms (including outer floor shells!)
+            if (cand.intersection(existing_union).area / max(cand.area, 1.0)) >= 0.25:
+                continue
+            room_raw_polys.append(cand)
+            existing_union = unary_union([existing_union, cand])
+            added_hybrid += 1
         if added_hybrid > 0:
             flags.append(
                 ReviewFlag(
@@ -904,6 +905,22 @@ def ingest_dxf(
                     ),
                 )
             )
+
+    # Drop any outer building/floor shell polygon enclosing 2+ smaller interior rooms
+    if len(room_raw_polys) >= 3:
+        deduped_rooms: list[Polygon] = []
+        for i, cand in enumerate(room_raw_polys):
+            contained = sum(
+                1
+                for j, other in enumerate(room_raw_polys)
+                if i != j
+                and cand.area > other.area * 1.15
+                and cand.contains(other.representative_point())
+            )
+            if contained < 2:
+                deduped_rooms.append(cand)
+        if deduped_rooms:
+            room_raw_polys = deduped_rooms
 
     if not room_raw_polys:
         raise ValueError(

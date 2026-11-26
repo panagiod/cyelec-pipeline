@@ -593,10 +593,12 @@ def export_load_schedule_xlsx(
     pv_str = (
         f"{result.building.pv_capacity_kva:g} kVA"
         if result.building.pv_capacity_kva > 0
-        else "None"
+        else "Not installed (0 kVA)"
     )
     ev_str = (
-        f"{result.building.ev_charger_kw:g} kW" if result.building.ev_charger_kw > 0 else "None"
+        f"{result.building.ev_charger_kw:g} kW"
+        if result.building.ev_charger_kw > 0
+        else "Not installed (0 kW)"
     )
     app_rows: list[tuple[str, str, str, str]] = [
         (

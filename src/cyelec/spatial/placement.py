@@ -20,38 +20,15 @@ from cyelec.models.building import (
 from cyelec.models.electrical import ResidentialSystemsBrief, ReviewFlag, ReviewSeverity
 from cyelec.models.spatial import DeviceType, PlacedDevice, RoomWetZones, SwitchLeg
 from cyelec.solver.grouper import is_commercial_building
+from cyelec.solver.residential_engineering import size_room_luminaires
 from cyelec.spatial.stage5_placement import place_stage5_residential_systems
-from cyelec.spatial.wet_zones import classify_point_wet_zone
+from cyelec.spatial.wet_zones import classify_point_wet_zone, is_point_in_socket_exclusion
 from cyelec.standards_loader import StandardsBundle
 
 CORNER_CLEARANCE_MM = 220.0
 DOOR_CLEARANCE_MM = 220.0
 WINDOW_CLEARANCE_MM = 150.0
 MIN_SOCKET_SPACING_MM = 600.0
-
-# BS EN 12464 / CIBSE target illuminance (lux) & typical Cyprus LED fixture power (W)
-_ROOM_LIGHTING_SPECS: dict[RoomType, tuple[int, float]] = {
-    RoomType.LIVING_ROOM: (150, 18.0),
-    RoomType.KITCHEN: (300, 18.0),
-    RoomType.KITCHEN_LIVING: (200, 18.0),
-    RoomType.MASTER_BEDROOM: (150, 15.0),
-    RoomType.BEDROOM: (150, 15.0),
-    RoomType.BATHROOM: (200, 12.0),
-    RoomType.ENSUITE: (200, 12.0),
-    RoomType.WC: (200, 12.0),
-    RoomType.CORRIDOR: (100, 12.0),
-    RoomType.UTILITY: (200, 15.0),
-    RoomType.VERANDA: (100, 15.0),
-    RoomType.STORAGE: (100, 12.0),
-    RoomType.OPEN_OFFICE: (500, 36.0),
-    RoomType.MEETING_ROOM: (500, 36.0),
-    RoomType.SERVER_ROOM: (300, 24.0),
-    RoomType.RETAIL_FLOOR: (300, 36.0),
-    RoomType.WAREHOUSE: (200, 36.0),
-    RoomType.PLANT_ROOM: (200, 24.0),
-    RoomType.STAIRWELL: (150, 12.0),
-    RoomType.LIFT_SHAFT: (100, 12.0),
-}
 
 
 @dataclass(frozen=True)
@@ -208,13 +185,17 @@ def _place_ceiling_luminaires(room: Room, count: int) -> list[Point2D]:
         return [Point2D(x_mm=round(float(c.x), 1), y_mm=round(float(c.y), 1))]
 
     minx, miny, maxx, maxy = poly.bounds
-    w = maxx - minx
-    h = maxy - miny
-    cols = count if w >= h else 1
-    rows = 1 if w >= h else count
-    if count >= 4:
-        cols = 2
-        rows = math.ceil(count / 2)
+    w = max(maxx - minx, 1.0)
+    h = max(maxy - miny, 1.0)
+    if count <= 3:
+        cols = count if w >= h else 1
+        rows = 1 if w >= h else count
+    else:
+        aspect = w / h
+        cols = max(2, min(count, int(round(math.sqrt(count * aspect)))))
+        rows = int(math.ceil(count / cols))
+        while cols * rows < count:
+            rows += 1
 
     pts: list[Point2D] = []
     for r in range(rows):
@@ -336,7 +317,12 @@ def place_electrical_devices(
         rt = tmpl_std.rooms[room.normalized_type]
         room_wz = wz_by_room.get(room.id)
         rpoly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
-        target_lux, lum_w = _ROOM_LIGHTING_SPECS.get(room.normalized_type, (150, 15.0))
+        req_lum_count, lum_w, lum_lm, target_lux = size_room_luminaires(
+            room.normalized_type,
+            room.area_m2,
+            room.ceiling_height_mm,
+            min_points=rt.min_lighting_points,
+        )
 
         # Match both doors owned by this room AND outward-swinging doors touching its perimeter
         room_doors = [
@@ -358,11 +344,6 @@ def place_electrical_devices(
         )
 
         # 1. Ceiling Luminaires (+ Lumen Method sizing, fixture types & dining pendant snapping)
-        min_lums_by_lux = max(
-            1,
-            int(math.ceil((target_lux * room.area_m2) / max(lum_w * 105.0 * 0.65 * 0.80, 100.0))),
-        )
-        req_lum_count = min(12, max(1, rt.min_lighting_points, min_lums_by_lux))
         lum_pts = _place_ceiling_luminaires(room, req_lum_count)
         is_large_split = (
             room.area_m2 >= 22.0
@@ -418,7 +399,7 @@ def place_electrical_devices(
                     switch_group=grp,
                     luminaire_wattage_w=lum_w,
                     luminaire_fixture_type=fix_type,
-                    lumens=int(round(lum_w * 105.0)),
+                    lumens=lum_lm,
                     target_lux=target_lux,
                 )
             )
@@ -535,9 +516,9 @@ def place_electrical_devices(
             )
             # 3-Pole Fan Isolator outside wet room beside switch at H=+2200mm
             if fan_id is not None:
-                fi_cand = _offset_along_wall(sw_pt, sw_ang, 220.0)
+                fi_cand = _offset_along_wall(sw_pt, sw_ang, 280.0)
                 if rpoly.contains(Point(fi_cand.x_mm, fi_cand.y_mm)):
-                    fi_cand = _offset_along_wall(sw_pt, sw_ang, -220.0)
+                    fi_cand = _offset_along_wall(sw_pt, sw_ang, -280.0)
                 devices.append(
                     PlacedDevice(
                         device_id=_next_dev("FI"),
@@ -949,7 +930,7 @@ def place_electrical_devices(
             )
         )
 
-    # 7. Stage 5 Residential Systems (ELV, Security, Smoke/Heat, Shutters, Plant, KNX, Site)
+    # 7. Stage 5 Residential & Commercial Systems (ELV, Security, Smoke/Heat, Shutters, Plant, Site)
     s5_devs, s5_flags = place_stage5_residential_systems(
         building,
         devices,
@@ -959,7 +940,401 @@ def place_electrical_devices(
     devices.extend(s5_devs)
     flags.extend(s5_flags)
 
+    # 8. Deterministic spatial de-collision pass (ceiling, wall, back-to-back & exterior)
+    devices = _decollide_placed_devices(
+        building,
+        devices,
+        wet_zones,
+        meter_override=meter_override,
+        earth_pit_override=earth_pit_override,
+        telecom_override=telecom_override,
+    )
+
     return devices, flags
+
+
+_CEILING_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
+    {
+        DeviceType.LUMINAIRE,
+        DeviceType.PENDANT_LIGHT,
+        DeviceType.EXHAUST_FAN,
+        DeviceType.SMOKE_DETECTOR,
+        DeviceType.HEAT_DETECTOR,
+        DeviceType.WIFI_AP,
+    }
+)
+
+_EXTERIOR_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
+    {
+        DeviceType.EAC_METER_CABINET,
+        DeviceType.EARTH_PIT,
+        DeviceType.EV_WALLBOX,
+        DeviceType.HEAT_PUMP_OUTDOOR,
+        DeviceType.VRV_OUTDOOR,
+        DeviceType.GATE_MOTOR,
+        DeviceType.POOL_SUB_DB,
+        DeviceType.GARDEN_BOLLARD,
+        DeviceType.OUTDOOR_PIR_LIGHT,
+        DeviceType.CCTV_CAMERA,
+        DeviceType.ALARM_SIREN,
+        DeviceType.INTERCOM_OUTDOOR,
+    }
+)
+
+_PAIRED_WALL_ACCESSORIES: frozenset[frozenset[DeviceType]] = frozenset(
+    {
+        frozenset({DeviceType.DATA_RJ45, DeviceType.TV_OUTLET}),
+        frozenset({DeviceType.COOKER_OUTLET, DeviceType.COOKER_CONTROL_UNIT}),
+        frozenset({DeviceType.WATER_HEATER_ISOLATOR, DeviceType.WATER_HEATER_DP_SWITCH}),
+        frozenset({DeviceType.SWITCH, DeviceType.FAN_ISOLATOR_3P}),
+    }
+)
+
+
+def _wall_priority(dev: PlacedDevice, *, has_telecom_override: bool) -> int:
+    if dev.device_type == DeviceType.TELECOM_CABINET and has_telecom_override:
+        return 0
+    if dev.device_type in (
+        DeviceType.SWITCH,
+        DeviceType.DIMMER_SWITCH,
+        DeviceType.FAN_ISOLATOR_3P,
+        DeviceType.MIRROR_LIGHT,
+    ):
+        return 0
+    if dev.device_type == DeviceType.SOCKET_TWIN:
+        return 1
+    if dev.device_type in (
+        DeviceType.COOKER_OUTLET,
+        DeviceType.OVEN_OUTLET,
+        DeviceType.WATER_HEATER_ISOLATOR,
+        DeviceType.APPLIANCE_OUTLET,
+        DeviceType.SPLIT_AC,
+        DeviceType.HEAT_PUMP_HYDROBOX,
+        DeviceType.UFH_MANIFOLD,
+        DeviceType.WATER_BOOSTER_PUMP,
+        DeviceType.VRV_INDOOR_ISOLATOR,
+    ):
+        return 2
+    return 3
+
+
+def _local_wall_angle(room: Room, x_mm: float, y_mm: float) -> float:
+    pts = room.polygon_mm
+    n = len(pts)
+    if n < 2:
+        return 0.0
+    pt = Point(x_mm, y_mm)
+    best_d = float("inf")
+    best_ang = 0.0
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        seg = LineString([(a.x_mm, a.y_mm), (b.x_mm, b.y_mm)])
+        d = float(seg.distance(pt))
+        if d < best_d:
+            best_d = d
+            best_ang = math.degrees(math.atan2(b.y_mm - a.y_mm, b.x_mm - a.x_mm)) % 360.0
+    return round(best_ang, 1)
+
+
+def _decollide_placed_devices(
+    building: BuildingModel,
+    devices: list[PlacedDevice],
+    wet_zones: list[RoomWetZones],
+    *,
+    meter_override: Point2D | None = None,
+    earth_pit_override: Point2D | None = None,
+    telecom_override: Point2D | None = None,
+) -> list[PlacedDevice]:
+    """Deterministically separate colliding ceiling, wall & exterior devices while keeping rules."""
+    if not devices or not building.rooms:
+        return devices
+
+    rooms_by_id = {r.id: r for r in building.rooms}
+    rpoly_by_id = {
+        r.id: Polygon([(p.x_mm, p.y_mm) for p in r.polygon_mm]) for r in building.rooms
+    }
+    wz_by_room = {w.room_id: w for w in wet_zones}
+
+    win_parts = [
+        LineString([(w.start.x_mm, w.start.y_mm), (w.end.x_mm, w.end.y_mm)]).buffer(120.0)
+        for w in building.windows
+    ]
+    all_window_buf: BaseGeometry = unary_union(win_parts) if win_parts else Polygon()
+    door_parts = [_door_forbidden_geometry(d) for d in building.doors]
+    all_door_buf: BaseGeometry = unary_union(door_parts) if door_parts else Polygon()
+
+    updated: list[PlacedDevice] = list(devices)
+
+    # Pass A: Ceiling devices (separate exhaust fans, smoke/heat & Wi-Fi APs from luminaires)
+    accepted_ceiling: list[tuple[float, float, str]] = []
+    # Accept primary luminaires & pendants first
+    ceiling_indices = [
+        i for i, d in enumerate(updated) if d.device_type in _CEILING_DEVICE_TYPES
+    ]
+    ceiling_indices.sort(
+        key=lambda i: (
+            0
+            if updated[i].device_type in (DeviceType.LUMINAIRE, DeviceType.PENDANT_LIGHT)
+            else 1,
+            i,
+        )
+    )
+    for idx in ceiling_indices:
+        dev = updated[idx]
+        room = rooms_by_id.get(dev.room_id)
+        if room is None:
+            accepted_ceiling.append((dev.location_mm.x_mm, dev.location_mm.y_mm, ""))
+            continue
+        flr = room.floor
+        x0, y0 = dev.location_mm.x_mm, dev.location_mm.y_mm
+        same_flr = [(ax, ay) for ax, ay, af in accepted_ceiling if af == flr]
+
+        if dev.device_type in (DeviceType.LUMINAIRE, DeviceType.PENDANT_LIGHT):
+            accepted_ceiling.append((x0, y0, flr))
+            continue
+
+        rpoly = rpoly_by_id[room.id]
+        cent = room.centroid_mm()
+        avoid_centroid = (
+            dev.device_type
+            in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR, DeviceType.WIFI_AP)
+            and room.area_m2 >= 6.0
+        )
+
+        def _ceil_min_d(cx: float, cy: float, pts: list[tuple[float, float]]) -> float:
+            if not pts:
+                return 9999.0
+            return min(math.hypot(cx - ax, cy - ay) for ax, ay in pts)
+
+        cur_d = _ceil_min_d(x0, y0, same_flr)
+        cent_d = math.hypot(x0 - cent.x_mm, y0 - cent.y_mm)
+        if cur_d < 360.0 or (avoid_centroid and cent_d < 320.0):
+            inner = rpoly.buffer(-160.0)
+            target_poly = inner if (not inner.is_empty and inner.area > 0.0) else rpoly
+            bminx, bminy, bmaxx, bmaxy = rpoly.bounds
+            candidates: list[tuple[float, float]] = [
+                (bminx + 0.80 * (bmaxx - bminx), bminy + 0.80 * (bmaxy - bminy)),
+                (bminx + 0.22 * (bmaxx - bminx), bminy + 0.78 * (bmaxy - bminy)),
+                (bminx + 0.78 * (bmaxx - bminx), bminy + 0.22 * (bmaxy - bminy)),
+                (bminx + 0.22 * (bmaxx - bminx), bminy + 0.22 * (bmaxy - bminy)),
+            ]
+            for rad in (400.0, 560.0, 740.0, 950.0, 1200.0):
+                for deg in range(0, 360, 30):
+                    ar = math.radians(deg)
+                    candidates.append(
+                        (cent.x_mm + rad * math.cos(ar), cent.y_mm + rad * math.sin(ar))
+                    )
+
+            best_xy = (x0, y0)
+            best_score = cur_d + (min(cent_d, 400.0) * 0.25 if avoid_centroid else 0.0)
+            for cx, cy in candidates:
+                if not target_poly.contains(Point(cx, cy)):
+                    continue
+                d_peer = _ceil_min_d(cx, cy, same_flr)
+                d_cent = math.hypot(cx - cent.x_mm, cy - cent.y_mm)
+                score = d_peer + (min(d_cent, 420.0) * 0.25 if avoid_centroid else 0.0)
+                if d_peer >= 440.0 and ((not avoid_centroid) or d_cent >= 360.0):
+                    best_xy = (cx, cy)
+                    break
+                if score > best_score:
+                    best_score = score
+                    best_xy = (cx, cy)
+
+            updated[idx] = dev.model_copy(
+                update={
+                    "location_mm": Point2D(
+                        x_mm=round(best_xy[0], 1), y_mm=round(best_xy[1], 1)
+                    )
+                }
+            )
+            x0, y0 = best_xy
+        accepted_ceiling.append((x0, y0, flr))
+
+    # Pass B: Wall-mounted devices (stagger same-room & back-to-back partition wall devices)
+    wall_indices = [
+        i
+        for i, d in enumerate(updated)
+        if d.device_type not in _CEILING_DEVICE_TYPES
+        and d.device_type not in _EXTERIOR_DEVICE_TYPES
+    ]
+    wall_indices.sort(
+        key=lambda i: (
+            _wall_priority(updated[i], has_telecom_override=telecom_override is not None),
+            i,
+        )
+    )
+    accepted_wall: list[tuple[float, float, str, DeviceType]] = []
+    # Seed DB / sub-board wall footprints so switches/keypads/PIRs never sit over MDB/DB1
+    db_pt = Point(building.db_anchor.location_mm.x_mm, building.db_anchor.location_mm.y_mm)
+    db_flr = building.rooms[0].floor if building.rooms else "GF"
+    if building.rooms:
+        best_r = min(building.rooms, key=lambda r: rpoly_by_id[r.id].distance(db_pt))
+        db_flr = best_r.floor
+    accepted_wall.append(
+        (
+            building.db_anchor.location_mm.x_mm,
+            building.db_anchor.location_mm.y_mm,
+            db_flr,
+            DeviceType.TELECOM_CABINET,
+        )
+    )
+    for sb in building.sub_boards:
+        accepted_wall.append(
+            (sb.location_mm.x_mm, sb.location_mm.y_mm, sb.floor, DeviceType.TELECOM_CABINET)
+        )
+
+    def _pair_min_sep(a: DeviceType, b: DeviceType) -> float:
+        pair = frozenset({a, b})
+        if pair == frozenset({DeviceType.TELECOM_CABINET, DeviceType.ALARM_PANEL}):
+            return 420.0
+        if pair in _PAIRED_WALL_ACCESSORIES:
+            return 220.0
+        return 290.0
+
+    for idx in wall_indices:
+        dev = updated[idx]
+        room = rooms_by_id.get(dev.room_id)
+        if room is None:
+            accepted_wall.append((dev.location_mm.x_mm, dev.location_mm.y_mm, "", dev.device_type))
+            continue
+        flr = room.floor
+        x0, y0 = dev.location_mm.x_mm, dev.location_mm.y_mm
+
+        # Never relocate explicitly overridden telecom rack or wet-room exterior switches/isolators
+        is_locked = (
+            (dev.device_type == DeviceType.TELECOM_CABINET and telecom_override is not None)
+            or (
+                room.is_wet_room
+                and dev.device_type in (DeviceType.SWITCH, DeviceType.FAN_ISOLATOR_3P)
+            )
+        )
+        same_flr_wall = [(ax, ay, at) for ax, ay, af, at in accepted_wall if af == flr]
+
+        def _violates(
+            cx: float,
+            cy: float,
+            dt: DeviceType,
+            peers: list[tuple[float, float, DeviceType]],
+        ) -> bool:
+            return any(
+                math.hypot(cx - ax, cy - ay) < _pair_min_sep(dt, at) for ax, ay, at in peers
+            )
+
+        def _min_peer_d(
+            cx: float,
+            cy: float,
+            peers: list[tuple[float, float, DeviceType]],
+        ) -> float:
+            if not peers:
+                return 9999.0
+            return min(math.hypot(cx - ax, cy - ay) for ax, ay, _ in peers)
+
+        if (not is_locked) and _violates(x0, y0, dev.device_type, same_flr_wall):
+            rpoly = rpoly_by_id[room.id]
+            boundary = rpoly.exterior
+            perim = float(boundary.length)
+            room_wz = wz_by_room.get(room.id)
+            if perim > 400.0:
+                s0 = float(boundary.project(Point(x0, y0)))
+                offsets = (
+                    340.0,
+                    -340.0,
+                    520.0,
+                    -520.0,
+                    740.0,
+                    -740.0,
+                    980.0,
+                    -980.0,
+                    1260.0,
+                    -1260.0,
+                    1580.0,
+                    -1580.0,
+                    1950.0,
+                    -1950.0,
+                    2400.0,
+                    -2400.0,
+                    2900.0,
+                    -2900.0,
+                    3500.0,
+                    -3500.0,
+                    4200.0,
+                    -4200.0,
+                    5000.0,
+                    -5000.0,
+                )
+                best_xy = (x0, y0)
+                best_d = _min_peer_d(x0, y0, same_flr_wall)
+                found_clear = False
+                for delta in offsets:
+                    pt = boundary.interpolate((s0 + delta) % perim)
+                    cx, cy = float(pt.x), float(pt.y)
+                    cand_p2d = Point2D(x_mm=round(cx, 1), y_mm=round(cy, 1))
+                    if dev.device_type == DeviceType.SOCKET_TWIN:
+                        if (not all_window_buf.is_empty) and all_window_buf.contains(pt):
+                            continue
+                        if (not all_door_buf.is_empty) and all_door_buf.contains(pt):
+                            continue
+                        if is_point_in_socket_exclusion(cand_p2d, room_wz):
+                            continue
+                    elif (
+                        dev.device_type != DeviceType.SHUTTER_SWITCH
+                        and (not all_window_buf.is_empty)
+                        and all_window_buf.contains(pt)
+                    ):
+                        continue
+                    if not _violates(cx, cy, dev.device_type, same_flr_wall):
+                        best_xy = (cx, cy)
+                        found_clear = True
+                        break
+                    md = _min_peer_d(cx, cy, same_flr_wall)
+                    if md > best_d:
+                        best_d = md
+                        best_xy = (cx, cy)
+
+                if found_clear or best_d > _min_peer_d(x0, y0, same_flr_wall) + 40.0:
+                    new_ang = _local_wall_angle(room, best_xy[0], best_xy[1])
+                    updated[idx] = dev.model_copy(
+                        update={
+                            "location_mm": Point2D(
+                                x_mm=round(best_xy[0], 1), y_mm=round(best_xy[1], 1)
+                            ),
+                            "wall_angle_deg": new_ang,
+                        }
+                    )
+                    x0, y0 = best_xy
+
+        accepted_wall.append((x0, y0, flr, dev.device_type))
+
+    # Pass C: Exterior site devices (prevent overlapping exterior markers)
+    ext_indices = [i for i, d in enumerate(updated) if d.device_type in _EXTERIOR_DEVICE_TYPES]
+    accepted_ext: list[tuple[float, float]] = []
+    for idx in ext_indices:
+        dev = updated[idx]
+        x0, y0 = dev.location_mm.x_mm, dev.location_mm.y_mm
+        locked_ext = (
+            (dev.device_type == DeviceType.EAC_METER_CABINET and meter_override is not None)
+            or (dev.device_type == DeviceType.EARTH_PIT and earth_pit_override is not None)
+        )
+        ext_close = any(math.hypot(x0 - ax, y0 - ay) < 340.0 for ax, ay in accepted_ext)
+        if (not locked_ext) and ext_close:
+            for dx, dy in (
+                (460.0, 0.0),
+                (-460.0, 0.0),
+                (0.0, -460.0),
+                (0.0, 460.0),
+                (680.0, -320.0),
+                (-680.0, -320.0),
+            ):
+                cx, cy = x0 + dx, y0 + dy
+                if all(math.hypot(cx - ax, cy - ay) >= 340.0 for ax, ay in accepted_ext):
+                    updated[idx] = dev.model_copy(
+                        update={"location_mm": Point2D(x_mm=round(cx, 1), y_mm=round(cy, 1))}
+                    )
+                    x0, y0 = cx, cy
+                    break
+        accepted_ext.append((x0, y0))
+
+    return updated
 
 
 def build_switch_legs(devices: list[PlacedDevice]) -> list[SwitchLeg]:

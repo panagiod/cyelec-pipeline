@@ -217,15 +217,30 @@ def generate_boq(
         1,
         sw["main_isolator_4p"] if is_3p_supply else sw["main_isolator_2p"],
     )
-    _add(
-        "Switchgear",
-        f"Surge Protection Device (SPD Type 2, {'3P+N' if is_3p_supply else '1P+N'}) "
-        "per BS 7671 Section 443",
-        f"Απαγωγός Υπερτάσεων (SPD Type 2, {'3P+N' if is_3p_supply else '1P+N'})",
-        "no.",
-        1,
-        sw["spd_type2_3p"] if is_3p_supply else sw["spd_type2_1p"],
+    needs_lps_spd = bool(
+        design.lightning_risk is not None and design.lightning_risk.lps_required
     )
+    if needs_lps_spd:
+        _add(
+            "Switchgear",
+            f"Combined Surge Protection Device (SPD Type 1+2, 12.5 kA 10/350µs, "
+            f"{'3P+N' if is_3p_supply else '1P+N'}) per IEC 62305 & BS 7671 Sec. 443",
+            f"Συνδυασμένος Απαγωγός Υπερτάσεων (SPD Type 1+2, 12.5 kA, "
+            f"{'3P+N' if is_3p_supply else '1P+N'})",
+            "no.",
+            1,
+            round((sw["spd_type2_3p"] if is_3p_supply else sw["spd_type2_1p"]) * 2.2, 2),
+        )
+    else:
+        _add(
+            "Switchgear",
+            f"Surge Protection Device (SPD Type 2, {'3P+N' if is_3p_supply else '1P+N'}) "
+            "per BS 7671 Section 443",
+            f"Απαγωγός Υπερτάσεων (SPD Type 2, {'3P+N' if is_3p_supply else '1P+N'})",
+            "no.",
+            1,
+            sw["spd_type2_3p"] if is_3p_supply else sw["spd_type2_1p"],
+        )
 
     if eac.ct_metering_required:
         _add(

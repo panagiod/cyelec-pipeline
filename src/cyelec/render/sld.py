@@ -77,15 +77,20 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     prov = result.provenance
     lang = result.report_language
     branding_line = format_branding_line(result.branding)
-    circuits = result.circuits
+    circuits = list(result.circuits)
+    if result.sub_mains:
+        sm_order = {sm.board_id: i for i, sm in enumerate(result.sub_mains)}
+        circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
     n = max(1, len(circuits))
+    sub_board_ids = {sm.board_id for sm in result.sub_mains}
+    lps_req = bool(result.lightning_risk and result.lightning_risk.lps_required)
 
     # Dynamic width comfortably fitting 13+ circuits while maintaining A3 landscape aspect
     col_w = 112
     margin_x = 56
     width = max(1580, margin_x * 2 + n * col_w)
-    sub_offset_y = 115 if result.sub_mains else 0
-    height = 1040 + sub_offset_y
+    sub_offset_y = 118 if result.sub_mains else 0
+    height = 1045 + sub_offset_y
 
     bus_x0 = margin_x + 30
     bus_x1 = width - margin_x - 30
@@ -95,19 +100,23 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-            f'width="{width}" height="{height}">'
+            '<svg xmlns="http://www.w3.org/2000/svg" class="cy-e201" '
+            f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
         ),
         "  <style>",
-        '    text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
-        "    .title { font-size: 16px; font-weight: 700; fill: #1b365d; }",
-        "    .sub { font-size: 11px; fill: #4a5568; }",
-        "    .hdr { font-size: 12px; font-weight: 700; fill: #1b365d; }",
-        "    .lbl { font-size: 10px; font-weight: 600; }",
-        "    .sm { font-size: 9px; fill: #2d3748; }",
-        "    .xs { font-size: 8.2px; fill: #4a5568; }",
-        "    .pass { fill: #155724; font-weight: 700; font-size: 9px; }",
-        "    .fail { fill: #721c24; font-weight: 700; font-size: 9px; }",
+        (
+            '    .cy-e201 text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; '
+            "fill: #1a202c; }"
+        ),
+        "    .cy-e201 .title { font-size: 16px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e201 .sub { font-size: 11px; fill: #4a5568; }",
+        "    .cy-e201 .hdr { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e201 .lbl { font-size: 10px; font-weight: 600; }",
+        "    .cy-e201 .sm { font-size: 9px; fill: #2d3748; }",
+        "    .cy-e201 .xs { font-size: 8.2px; fill: #4a5568; }",
+        "    .cy-e201 .pill { font-size: 9.5px; font-weight: 700; fill: #ffffff; }",
+        "    .cy-e201 .pass { fill: #155724; font-weight: 700; font-size: 9px; }",
+        "    .cy-e201 .fail { fill: #721c24; font-weight: 700; font-size: 9px; }",
         "  </style>",
         f'  <rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff" />',
         (
@@ -239,30 +248,33 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             "TT INSULATED TAIL ENTRY — ALL-RCBO NON-COMBUSTIBLE DB</text>"
         )
 
-    # Type 2 Surge Protection Device (SPD 40kA + 32A back-up MCB) off incomer
-    spd_x = cx_incomer - 235
+    # Surge Protection Device (Type 1+2 when LPS required, else Type 2 40kA) off incomer
+    spd_x = cx_incomer - 245
     spd_y = iso_y + 62
+    spd_title = "SPD TYPE 1+2 (12.5kA)" if lps_req else "SPD TYPE 2 (40kA)"
+    spd_sub1 = "10/350µs + 40kA · Up≤1.5kV" if lps_req else "32A MCB Back-Up · Up≤1.5kV"
+    spd_sub2 = "IEC 62305-2 + Reg 443.4" if lps_req else "BS 7671 Reg 443.4"
     parts.extend(
         [
             (
-                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 68}" y2="{spd_y}" '
+                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 76}" y2="{spd_y}" '
                 'stroke="#4a5568" stroke-width="1.6" stroke-dasharray="5,3" />'
             ),
             (
-                f'  <rect x="{spd_x - 68}" y="{spd_y - 22}" width="136" height="44" '
+                f'  <rect x="{spd_x - 76}" y="{spd_y - 22}" width="152" height="44" '
                 'rx="3" fill="#fffaf0" stroke="#c05621" stroke-width="1.5" />'
             ),
             (
                 f'  <text x="{spd_x}" y="{spd_y - 5}" text-anchor="middle" '
-                'class="lbl">SPD TYPE 2 (40kA)</text>'
+                f'class="lbl">{spd_title}</text>'
             ),
             (
                 f'  <text x="{spd_x}" y="{spd_y + 8}" text-anchor="middle" '
-                'class="xs">32A MCB Back-Up · Up≤1.5kV</text>'
+                f'class="xs">{spd_sub1}</text>'
             ),
             (
                 f'  <text x="{spd_x}" y="{spd_y + 19}" text-anchor="middle" '
-                'class="xs">BS 7671 Reg 443.4</text>'
+                f'class="xs">{spd_sub2}</text>'
             ),
         ]
     )
@@ -394,7 +406,8 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             f'stroke="{color}" stroke-width="2.6" />'
         )
         parts.append(
-            f'  <text x="{bus_x0 - 24}" y="{by + 3}" class="xs" fill="{color}">{blabel}</text>'
+            f'  <text x="{bus_x0 - 24}" y="{by + 3}" class="xs" '
+            f'style="fill:{color};">{blabel}</text>'
         )
     parts.extend(
         [
@@ -423,6 +436,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             sx0 = int(bus_x0 + step_x * min(indices) + 10)
             sx1 = int(bus_x0 + step_x * (max(indices) + 1) - 10)
             scx = (sx0 + sx1) // 2
+            box_w = min(360, max(220, sx1 - sx0 - 12))
             sm_color = "#155724" if sm.overall_pass else "#721c24"
             sm_bg = "#f0fff4" if sm.overall_pass else "#fff5f5"
             parts.extend(
@@ -432,13 +446,14 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                         'stroke="#1b365d" stroke-width="2.4" />'
                     ),
                     (
-                        f'  <rect x="{scx - 165}" y="{sub_y - 26}" width="330" height="44" '
-                        f'rx="4" fill="{sm_bg}" stroke="{sm_color}" stroke-width="1.5" />'
+                        f'  <rect x="{scx - box_w // 2}" y="{sub_y - 26}" width="{box_w}" '
+                        f'height="44" rx="4" fill="{sm_bg}" '
+                        f'stroke="{sm_color}" stroke-width="1.5" />'
                     ),
                     (
                         f'  <text x="{scx}" y="{sub_y - 9}" text-anchor="middle" class="hdr">'
                         f"{_esc(sm.parent_board_id)} -&gt; {_esc(sm.board_id)} "
-                        f"(Floor {_esc(sm.floor)}) — {_esc(sm.breaker_in_a)}A"
+                        f"({_esc(sm.floor)}) — {_esc(sm.breaker_in_a)}A"
                         f"{' + 100mA Type S' if sm.rcd_selective_type_s else ''}</text>"
                     ),
                     (
@@ -458,6 +473,28 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                     ),
                 ]
             )
+        # Optional Direct MDB Feeders header (for circuits connected straight to MDB)
+        direct_indices = [
+            i for i, c in enumerate(circuits) if c.spec.board_id not in sub_board_ids
+        ]
+        if direct_indices:
+            dx0 = int(bus_x0 + step_x * min(direct_indices) + 10)
+            dx1 = int(bus_x0 + step_x * (max(direct_indices) + 1) - 10)
+            dcx = (dx0 + dx1) // 2
+            d_w = min(280, max(160, dx1 - dx0 - 10))
+            parts.extend(
+                [
+                    (
+                        f'  <rect x="{dcx - d_w // 2}" y="{sub_y - 14}" width="{d_w}" height="24" '
+                        'rx="4" fill="#edf2f7" stroke="#4a5568" stroke-width="1.2" '
+                        'stroke-dasharray="4,2" />'
+                    ),
+                    (
+                        f'  <text x="{dcx}" y="{sub_y + 2}" text-anchor="middle" class="sm">'
+                        f"DIRECT {_esc(result.building.db_anchor.id)} OUTGOING FEEDERS</text>"
+                    ),
+                ]
+            )
 
     # ------------------------------------------------------------------
     # 3. Final Circuit Feeders (MCB/RCBO, Cable Spec, Length, Ib, ΔV, PASS/FAIL)
@@ -467,12 +504,13 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     dev_y = 435 + sub_offset_y
     cable_y = 540 + sub_offset_y
     load_y = 660 + sub_offset_y
+    pill_y = (bus_y + 114) if result.sub_mains else (bus_y + 34)
 
     for idx, circ in enumerate(circuits):
         s = circ.spec
         cx = int(bus_x0 + step_x * (idx + 0.5))
         p_color = _PHASE_HEX.get(circ.phase, "#1b365d")
-        if result.sub_mains:
+        if result.sub_mains and s.board_id in sub_board_ids:
             bus_tap_y = bus_y + 106
         else:
             bus_tap_y = (
@@ -505,12 +543,11 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 ),
                 # Circuit ID + Phase pill
                 (
-                    f'  <rect x="{cx - 34}" y="{bus_y + 34}" width="68" height="20" '
+                    f'  <rect x="{cx - 34}" y="{pill_y}" width="68" height="20" '
                     f'rx="3" fill="{p_color}" />'
                 ),
                 (
-                    f'  <text x="{cx}" y="{bus_y + 47}" text-anchor="middle" '
-                    f'style="fill:#ffffff;font-size:9.5px;font-weight:700;">'
+                    f'  <text x="{cx}" y="{pill_y + 13}" text-anchor="middle" class="pill">'
                     f"{_esc(s.circuit_id)} ({_esc(circ.phase.value)})</text>"
                 ),
                 # IEC 60617 MCB/RCBO symbol box
@@ -603,6 +640,8 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     tb_y = height - 185
     tb_h = 152
     tb_w = width - 64
+    sign_w = 472
+    sign_x = width - sign_w
     imb_txt = (
         f"L1={result.phase_balance.phase_currents_a['L1']:.1f}A / "
         f"L2={result.phase_balance.phase_currents_a['L2']:.1f}A / "
@@ -617,7 +656,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     eng_val = (
         result.branding.engineer_name
         if (result.branding and result.branding.engineer_name)
-        else "__________________________________"
+        else "______________________________"
     )
     etek_val = (
         result.branding.etek_reg_no
@@ -631,7 +670,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 'fill="#f8fafc" stroke="#1b365d" stroke-width="1.8" />'
             ),
             (
-                f'  <line x1="{width - 420}" y1="{tb_y}" x2="{width - 420}" '
+                f'  <line x1="{sign_x}" y1="{tb_y}" x2="{sign_x}" '
                 f'y2="{tb_y + tb_h}" stroke="#1b365d" stroke-width="1.4" />'
             ),
             (
@@ -665,21 +704,21 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 f'  <text x="48" y="{tb_y + 128}" class="xs">'
                 f"Standards: {_esc(std_summary)}</text>"
             ),
-            # Right pane: Statutory ETEK Stamp & Sign-Off Box
+            # Right pane: Statutory ETEK Stamp & Sign-Off Box (widened to prevent right-edge clip)
             (
-                f'  <text x="{width - 404}" y="{tb_y + 24}" class="hdr">'
+                f'  <text x="{sign_x + 16}" y="{tb_y + 24}" class="hdr">'
                 f"{_esc(t('etek_signoff', lang).upper())}</text>"
             ),
             (
-                f'  <text x="{width - 404}" y="{tb_y + 52}" class="sm">'
+                f'  <text x="{sign_x + 16}" y="{tb_y + 52}" class="sm">'
                 f"Licensed Engineer: {_esc(eng_val)}</text>"
             ),
             (
-                f'  <text x="{width - 404}" y="{tb_y + 80}" class="sm">'
+                f'  <text x="{sign_x + 16}" y="{tb_y + 80}" class="sm">'
                 f"ETEK Reg. No.: {_esc(etek_val)}  Date: ____________</text>"
             ),
             (
-                f'  <text x="{width - 404}" y="{tb_y + 114}" class="sm">'
+                f'  <text x="{sign_x + 16}" y="{tb_y + 114}" class="sm">'
                 "Signature &amp; Official Stamp:</text>"
             ),
             "</svg>",
@@ -700,8 +739,13 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
 
     msp = doc.modelspace()
     eac = result.eac_compliance
-    circuits = result.circuits
+    circuits = list(result.circuits)
+    if result.sub_mains:
+        sm_order = {sm.board_id: i for i, sm in enumerate(result.sub_mains)}
+        circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
     n = max(1, len(circuits))
+    sub_board_ids = {sm.board_id for sm in result.sub_mains}
+    lps_req = bool(result.lightning_risk and result.lightning_risk.lps_required)
 
     col_w = 2400.0
     margin = 1200.0
@@ -750,7 +794,7 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         dxfattribs={"layer": "E-SLD-BUS"},
     )
 
-    # EAC Meter, Meter Tails, Main Isolator, optional 100mA Type-S RCD, SPD T2 & PV branch
+    # EAC Meter, Meter Tails, Main Isolator, optional 100mA Type-S RCD, SPD & PV branch
     tail_spec = _meter_tail_spec(result)
     show_tt_rcd_s = (
         result.earthing_system == EarthingSystem.TT and result.include_tt_main_rcd_s
@@ -816,27 +860,29 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             dxfattribs={"layer": "E-SLD-TEXT", "height": 190.0},
         ).set_placement((cx_inc - 1650.0, bus_y + 700.0))
 
-    # Type 2 SPD (40kA + 32A back-up MCB) branched off main incomer
+    # Surge Protection Device (Type 1+2 if LPS required, else Type 2 40kA) branched off incomer
     spd_x, spd_y = cx_inc - 4200.0, bus_y + 900.0
-    msp.add_line((cx_inc, spd_y), (spd_x + 1500.0, spd_y), dxfattribs={"layer": "E-SLD-WIRE"})
+    msp.add_line((cx_inc, spd_y), (spd_x + 1600.0, spd_y), dxfattribs={"layer": "E-SLD-WIRE"})
     msp.add_lwpolyline(
         [
-            (spd_x - 1500.0, spd_y - 480.0),
-            (spd_x + 1500.0, spd_y - 480.0),
-            (spd_x + 1500.0, spd_y + 480.0),
-            (spd_x - 1500.0, spd_y + 480.0),
+            (spd_x - 1600.0, spd_y - 480.0),
+            (spd_x + 1600.0, spd_y - 480.0),
+            (spd_x + 1600.0, spd_y + 480.0),
+            (spd_x - 1600.0, spd_y + 480.0),
         ],
         close=True,
         dxfattribs={"layer": "E-SLD-DEV"},
     )
+    spd_dxf_l1 = "SPD TYPE 1+2 (12.5kA 10/350)" if lps_req else "SPD TYPE 2 (40kA) + 32A MCB"
+    spd_dxf_l2 = "IEC 62305-2 + REG 443.4" if lps_req else "BS 7671 REG 443.4 (Up<=1.5kV)"
     msp.add_text(
-        "SPD TYPE 2 (40kA) + 32A MCB",
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 175.0},
-    ).set_placement((spd_x - 1380.0, spd_y + 60.0))
+        spd_dxf_l1,
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
+    ).set_placement((spd_x - 1480.0, spd_y + 60.0))
     msp.add_text(
-        "BS 7671 REG 443.4 (Up<=1.5kV)",
+        spd_dxf_l2,
         dxfattribs={"layer": "E-SLD-TEXT", "height": 150.0},
-    ).set_placement((spd_x - 1380.0, spd_y - 260.0))
+    ).set_placement((spd_x - 1480.0, spd_y - 260.0))
 
     # Complete Earthing & Equipotential Bonding Block on left
     ex, ey = margin + 1600.0, bus_y + 2300.0
@@ -901,14 +947,12 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     ).set_placement((bus_x1 - 2900.0, bus_y + 260.0))
 
     step_x = (bus_x1 - bus_x0) / max(1, n)
-    tap_bus_y = bus_y
+    sub_bus_y = bus_y - 2600.0
 
-    # Optional Hierarchical Sub-Distribution Boards (MDB -> DB-GF / DB-1F)
+    # Optional Hierarchical Sub-Distribution Boards (MDB -> DB-GF / DB-1F, contiguous spans)
     if result.sub_mains:
         sub_box_top = bus_y - 700.0
         sub_box_bot = bus_y - 2000.0
-        sub_bus_y = bus_y - 2600.0
-        tap_bus_y = sub_bus_y
         for sm in result.sub_mains:
             indices = [i for i, c in enumerate(circuits) if c.spec.board_id == sm.board_id]
             if not indices:
@@ -916,15 +960,16 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             sx0 = bus_x0 + step_x * min(indices) + 200.0
             sx1 = bus_x0 + step_x * (max(indices) + 1) - 200.0
             scx = (sx0 + sx1) / 2.0
+            half_w = min(3200.0, max(2100.0, (sx1 - sx0) * 0.45))
             msp.add_line(
                 (scx, bus_y - 250.0), (scx, sub_box_top), dxfattribs={"layer": "E-SLD-WIRE"}
             )
             msp.add_lwpolyline(
                 [
-                    (scx - 3200.0, sub_box_bot),
-                    (scx + 3200.0, sub_box_bot),
-                    (scx + 3200.0, sub_box_top),
-                    (scx - 3200.0, sub_box_top),
+                    (scx - half_w, sub_box_bot),
+                    (scx + half_w, sub_box_bot),
+                    (scx + half_w, sub_box_top),
+                    (scx - half_w, sub_box_top),
                 ],
                 close=True,
                 dxfattribs={"layer": "E-SLD-DEV"},
@@ -932,16 +977,16 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             rcd_s = " + 100mA TYPE S" if sm.rcd_selective_type_s else ""
             msp.add_text(
                 f"{sm.parent_board_id}->{sm.board_id} ({sm.floor}) {sm.breaker_in_a}A{rcd_s}",
-                dxfattribs={"layer": "E-SLD-TEXT", "height": 200.0},
-            ).set_placement((scx - 3000.0, sub_box_top - 480.0))
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 190.0},
+            ).set_placement((scx - half_w + 180.0, sub_box_top - 480.0))
             msp.add_text(
                 (
                     f"{sm.cable_mm2:g}/{sm.cpc_mm2:g}mm2 L={sm.length_m:.0f}m "
                     f"dV={sm.voltage_drop_pct:.2f}% "
                     f"CumL/P={sm.cumulative_lighting_vd_pct:.1f}/{sm.cumulative_power_vd_pct:.1f}%"
                 ),
-                dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
-            ).set_placement((scx - 3000.0, sub_box_bot + 260.0))
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 160.0},
+            ).set_placement((scx - half_w + 180.0, sub_box_bot + 260.0))
             msp.add_line(
                 (scx, sub_box_bot), (scx, sub_bus_y), dxfattribs={"layer": "E-SLD-WIRE"}
             )
@@ -951,8 +996,9 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     for idx, circ in enumerate(circuits):
         s = circ.spec
         cx = bus_x0 + step_x * (idx + 0.5)
-        # Drop wire from MDB or sub-board busbar
-        msp.add_line((cx, tap_bus_y), (cx, 12_200.0), dxfattribs={"layer": "E-SLD-WIRE"})
+        # Drop wire from sub-board busbar (for sub-board circuits) or main MDB busbar (direct)
+        c_tap_y = sub_bus_y if (result.sub_mains and s.board_id in sub_board_ids) else bus_y
+        msp.add_line((cx, c_tap_y), (cx, 12_200.0), dxfattribs={"layer": "E-SLD-WIRE"})
         # Breaker rectangle
         msp.add_lwpolyline(
             [

@@ -231,14 +231,18 @@ def build_eac_application_rows(result: Phase2DesignResult) -> list[tuple[str, st
             (
                 f"{b.pv_capacity_kva:g} kVA (Attach EAC RES Sheet)"
                 if b.pv_capacity_kva > 0
-                else "None"
+                else "Not installed (0 kVA)"
             ),
         ),
         (
             "D. Special Systems & Renewables / Ειδικές Εγκαταστάσεις",
             "EV Charging Point (BS 7671 Sec 722)",
             "Σημείο Φόρτισης EV",
-            f"{b.ev_charger_kw:g} kW (Type A+6mA DC / Type B)" if has_ev else "None",
+            (
+                f"{b.ev_charger_kw:g} kW (Type A+6mA DC / Type B)"
+                if has_ev
+                else "Not installed (0 kW)"
+            ),
         ),
         (
             "D. Special Systems & Renewables / Ειδικές Εγκαταστάσεις",
