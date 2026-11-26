@@ -480,6 +480,7 @@ def _solve_dxf_bundle_sync(
     building_type: BuildingType | None,
     layer_mapping: DxfLayerMapping | None = None,
 ) -> tuple[Phase2DesignResult, bytes]:
+    from cyelec.ingest.dwg_bridge import convert_dwg_to_dxf
     from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
     from cyelec.render.eac_pack import build_submission_zip
 
@@ -487,14 +488,28 @@ def _solve_dxf_bundle_sync(
         tmp = Path(tmp_dir)
         in_path = tmp / f"plan{suffix}"
         in_path.write_bytes(data)
+        extra_flags = []
+        source_dxf: Path | None = None
+        if suffix == ".dwg":
+            conv_dxf, dwg_flag = convert_dwg_to_dxf(in_path, tmp / "dwg_conv")
+            extra_flags.append(dwg_flag)
+            solve_path = conv_dxf
+            source_dxf = conv_dxf
+        else:
+            solve_path = in_path
+            source_dxf = in_path if suffix == ".dxf" else None
         p2 = run_phase2_pipeline(
-            in_path,
+            solve_path,
             overrides=overrides,
             building_type=building_type,
             layer_mapping=layer_mapping,
+            extra_flags=extra_flags,
         )
         outputs = export_phase3_deliverables(
-            p2, tmp / "pack", export_pdf=is_weasyprint_available()
+            p2,
+            tmp / "pack",
+            export_pdf=is_weasyprint_available(),
+            source_dxf_path=source_dxf,
         )
         zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
         return p2, zip_path.read_bytes()

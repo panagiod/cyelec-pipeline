@@ -432,3 +432,126 @@ def test_w5_api_stage4_preview_bundle_and_ui_controls(tmp_path: Path) -> None:
     assert "HMY-A-2044" in form_in_zip
     json_name = next(n for n in names if n.endswith(".json") and "spatial" not in n)
     _ = json.loads(zf.read(json_name).decode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# W6: Real-World DWG Hardening (Single-Floor Underlay, Drafter Typos & Window-Layer Door Arcs)
+# ---------------------------------------------------------------------------
+
+
+def test_w6_real_world_dwg_underlay_preservation_aliases_and_fallback_door_arcs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from cyelec.ingest.room_classifier import classify_room_label
+    from cyelec.models.building import RoomType
+    from cyelec.models.electrical import ReviewFlag, ReviewSeverity
+    from cyelec.standards_loader import load_standards
+
+    # 1. Real-world drafter room labels, common typos & fractional imperial MTEXT stripping
+    rt = load_standards().room_templates
+    cases = [
+        ("DRAWING ROOM\n12'-6\" x 15'-0\"", RoomType.LIVING_ROOM),
+        ("DINNING\n13'-0\"X10'-0\"", RoomType.LIVING_ROOM),
+        ("TV LOUNGE \n20'-9\"X13'-0\"", RoomType.LIVING_ROOM),
+        ("LAUNDARY\n5'-7\"X5'-0\"", RoomType.UTILITY),
+        ("DRESS\n5'4 1/2\"X6'-0\"", RoomType.STORAGE),
+        ("PASSAGE \n5'-0\" WIDE", RoomType.CORRIDOR),
+        ("CAR PORCH\n18'-0\"x12'-0\"", RoomType.VERANDA),
+    ]
+    for raw_lbl, expected_rt in cases:
+        res = classify_room_label(raw_lbl, rt)
+        assert res.normalized_type == expected_rt, (
+            f"Expected {expected_rt} for {raw_lbl!r}, got {res.normalized_type}"
+        )
+        assert res.flag is None, f"Unexpected ambiguity flag on {raw_lbl!r}"
+
+    # 2. Architectural DXF with open doorway sealed ONLY by a 90-deg ARC on Window layer
+    #    plus custom furniture layer to verify single-floor .dwg underlay preservation!
+    src_dxf = tmp_path / "real_dwg_converted.dxf"
+    doc = ezdxf.new("R2018")
+    doc.header["$INSUNITS"] = 4  # mm
+    msp = doc.modelspace()
+    # Outer perimeter 8000 x 5000 mm
+    for p0, p1 in (
+        ((0, 0), (8000, 0)),
+        ((8000, 0), (8000, 5000)),
+        ((8000, 5000), (0, 5000)),
+        ((0, 5000), (0, 0)),
+        # Partition wall at x=4500 with a 1000 mm doorway opening from y=1000..2000
+        ((4500, 0), (4500, 1000)),
+        ((4500, 2000), (4500, 5000)),
+    ):
+        msp.add_line(p0, p1, dxfattribs={"layer": "Walls"})
+    # 90-degree door swing arc drawn on Window layer (r=1000 mm seals doorway!)
+    msp.add_arc(
+        center=(4500, 1000),
+        radius=1000.0,
+        start_angle=0.0,
+        end_angle=90.0,
+        dxfattribs={"layer": "Window"},
+    )
+    msp.add_mtext(
+        "DRAWING ROOM\\P14'-0\"x16'-0\"",
+        dxfattribs={"layer": "Text", "insert": (2200, 2500)},
+    )
+    msp.add_mtext(
+        "LAUNDARY\\P10'-0\"x12'-0\"",
+        dxfattribs={"layer": "Text", "insert": (6200, 2500)},
+    )
+    # Custom architect layer that MUST survive in E-100, E-101, and E-102 DXFs!
+    msp.add_lwpolyline(
+        [(500, 500), (1500, 500), (1500, 1200), (500, 1200)],
+        close=True,
+        dxfattribs={"layer": "A-CUSTOM-DWG-STAIRS"},
+    )
+    doc.saveas(str(src_dxf))
+
+    def fake_dwg_convert(
+        dwg_path: Path, out_dir: Path, *, timeout_s: float = 60.0
+    ) -> tuple[Path, ReviewFlag]:
+        _ = timeout_s
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{dwg_path.stem}.dxf"
+        out.write_bytes(src_dxf.read_bytes())
+        return (
+            out,
+            ReviewFlag(
+                code="DWG_CONVERTED_VIA_SUBPROCESS",
+                severity=ReviewSeverity.INFO,
+                category="geometry",
+                message="Mock single-floor DWG converted.",
+            ),
+        )
+
+    monkeypatch.setattr("cyelec.ingest.dwg_bridge.convert_dwg_to_dxf", fake_dwg_convert)
+    monkeypatch.setattr("cyelec.pipeline.convert_dwg_to_dxf", fake_dwg_convert)
+
+    app = create_app(db_path=tmp_path / "w6.db")
+    client = TestClient(app)
+    resp = client.post(
+        "/v1/solve/dxf/bundle",
+        files={"file": ("cyprus_villa.dwg", b"AC1032FAKE_DWG", "application/acad")},
+    )
+    assert resp.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    ds = json.loads(zf.read("design_result.json").decode("utf-8"))
+    # Fallback Window-layer 90-deg door arc cleanly separated 2 distinct rooms!
+    room_types = {r["normalized_type"] for r in ds["building"]["rooms"]}
+    assert room_types == {"living_room", "utility"}
+
+    # Original architect .dwg layer MUST be preserved in Master, E-101, AND E-102 DXFs!
+    for dxf_name in (
+        "electrical_layout.dxf",
+        "E101_lighting_layout.dxf",
+        "E102_power_layout.dxf",
+    ):
+        p = tmp_path / dxf_name
+        p.write_bytes(zf.read(dxf_name))
+        out_doc = ezdxf.readfile(str(p))
+        assert len(out_doc.audit().errors) == 0
+        layers_in_msp = {e.dxf.layer for e in out_doc.modelspace()}
+        assert "A-CUSTOM-DWG-STAIRS" in layers_in_msp, (
+            f"Architect DWG underlay lost in {dxf_name}!"
+        )
+

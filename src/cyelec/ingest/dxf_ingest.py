@@ -588,9 +588,30 @@ def ingest_dxf(
     wall_lines: list[tuple[Point2D, Point2D]] = []
     layer0_lines: list[tuple[Point2D, Point2D]] = []
     door_arcs: list[tuple[Point2D, float, float, float]] = []
+    fallback_door_arcs: list[tuple[Point2D, float, float, float]] = []
     door_leaves: list[tuple[Point2D, Point2D]] = []
     window_lines: list[tuple[Point2D, Point2D]] = []
     db_points: list[tuple[str, Point2D]] = []
+
+    def _maybe_record_fallback_door_arc(arc_ent: DXFGraphic) -> None:
+        r_mm = float(arc_ent.dxf.radius) * scale
+        if not (600.0 <= r_mm <= 1250.0):
+            return
+        sa = float(arc_ent.dxf.start_angle)
+        ea = float(arc_ent.dxf.end_angle)
+        span = (ea - sa) % 360.0
+        if 75.0 <= span <= 105.0:
+            fallback_door_arcs.append(
+                (
+                    Point2D(
+                        x_mm=float(arc_ent.dxf.center.x) * scale,
+                        y_mm=float(arc_ent.dxf.center.y) * scale,
+                    ),
+                    r_mm,
+                    sa,
+                    ea,
+                )
+            )
 
     # Extract room label attributes from INSERT blocks (e.g. RM-TAG with NAME='Guest bedroom')
     for raw_ent in msp:
@@ -692,7 +713,7 @@ def ingest_dxf(
                     )
                 )
 
-        # Windows
+        # Windows (also capture 90-deg door swings when architects place doors on Window layer)
         elif _role_matches(layer, "windows", layer_mapping):
             if dtype == "LINE":
                 window_lines.append(
@@ -707,6 +728,8 @@ def ingest_dxf(
                         ),
                     )
                 )
+            elif dtype == "ARC":
+                _maybe_record_fallback_door_arc(ent)
 
         # Distribution board anchor (layer OR DB block name)
         elif _role_matches(layer, "db", layer_mapping) or any(
@@ -737,7 +760,7 @@ def ingest_dxf(
                 if txt is not None:
                     fixture_texts.append((txt[0], Point(txt[1])))
 
-        # Layer "0" fallback lines (used only when dedicated wall/room layers are absent)
+        # Layer "0" fallback lines & 90-deg door arcs (used only when dedicated layers are absent)
         elif layer == "0" and not block_hint:
             if dtype == "LINE":
                 layer0_lines.append(
@@ -752,6 +775,8 @@ def ingest_dxf(
                         ),
                     )
                 )
+            elif dtype == "ARC":
+                _maybe_record_fallback_door_arc(ent)
             elif isinstance(ent, LWPolyline):
                 pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
                 for a, b in zip(pts, pts[1:], strict=False):
@@ -791,6 +816,9 @@ def ingest_dxf(
                 ),
             )
         )
+
+    if not door_arcs and fallback_door_arcs:
+        door_arcs = fallback_door_arcs
 
     # Wall-to-room polygonization fallback OR hybrid merge for partial A-ROOM drawings
     if not room_raw_polys and wall_lines:

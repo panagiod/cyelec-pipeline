@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
+from ezdxf import recover as ezdxf_recover
 from ezdxf.addons.importer import Importer
 from ezdxf.document import Drawing
 from ezdxf.filemanagement import new as new_dxf
@@ -21,6 +22,15 @@ from cyelec.models.spatial import DeviceType, Phase2DesignResult
 from cyelec.synth.sample_plan import render_building_to_dxf
 
 LayoutDiscipline = Literal["combined", "lighting", "power"]
+
+
+def _read_dxf_safe(path: str | Path) -> Drawing:
+    """Read a DXF underlay, falling back to ezdxf.recover for quirky dwg2dxf exports."""
+    try:
+        return read_dxf(str(path))
+    except DXFError:
+        doc, _auditor = ezdxf_recover.readfile(str(path))
+        return doc
 
 ELECTRICAL_LAYERS: dict[str, int] = {
     "E-WETZONE-Z0": 1,     # Red: Section 701 Zone 0/1
@@ -116,7 +126,7 @@ def _build_multifloor_underlay_doc(result: Phase2DesignResult) -> Drawing | None
 
     for idx, ref in enumerate(refs):
         try:
-            src_doc = read_dxf(ref.source_file)
+            src_doc = _read_dxf_safe(ref.source_file)
             for lyr in src_doc.layers:
                 lname = str(lyr.dxf.name)
                 if lname and lname not in target.layers:
@@ -441,7 +451,7 @@ def render_electrical_layout_dxf(
         inv_scale = 1.0
     elif orig_path is not None:
         try:
-            doc = read_dxf(str(orig_path))
+            doc = _read_dxf_safe(orig_path)
             preserved_underlay = True
             unit_scale = result.design.building.source_unit_scale_to_mm
             inv_scale = 1.0 / unit_scale if unit_scale > 0 else 1.0

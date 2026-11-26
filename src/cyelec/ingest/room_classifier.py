@@ -15,7 +15,8 @@ _AUTOCAD_CTRL_RE = re.compile(r"%%[A-Za-z0-9]")
 _AREA_PAREN_RE = re.compile(r"\([^)]*m[²2][^)]*\)", flags=re.IGNORECASE)
 _INLINE_DIM_RE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s*(?:m[²2]|mp|sq\.?\s*ft|sf)\b|"
-    r"\b\d+['′]-?\d*(?:\.\d+)?[\"″]?\s*[x×]\s*\d+['′]-?\d*(?:\.\d+)?[\"″]?",
+    r"\b\d+['′]-?\s*\d*(?:\s+\d+/\d+|\.\d+)?[\"″]?\s*"
+    r"(?:[x×]\s*\d+['′]-?\s*\d*(?:\s+\d+/\d+|\.\d+)?[\"″]?|wide\b)",
     flags=re.IGNORECASE,
 )
 _SEP_SPLIT_RE = re.compile(r"[/|\n]+")

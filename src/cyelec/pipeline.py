@@ -606,6 +606,8 @@ def export_phase1_deliverables(
 def export_phase2_deliverables(
     result: Phase2DesignResult,
     out_dir: Path,
+    *,
+    source_dxf_path: Path | None = None,
 ) -> dict[str, Path]:
     """Write all Phase 1 deliverables plus spatial_layout.json and electrical_layout.dxf."""
     outputs = export_phase1_deliverables(result.design, out_dir)
@@ -616,7 +618,7 @@ def export_phase2_deliverables(
     layout_dxf = out_dir / "electrical_layout.dxf"
 
     spatial_json.write_text(result.spatial.model_dump_json(indent=2), encoding="utf-8")
-    export_electrical_layout_dxf(result, layout_dxf)
+    export_electrical_layout_dxf(result, layout_dxf, source_dxf_path=source_dxf_path)
 
     outputs["spatial_json"] = spatial_json
     outputs["layout_dxf"] = layout_dxf
@@ -629,6 +631,7 @@ def export_phase3_deliverables(
     *,
     run_qet_subprocess: bool = False,
     export_pdf: bool = False,
+    source_dxf_path: Path | None = None,
 ) -> dict[str, Path]:
     """Write complete EAC & Construction LV Pack: E-101/E-102/E-201/E-301 DXF/SVG/PDF + forms."""
     from cyelec.render.details_dxf import export_details_notes
@@ -643,20 +646,48 @@ def export_phase3_deliverables(
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
     from cyelec.render.sld import export_sld_deliverables
 
-    outputs = export_phase2_deliverables(result, out_dir)
+    # If the source was a real .dwg file on disk and no pre-converted DXF path was supplied,
+    # convert it once inside a scoped temp directory so E-100/E-101/E-102 keep the real underlay.
+    dwg_ctx: tempfile.TemporaryDirectory[str] | None = None
+    resolved_dxf = source_dxf_path
+    if resolved_dxf is None:
+        raw_src = result.design.building.source_file
+        if raw_src and "," not in raw_src:
+            src_p = Path(raw_src)
+            if src_p.is_file() and src_p.suffix.lower() == ".dwg":
+                try:
+                    dwg_ctx = tempfile.TemporaryDirectory(prefix="cyelec_dwg_underlay_")
+                    resolved_dxf, _ = convert_dwg_to_dxf(src_p, Path(dwg_ctx.name))
+                except Exception:
+                    if dwg_ctx is not None:
+                        dwg_ctx.cleanup()
+                        dwg_ctx = None
+                    resolved_dxf = None
 
-    eac_form_outputs = export_eac_application_form(result, out_dir, export_pdf=export_pdf)
-    outputs.update(eac_form_outputs)
+    try:
+        outputs = export_phase2_deliverables(result, out_dir, source_dxf_path=resolved_dxf)
 
-    # Discipline-separated DXFs: E-101 Lighting & Switching, E-102 Power & Accessories
-    e101_dxf = export_disc_dxf(
-        result, out_dir / "E101_lighting_layout.dxf", discipline="lighting"
-    )
-    e102_dxf = export_disc_dxf(
-        result, out_dir / "E102_power_layout.dxf", discipline="power"
-    )
-    outputs["e101_lighting_dxf"] = e101_dxf
-    outputs["e102_power_dxf"] = e102_dxf
+        eac_form_outputs = export_eac_application_form(result, out_dir, export_pdf=export_pdf)
+        outputs.update(eac_form_outputs)
+
+        # Discipline-separated DXFs: E-101 Lighting & Switching, E-102 Power & Accessories
+        e101_dxf = export_disc_dxf(
+            result,
+            out_dir / "E101_lighting_layout.dxf",
+            source_dxf_path=resolved_dxf,
+            discipline="lighting",
+        )
+        e102_dxf = export_disc_dxf(
+            result,
+            out_dir / "E102_power_layout.dxf",
+            source_dxf_path=resolved_dxf,
+            discipline="power",
+        )
+        outputs["e101_lighting_dxf"] = e101_dxf
+        outputs["e102_power_dxf"] = e102_dxf
+    finally:
+        if dwg_ctx is not None:
+            dwg_ctx.cleanup()
 
     # Vector SVG Sheets: E-101 Lighting, E-102 Power, and Combined Coordination Overlay
     e101_svg_path = out_dir / "E101_lighting_layout.svg"
