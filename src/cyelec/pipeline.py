@@ -42,7 +42,7 @@ from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circuits
 from cyelec.solver.submain import finalize_submain_cumulative_vd, solve_submain
-from cyelec.spatial.placement import place_electrical_devices
+from cyelec.spatial.placement import build_switch_legs, place_electrical_devices
 from cyelec.spatial.router import route_circuits
 from cyelec.spatial.wet_zones import compute_building_wet_zones
 from cyelec.standards_loader import StandardsBundle, load_standards
@@ -289,6 +289,10 @@ def run_phase1_pipeline(
         eac_compliance=eac_compliance,
         report_language=report_language,
         branding=branding,
+        include_tt_main_rcd_s=(
+            overrides.include_tt_main_rcd_s if overrides is not None else True
+        ),
+        eac_metadata=overrides.eac_metadata if overrides is not None else None,
         review_flags=review_flags,
         has_blockers=has_blockers,
         etek_signoff_required=True,
@@ -550,6 +554,7 @@ def run_phase2_pipeline(
     spatial = SpatialLayoutResult(
         wet_zones=wet_zones,
         devices=bound_devices,
+        switch_legs=build_switch_legs(bound_devices),
         routed_circuits=routed_circuits,
         total_conduit_m=total_conduit_m,
         flags=spatial_flags,
@@ -604,6 +609,9 @@ def export_phase2_deliverables(
 ) -> dict[str, Path]:
     """Write all Phase 1 deliverables plus spatial_layout.json and electrical_layout.dxf."""
     outputs = export_phase1_deliverables(result.design, out_dir)
+    # Refresh Excel Sheet 6 with exact placed luminaires, switches & bathroom accessories
+    export_load_schedule_xlsx(result.design, outputs["xlsx"], spatial=result.spatial)
+
     spatial_json = out_dir / "spatial_layout.json"
     layout_dxf = out_dir / "electrical_layout.dxf"
 
@@ -622,14 +630,16 @@ def export_phase3_deliverables(
     run_qet_subprocess: bool = False,
     export_pdf: bool = False,
 ) -> dict[str, Path]:
-    """Write complete EAC pack: Phase 1/2 outputs + SLD SVG/DXF/QET + cover HTML + manifest."""
+    """Write complete EAC & Construction LV Pack: E-101/E-102/E-201/E-301 DXF/SVG/PDF + forms."""
+    from cyelec.render.details_dxf import export_details_notes
     from cyelec.render.eac_forms import export_eac_application_form
     from cyelec.render.eac_pack import (
         render_eac_submission_pack_html,
         write_deliverables_manifest,
     )
     from cyelec.render.floorplan_svg import render_floorplan_svg
-    from cyelec.render.pdf_export import export_html_to_pdf
+    from cyelec.render.layout_dxf import export_electrical_layout_dxf as export_disc_dxf
+    from cyelec.render.pdf_export import export_html_to_pdf, export_svg_sheet_to_pdf
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
     from cyelec.render.sld import export_sld_deliverables
 
@@ -638,21 +648,51 @@ def export_phase3_deliverables(
     eac_form_outputs = export_eac_application_form(result, out_dir, export_pdf=export_pdf)
     outputs.update(eac_form_outputs)
 
+    # Discipline-separated DXFs: E-101 Lighting & Switching, E-102 Power & Accessories
+    e101_dxf = export_disc_dxf(
+        result, out_dir / "E101_lighting_layout.dxf", discipline="lighting"
+    )
+    e102_dxf = export_disc_dxf(
+        result, out_dir / "E102_power_layout.dxf", discipline="power"
+    )
+    outputs["e101_lighting_dxf"] = e101_dxf
+    outputs["e102_power_dxf"] = e102_dxf
+
+    # Vector SVG Sheets: E-101 Lighting, E-102 Power, and Combined Coordination Overlay
+    e101_svg_path = out_dir / "E101_lighting_layout.svg"
+    e101_svg_path.write_text(render_floorplan_svg(result, discipline="lighting"), encoding="utf-8")
+    outputs["e101_lighting_svg"] = e101_svg_path
+
+    e102_svg_path = out_dir / "E102_power_layout.svg"
+    e102_svg_path.write_text(render_floorplan_svg(result, discipline="power"), encoding="utf-8")
+    outputs["e102_power_svg"] = e102_svg_path
+
     floorplan_svg_path = out_dir / "floorplan_overlay.svg"
-    floorplan_svg_text = render_floorplan_svg(result)
+    floorplan_svg_text = render_floorplan_svg(result, discipline="combined")
     floorplan_svg_path.write_text(floorplan_svg_text, encoding="utf-8")
     outputs["floorplan_svg"] = floorplan_svg_path
 
+    # E-201 Single-Line Diagram (plus backward-compatible single_line_diagram.* copies)
     sld_svg_path = out_dir / "single_line_diagram.svg"
     sld_dxf_path = out_dir / "single_line_diagram.dxf"
+    e201_svg_path = out_dir / "E201_single_line_diagram.svg"
+    e201_dxf_path = out_dir / "E201_single_line_diagram.dxf"
     qet_path = out_dir / "single_line_diagram.qet"
 
     export_sld_deliverables(result.design, sld_svg_path, sld_dxf_path)
+    e201_svg_path.write_bytes(sld_svg_path.read_bytes())
+    e201_dxf_path.write_bytes(sld_dxf_path.read_bytes())
     export_qet_project(result.design, qet_path)
 
     outputs["sld_svg"] = sld_svg_path
     outputs["sld_dxf"] = sld_dxf_path
+    outputs["e201_sld_svg"] = e201_svg_path
+    outputs["e201_sld_dxf"] = e201_dxf_path
     outputs["sld_qet"] = qet_path
+
+    # E-301 Construction Details, Earthing/Meter/Wet-Zone Sections & General Notes
+    details_out = export_details_notes(result, out_dir)
+    outputs.update(details_out)
 
     if run_qet_subprocess:
         qet_status = render_qet_via_subprocess(qet_path, out_dir / "qet_render", fmt="svg")
@@ -678,6 +718,16 @@ def export_phase3_deliverables(
         pack_pdf, _ = export_html_to_pdf(pack_html_path, out_dir / "eac_submission_pack.pdf")
         if pack_pdf is not None:
             outputs["eac_pack_pdf"] = pack_pdf
+        # Printable A3 landscape PDF drawing sheets for site electrician & EAC filing
+        for key, src_svg, out_name in (
+            ("e101_lighting_pdf", e101_svg_path, "E101_lighting_layout.pdf"),
+            ("e102_power_pdf", e102_svg_path, "E102_power_layout.pdf"),
+            ("e201_sld_pdf", e201_svg_path, "E201_single_line_diagram.pdf"),
+            ("e301_details_pdf", details_out["e301_details_svg"], "E301_details_notes.pdf"),
+        ):
+            pdf_p, _ = export_svg_sheet_to_pdf(src_svg, out_dir / out_name)
+            if pdf_p is not None:
+                outputs[key] = pdf_p
 
     manifest_path = out_dir / "manifest.json"
     write_deliverables_manifest(result, outputs, manifest_path)

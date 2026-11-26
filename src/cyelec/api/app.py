@@ -161,7 +161,7 @@ class SolveResponseEnvelope(BaseModel):
 
 
 class SolvePreviewEnvelope(BaseModel):
-    """Preview response returning full design JSON plus inline Floorplan & SLD vector SVGs."""
+    """Preview response returning full design JSON plus E-100/E-101/E-102/E-201/E-301 SVGs."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -169,6 +169,9 @@ class SolvePreviewEnvelope(BaseModel):
     result: Phase2DesignResult
     floorplan_svg: str
     sld_svg: str
+    lighting_svg: str = ""
+    power_svg: str = ""
+    details_svg: str = ""
 
 
 class DxfLayersResponse(BaseModel):
@@ -1171,6 +1174,7 @@ def create_app(
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
         from cyelec.pipeline import run_phase2_pipeline
+        from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.sld import render_sld_svg
         from cyelec.synth.benchmarks import generate_benchmark_dxf
@@ -1189,8 +1193,11 @@ def create_app(
         return SolvePreviewEnvelope(
             tenant_id=tid,
             result=p2,
-            floorplan_svg=render_floorplan_svg(p2),
+            floorplan_svg=render_floorplan_svg(p2, discipline="combined"),
             sld_svg=render_sld_svg(p2.design),
+            lighting_svg=render_floorplan_svg(p2, discipline="lighting"),
+            power_svg=render_floorplan_svg(p2, discipline="power"),
+            details_svg=render_details_notes_svg(p2),
         )
 
     @api.post("/v1/solve/benchmark/{template}/bundle")
@@ -1303,6 +1310,7 @@ def create_app(
         layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
+        from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.sld import render_sld_svg
 
@@ -1315,12 +1323,22 @@ def create_app(
             x_tenant_id=x_tenant_id,
         )
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, envelope.result)
+        lt_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(envelope.result, discipline="lighting")
+        )
+        pw_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(envelope.result, discipline="power")
+        )
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, envelope.result.design)
+        dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, envelope.result)
         return SolvePreviewEnvelope(
             tenant_id=envelope.tenant_id,
             result=envelope.result,
             floorplan_svg=fp_svg,
             sld_svg=sld_svg,
+            lighting_svg=lt_svg,
+            power_svg=pw_svg,
+            details_svg=dt_svg,
         )
 
     @api.post("/v1/solve/dxf/bundle")
@@ -1460,11 +1478,19 @@ def create_app(
                 raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
+        from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.sld import render_sld_svg
 
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, p2)
+        lt_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(p2, discipline="lighting")
+        )
+        pw_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(p2, discipline="power")
+        )
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
+        dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, p2)
         store.record_usage(
             tid, "solve_dxf_multifloor", (time.perf_counter() - t0) * 1000.0, total_bytes
         )
@@ -1473,6 +1499,9 @@ def create_app(
             result=p2,
             floorplan_svg=fp_svg,
             sld_svg=sld_svg,
+            lighting_svg=lt_svg,
+            power_svg=pw_svg,
+            details_svg=dt_svg,
         )
 
     @api.post("/v1/solve/dxf/multifloor/bundle")

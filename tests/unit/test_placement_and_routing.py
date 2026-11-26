@@ -31,7 +31,7 @@ def test_valid_wall_placement_respects_wet_zones_windows_and_ip_ratings() -> Non
 
     assert len(sockets) >= 15
     assert len(luminaires) >= len(building.rooms)
-    assert len(switches) == len(building.rooms)
+    assert len(switches) >= len(building.rooms)
     assert len(acs) == 4  # Living + 3 bedrooms
 
     # No socket may ever fall inside a Section 701 socket exclusion zone or window span

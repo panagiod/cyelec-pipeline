@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import math
 from pathlib import Path
 
 from ezdxf.document import Drawing
@@ -15,6 +16,19 @@ from cyelec.models.electrical import (
     PhaseAssignment,
 )
 from cyelec.render.i18n import format_branding_line, t
+
+
+def _meter_tail_spec(result: ElectricalDesignResult) -> str:
+    """Return Cyprus EAC compliant meter-tail & main earth conductor spec from supply tier."""
+    eac = result.eac_compliance
+    cores = 4 if eac.supply_phases == 3 else 2
+    main_a = eac.recommended_main_breaker_a
+    if eac.ct_metering_required or main_a > 100:
+        return f"{cores}x50mm2 XLPE/SWA + 25mm2 Cu E (CT)"
+    if main_a > 63:
+        return f"{cores}x25mm2 XLPE/PVC + 16mm2 Cu E"
+    return f"{cores}x16mm2 XLPE/PVC + 16mm2 Cu E"
+
 
 SLD_DXF_LAYERS: dict[str, int] = {
     "E-SLD-BUS": 1,     # Red main busbars
@@ -116,14 +130,20 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     ]
 
     # ------------------------------------------------------------------
-    # 1. EAC Supply Incomer -> Meter -> Main Switch-Disconnector -> Busbar
+    # 1. EAC Supply Incomer -> Meter -> Tails -> Isolator -> [100mA Type-S] -> Busbar
     # ------------------------------------------------------------------
-    meter_y = 110
-    iso_y = 205
+    meter_y = 104
+    iso_y = 186
+    rcd_s_y = 258
     poles_label = "4P" if eac.supply_phases == 3 else "2P"
     supply_wire_label = (
         "3P+N+PE 400/230V 50Hz" if eac.supply_phases == 3 else "1P+N+PE 230V 50Hz"
     )
+    tail_spec = _meter_tail_spec(result)
+    show_tt_rcd_s = (
+        result.earthing_system == EarthingSystem.TT and result.include_tt_main_rcd_s
+    )
+    spare_ways = max(2, math.ceil(len(circuits) * 0.2))
     ct_note = " [CT METERING >100A/ph]" if eac.ct_metering_required else ""
     sub_note = (
         " [SUBSTATION CONSULTATION REQ]"
@@ -135,20 +155,20 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         [
             # EAC service feeder line
             (
-                f'  <line x1="{cx_incomer}" y1="74" x2="{cx_incomer}" y2="{meter_y - 24}" '
+                f'  <line x1="{cx_incomer}" y1="72" x2="{cx_incomer}" y2="{meter_y - 22}" '
                 'stroke="#1b365d" stroke-width="3" />'
             ),
             (
-                f'  <text x="{cx_incomer + 12}" y="86" class="lbl">'
+                f'  <text x="{cx_incomer + 12}" y="82" class="lbl">'
                 f"EAC SERVICE CUT-OUT ({_esc(supply_wire_label)})</text>"
             ),
             # kWh Meter box
             (
-                f'  <rect x="{cx_incomer - 72}" y="{meter_y - 24}" width="144" height="48" '
+                f'  <rect x="{cx_incomer - 76}" y="{meter_y - 22}" width="152" height="44" '
                 'rx="4" fill="#ebf8ff" stroke="#1b365d" stroke-width="1.8" />'
             ),
             (
-                f'  <text x="{cx_incomer}" y="{meter_y - 4}" text-anchor="middle" '
+                f'  <text x="{cx_incomer}" y="{meter_y - 3}" text-anchor="middle" '
                 'class="hdr">EAC kWh METER</text>'
             ),
             (
@@ -156,108 +176,203 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 f"{_esc(eac.recommended_supply_tier)}</text>"
             ),
             (
-                f'  <text x="{cx_incomer + 84}" y="{meter_y + 4}" class="xs">'
+                f'  <text x="{cx_incomer + 86}" y="{meter_y + 3}" class="xs">'
                 f"{_esc((ct_note + sub_note).strip())}</text>"
             ),
-            # Meter -> Main Isolator
+            # Meter Tails -> Main Isolator
             (
-                f'  <line x1="{cx_incomer}" y1="{meter_y + 24}" x2="{cx_incomer}" '
-                f'y2="{iso_y - 22}" stroke="#1b365d" stroke-width="3" />'
+                f'  <line x1="{cx_incomer}" y1="{meter_y + 22}" x2="{cx_incomer}" '
+                f'y2="{iso_y - 20}" stroke="#1b365d" stroke-width="3" />'
+            ),
+            (
+                f'  <text x="{cx_incomer + 10}" y="{(meter_y + iso_y) // 2 + 3}" class="xs">'
+                f"METER TAILS: {_esc(tail_spec)}</text>"
             ),
             # Main Switch-Disconnector (IEC 60617 isolator symbol)
             (
-                f'  <rect x="{cx_incomer - 86}" y="{iso_y - 22}" width="172" height="44" '
+                f'  <rect x="{cx_incomer - 86}" y="{iso_y - 20}" width="172" height="40" '
                 'rx="4" fill="#f7fafc" stroke="#1b365d" stroke-width="1.8" />'
             ),
             (
-                f'  <line x1="{cx_incomer - 16}" y1="{iso_y + 12}" '
-                f'x2="{cx_incomer + 12}" y2="{iso_y - 12}" stroke="#1b365d" stroke-width="2.4" />'
+                f'  <line x1="{cx_incomer - 16}" y1="{iso_y + 10}" '
+                f'x2="{cx_incomer + 12}" y2="{iso_y - 10}" stroke="#1b365d" stroke-width="2.4" />'
             ),
             (
-                f'  <text x="{cx_incomer + 96}" y="{iso_y - 3}" class="lbl">'
+                f'  <text x="{cx_incomer + 96}" y="{iso_y - 2}" class="lbl">'
                 f"MAIN ISOLATOR {eac.recommended_main_breaker_a}A {poles_label}</text>"
             ),
             (
                 f'  <text x="{cx_incomer + 96}" y="{iso_y + 12}" class="xs">'
                 f"DB: {_esc(result.building.db_anchor.id)} | "
-                f"Div. Demand: {eac.total_diversified_kva:.2f} kVA</text>"
+                f"Div. Demand: {eac.total_diversified_kva:.2f} kVA | "
+                f"Ipf: {result.prospective_fault_current_ka:.1f} kA</text>"
             ),
-            # Main Isolator -> Busbar
+            # Main Isolator -> Busbar (passing through optional 100mA Type-S RCD)
             (
-                f'  <line x1="{cx_incomer}" y1="{iso_y + 22}" x2="{cx_incomer}" y2="{bus_y}" '
+                f'  <line x1="{cx_incomer}" y1="{iso_y + 20}" x2="{cx_incomer}" y2="{bus_y}" '
                 'stroke="#1b365d" stroke-width="3.2" />'
             ),
         ]
     )
 
-    # Type 2 Surge Protection Device (SPD) branch off incomer
-    spd_x = cx_incomer - 210
-    spd_y = iso_y + 52
+    if show_tt_rcd_s:
+        parts.extend(
+            [
+                (
+                    f'  <rect x="{cx_incomer - 92}" y="{rcd_s_y - 19}" width="184" height="38" '
+                    'rx="4" fill="#fef3c7" stroke="#b45309" stroke-width="1.7" />'
+                ),
+                (
+                    f'  <text x="{cx_incomer}" y="{rcd_s_y - 2}" text-anchor="middle" '
+                    'class="lbl">MAIN RCD 100mA TYPE-S</text>'
+                ),
+                (
+                    f'  <text x="{cx_incomer}" y="{rcd_s_y + 12}" text-anchor="middle" '
+                    f'class="xs">{eac.recommended_main_breaker_a}A {poles_label} '
+                    "TIME-DELAYED (TT)</text>"
+                ),
+            ]
+        )
+    elif result.earthing_system == EarthingSystem.TT:
+        parts.append(
+            f'  <text x="{cx_incomer + 12}" y="{rcd_s_y}" class="xs">'
+            "TT INSULATED TAIL ENTRY — ALL-RCBO NON-COMBUSTIBLE DB</text>"
+        )
+
+    # Type 2 Surge Protection Device (SPD 40kA + 32A back-up MCB) off incomer
+    spd_x = cx_incomer - 235
+    spd_y = iso_y + 62
     parts.extend(
         [
             (
-                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 48}" y2="{spd_y}" '
+                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 68}" y2="{spd_y}" '
                 'stroke="#4a5568" stroke-width="1.6" stroke-dasharray="5,3" />'
             ),
             (
-                f'  <rect x="{spd_x - 48}" y="{spd_y - 18}" width="96" height="36" '
+                f'  <rect x="{spd_x - 68}" y="{spd_y - 22}" width="136" height="44" '
                 'rx="3" fill="#fffaf0" stroke="#c05621" stroke-width="1.5" />'
             ),
             (
-                f'  <text x="{spd_x}" y="{spd_y - 2}" text-anchor="middle" '
-                'class="lbl">SPD TYPE 2</text>'
+                f'  <text x="{spd_x}" y="{spd_y - 5}" text-anchor="middle" '
+                'class="lbl">SPD TYPE 2 (40kA)</text>'
             ),
             (
-                f'  <text x="{spd_x}" y="{spd_y + 11}" text-anchor="middle" '
-                'class="xs">BS 7671 Reg 443</text>'
+                f'  <text x="{spd_x}" y="{spd_y + 8}" text-anchor="middle" '
+                'class="xs">32A MCB Back-Up · Up≤1.5kV</text>'
+            ),
+            (
+                f'  <text x="{spd_x}" y="{spd_y + 19}" text-anchor="middle" '
+                'class="xs">BS 7671 Reg 443.4</text>'
             ),
         ]
     )
 
-    # Earthing Arrangement block (TT Earth Electrode vs TN-S/TN-C-S)
-    earth_x = margin_x + 120
-    earth_y = 170
+    # Complete Earthing & Equipotential Bonding Block (MET + 16mm² MEC + 10mm² Bonding)
+    earth_x = margin_x + 135
+    earth_y = 185
     earth_desc = (
-        f"TT EARTH ROD (Ra={result.ze_or_ra_ohm:.1f} Ω)"
+        f"TT EARTH ROD Ø16×1200mm (Ra≤{result.ze_or_ra_ohm:.0f} Ω)"
         if result.earthing_system == EarthingSystem.TT
         else f"{result.earthing_system.value} EARTH (Ze={result.ze_or_ra_ohm:.2f} Ω)"
     )
     parts.extend(
         [
             (
-                f'  <rect x="{earth_x - 95}" y="{earth_y - 44}" width="190" height="88" '
-                'rx="4" fill="#f0fff4" stroke="#2f855a" stroke-width="1.5" />'
+                f'  <rect x="{earth_x - 112}" y="{earth_y - 58}" width="224" height="118" '
+                'rx="4" fill="#f0fff4" stroke="#2f855a" stroke-width="1.6" />'
             ),
             (
-                f'  <text x="{earth_x}" y="{earth_y - 24}" text-anchor="middle" '
-                'class="hdr">EARTHING TERMINAL (MET)</text>'
+                f'  <text x="{earth_x}" y="{earth_y - 40}" text-anchor="middle" '
+                'class="hdr">EARTHING &amp; BONDING (MET)</text>'
             ),
             (
-                f'  <text x="{earth_x}" y="{earth_y - 8}" text-anchor="middle" class="sm">'
+                f'  <text x="{earth_x}" y="{earth_y - 24}" text-anchor="middle" class="sm">'
                 f"{_esc(earth_desc)}</text>"
+            ),
+            (
+                f'  <text x="{earth_x}" y="{earth_y - 10}" text-anchor="middle" class="xs">'
+                "16mm² Cu Main Earth Conductor (MEC)</text>"
+            ),
+            (
+                f'  <text x="{earth_x}" y="{earth_y + 4}" text-anchor="middle" class="xs">'
+                "10mm² Main Bonding: Water / Gas / Steel</text>"
             ),
             # Classic IEC 60617 earth symbol
             (
-                f'  <line x1="{earth_x}" y1="{earth_y}" x2="{earth_x}" y2="{earth_y + 16}" '
+                f'  <line x1="{earth_x}" y1="{earth_y + 14}" x2="{earth_x}" y2="{earth_y + 30}" '
                 'stroke="#2f855a" stroke-width="2" />'
             ),
             (
-                f'  <line x1="{earth_x - 20}" y1="{earth_y + 16}" '
-                f'x2="{earth_x + 20}" y2="{earth_y + 16}" stroke="#2f855a" stroke-width="2" />'
+                f'  <line x1="{earth_x - 20}" y1="{earth_y + 30}" '
+                f'x2="{earth_x + 20}" y2="{earth_y + 30}" stroke="#2f855a" stroke-width="2" />'
             ),
             (
-                f'  <line x1="{earth_x - 13}" y1="{earth_y + 23}" '
-                f'x2="{earth_x + 13}" y2="{earth_y + 23}" stroke="#2f855a" stroke-width="2" />'
+                f'  <line x1="{earth_x - 13}" y1="{earth_y + 37}" '
+                f'x2="{earth_x + 13}" y2="{earth_y + 37}" stroke="#2f855a" stroke-width="2" />'
             ),
             (
-                f'  <line x1="{earth_x - 6}" y1="{earth_y + 30}" '
-                f'x2="{earth_x + 6}" y2="{earth_y + 30}" stroke="#2f855a" stroke-width="2" />'
+                f'  <line x1="{earth_x - 6}" y1="{earth_y + 44}" '
+                f'x2="{earth_x + 6}" y2="{earth_y + 44}" stroke="#2f855a" stroke-width="2" />'
             ),
         ]
     )
 
+    # Optional PV Net-Metering / Net-Billing AC Branch (right of incomer) when PV > 0
+    if result.building.pv_capacity_kva > 0.0:
+        pv_x = bus_x1 - 150
+        pv_kva = result.building.pv_capacity_kva
+        pv_ph = "3P" if (eac.supply_phases == 3 and pv_kva > 4.2) else "1P"
+        parts.extend(
+            [
+                (
+                    f'  <rect x="{pv_x - 115}" y="90" width="230" height="44" rx="4" '
+                    'fill="#ecfdf5" stroke="#059669" stroke-width="1.6" />'
+                ),
+                (
+                    f'  <text x="{pv_x}" y="108" text-anchor="middle" class="hdr">'
+                    f"PV INVERTER {pv_kva:g} kVA ({pv_ph})</text>"
+                ),
+                (
+                    f'  <text x="{pv_x}" y="123" text-anchor="middle" class="xs">'
+                    "EN 50549-1 Anti-Islanding · EAC Net-Metering</text>"
+                ),
+                (
+                    f'  <line x1="{pv_x}" y1="134" x2="{pv_x}" y2="160" '
+                    'stroke="#059669" stroke-width="2.2" />'
+                ),
+                (
+                    f'  <rect x="{pv_x - 102}" y="160" width="204" height="32" rx="3" '
+                    'fill="#f0fdf4" stroke="#047857" stroke-width="1.4" />'
+                ),
+                (
+                    f'  <text x="{pv_x}" y="179" text-anchor="middle" class="sm">'
+                    "LOCKABLE ROTARY AC ISOLATOR</text>"
+                ),
+                (
+                    f'  <line x1="{pv_x}" y1="192" x2="{pv_x}" y2="216" '
+                    'stroke="#059669" stroke-width="2.2" />'
+                ),
+                (
+                    f'  <rect x="{pv_x - 102}" y="216" width="204" height="34" rx="3" '
+                    'fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.4" />'
+                ),
+                (
+                    f'  <text x="{pv_x}" y="231" text-anchor="middle" class="lbl">'
+                    "EAC PV GENERATION METER</text>"
+                ),
+                (
+                    f'  <text x="{pv_x}" y="244" text-anchor="middle" class="xs">'
+                    "Dedicated Type A/B 30mA RCBO → Busbar</text>"
+                ),
+                (
+                    f'  <line x1="{pv_x}" y1="250" x2="{pv_x}" y2="{bus_y}" '
+                    'stroke="#059669" stroke-width="2.4" />'
+                ),
+            ]
+        )
+
     # ------------------------------------------------------------------
-    # 2. Harmonized BS 7671 Main Busbar (L1 Brown, L2 Black, L3 Grey, N Blue, PE Green)
+    # 2. Harmonized BS 7671 Main Busbar + 20% Spare Ways Badge
     # ------------------------------------------------------------------
     if eac.supply_phases == 3:
         bus_lines = [
@@ -281,6 +396,18 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         parts.append(
             f'  <text x="{bus_x0 - 24}" y="{by + 3}" class="xs" fill="{color}">{blabel}</text>'
         )
+    parts.extend(
+        [
+            (
+                f'  <rect x="{bus_x1 - 168}" y="{bus_y - 38}" width="168" height="20" rx="3" '
+                'fill="#f8fafc" stroke="#64748b" stroke-width="1" stroke-dasharray="4,2" />'
+            ),
+            (
+                f'  <text x="{bus_x1 - 84}" y="{bus_y - 25}" text-anchor="middle" class="xs">'
+                f"+{spare_ways} SPARE WAYS (MIN 20%)</text>"
+            ),
+        ]
+    )
 
     # ------------------------------------------------------------------
     # 2b. Optional Hierarchical Sub-Distribution Boards (MDB -> DB-GF / DB-1F)
@@ -623,47 +750,96 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         dxfattribs={"layer": "E-SLD-BUS"},
     )
 
-    # EAC Meter & Main Isolator above busbar
+    # EAC Meter, Meter Tails, Main Isolator, optional 100mA Type-S RCD, SPD T2 & PV branch
+    tail_spec = _meter_tail_spec(result)
+    show_tt_rcd_s = (
+        result.earthing_system == EarthingSystem.TT and result.include_tt_main_rcd_s
+    )
+    spare_ways = max(2, math.ceil(len(circuits) * 0.2))
+
     msp.add_line(
-        (cx_inc, bus_y + 5300.0), (cx_inc, bus_y + 4000.0), dxfattribs={"layer": "E-SLD-WIRE"}
+        (cx_inc, bus_y + 5300.0), (cx_inc, bus_y + 4250.0), dxfattribs={"layer": "E-SLD-WIRE"}
     )
     msp.add_lwpolyline(
         [
-            (cx_inc - 1400.0, bus_y + 2800.0),
-            (cx_inc + 1400.0, bus_y + 2800.0),
-            (cx_inc + 1400.0, bus_y + 4000.0),
-            (cx_inc - 1400.0, bus_y + 4000.0),
+            (cx_inc - 1600.0, bus_y + 3250.0),
+            (cx_inc + 1600.0, bus_y + 3250.0),
+            (cx_inc + 1600.0, bus_y + 4250.0),
+            (cx_inc - 1600.0, bus_y + 4250.0),
         ],
         close=True,
         dxfattribs={"layer": "E-SLD-DEV"},
     )
     msp.add_text(
         f"EAC METER {eac.recommended_supply_tier}",
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 220.0},
-    ).set_placement((cx_inc - 1250.0, bus_y + 3250.0))
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 210.0},
+    ).set_placement((cx_inc - 1450.0, bus_y + 3650.0))
     msp.add_line(
-        (cx_inc, bus_y + 2800.0), (cx_inc, bus_y + 1800.0), dxfattribs={"layer": "E-SLD-WIRE"}
+        (cx_inc, bus_y + 3250.0), (cx_inc, bus_y + 2450.0), dxfattribs={"layer": "E-SLD-WIRE"}
     )
+    msp.add_text(
+        f"TAILS: {tail_spec}",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 175.0},
+    ).set_placement((cx_inc + 220.0, bus_y + 2780.0))
 
     # Main Isolator box
     msp.add_lwpolyline(
         [
-            (cx_inc - 1400.0, bus_y + 800.0),
-            (cx_inc + 1400.0, bus_y + 800.0),
-            (cx_inc + 1400.0, bus_y + 1800.0),
-            (cx_inc - 1400.0, bus_y + 1800.0),
+            (cx_inc - 1600.0, bus_y + 1550.0),
+            (cx_inc + 1600.0, bus_y + 1550.0),
+            (cx_inc + 1600.0, bus_y + 2450.0),
+            (cx_inc - 1600.0, bus_y + 2450.0),
         ],
         close=True,
         dxfattribs={"layer": "E-SLD-DEV"},
     )
     msp.add_text(
         f"MAIN ISOLATOR {eac.recommended_main_breaker_a}A",
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 220.0},
-    ).set_placement((cx_inc - 1250.0, bus_y + 1180.0))
-    msp.add_line((cx_inc, bus_y + 800.0), (cx_inc, bus_y), dxfattribs={"layer": "E-SLD-WIRE"})
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 210.0},
+    ).set_placement((cx_inc - 1450.0, bus_y + 1900.0))
+    msp.add_line((cx_inc, bus_y + 1550.0), (cx_inc, bus_y), dxfattribs={"layer": "E-SLD-WIRE"})
 
-    # Earth symbol on left
-    ex, ey = margin + 1200.0, bus_y + 2300.0
+    # Optional 100mA Type-S Time-Delayed Main RCD on TT installations
+    if show_tt_rcd_s:
+        msp.add_lwpolyline(
+            [
+                (cx_inc - 1800.0, bus_y + 380.0),
+                (cx_inc + 1800.0, bus_y + 380.0),
+                (cx_inc + 1800.0, bus_y + 1200.0),
+                (cx_inc - 1800.0, bus_y + 1200.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "E-SLD-DEV"},
+        )
+        msp.add_text(
+            f"MAIN RCD 100mA TYPE-S ({eac.recommended_main_breaker_a}A)",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 190.0},
+        ).set_placement((cx_inc - 1650.0, bus_y + 700.0))
+
+    # Type 2 SPD (40kA + 32A back-up MCB) branched off main incomer
+    spd_x, spd_y = cx_inc - 4200.0, bus_y + 900.0
+    msp.add_line((cx_inc, spd_y), (spd_x + 1500.0, spd_y), dxfattribs={"layer": "E-SLD-WIRE"})
+    msp.add_lwpolyline(
+        [
+            (spd_x - 1500.0, spd_y - 480.0),
+            (spd_x + 1500.0, spd_y - 480.0),
+            (spd_x + 1500.0, spd_y + 480.0),
+            (spd_x - 1500.0, spd_y + 480.0),
+        ],
+        close=True,
+        dxfattribs={"layer": "E-SLD-DEV"},
+    )
+    msp.add_text(
+        "SPD TYPE 2 (40kA) + 32A MCB",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 175.0},
+    ).set_placement((spd_x - 1380.0, spd_y + 60.0))
+    msp.add_text(
+        "BS 7671 REG 443.4 (Up<=1.5kV)",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 150.0},
+    ).set_placement((spd_x - 1380.0, spd_y - 260.0))
+
+    # Complete Earthing & Equipotential Bonding Block on left
+    ex, ey = margin + 1600.0, bus_y + 2300.0
     msp.add_line((ex, ey + 600.0), (ex, ey), dxfattribs={"layer": "E-SLD-EARTH"})
     msp.add_line((ex - 450.0, ey), (ex + 450.0, ey), dxfattribs={"layer": "E-SLD-EARTH"})
     msp.add_line(
@@ -675,7 +851,54 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     msp.add_text(
         f"{result.earthing_system.value} MET ({result.ze_or_ra_ohm:.1f} OHM)",
         dxfattribs={"layer": "E-SLD-EARTH", "height": 200.0},
-    ).set_placement((ex - 900.0, ey + 750.0))
+    ).set_placement((ex - 1200.0, ey + 900.0))
+    msp.add_text(
+        "16mm2 Cu MEC + 10mm2 WATER/GAS BOND",
+        dxfattribs={"layer": "E-SLD-EARTH", "height": 165.0},
+    ).set_placement((ex - 1200.0, ey + 600.0))
+
+    # Optional PV Net-Metering AC Branch on right of incomer
+    if result.building.pv_capacity_kva > 0.0:
+        pv_x = bus_x1 - 2400.0
+        pv_kva = result.building.pv_capacity_kva
+        msp.add_lwpolyline(
+            [
+                (pv_x - 1700.0, bus_y + 3200.0),
+                (pv_x + 1700.0, bus_y + 3200.0),
+                (pv_x + 1700.0, bus_y + 4200.0),
+                (pv_x - 1700.0, bus_y + 4200.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "E-SLD-EARTH"},
+        )
+        msp.add_text(
+            f"PV INVERTER {pv_kva:g} kVA (EN 50549-1)",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 175.0},
+        ).set_placement((pv_x - 1550.0, bus_y + 3600.0))
+        msp.add_line(
+            (pv_x, bus_y + 3200.0), (pv_x, bus_y + 2200.0), dxfattribs={"layer": "E-SLD-EARTH"}
+        )
+        msp.add_lwpolyline(
+            [
+                (pv_x - 1700.0, bus_y + 1300.0),
+                (pv_x + 1700.0, bus_y + 1300.0),
+                (pv_x + 1700.0, bus_y + 2200.0),
+                (pv_x - 1700.0, bus_y + 2200.0),
+            ],
+            close=True,
+            dxfattribs={"layer": "E-SLD-DEV"},
+        )
+        msp.add_text(
+            "AC ISOLATOR + PV GEN METER",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
+        ).set_placement((pv_x - 1550.0, bus_y + 1680.0))
+        msp.add_line((pv_x, bus_y + 1300.0), (pv_x, bus_y), dxfattribs={"layer": "E-SLD-EARTH"})
+
+    # 20% Spare Ways annotation at right end of main busbar
+    msp.add_text(
+        f"+{spare_ways} SPARE WAYS (20%)",
+        dxfattribs={"layer": "E-SLD-TEXT", "height": 185.0},
+    ).set_placement((bus_x1 - 2900.0, bus_y + 260.0))
 
     step_x = (bus_x1 - bus_x0) / max(1, n)
     tap_bus_y = bus_y

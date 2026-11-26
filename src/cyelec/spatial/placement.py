@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import unary_union
+from shapely.ops import nearest_points, unary_union
 
 from cyelec.models.building import (
     BuildingModel,
@@ -18,7 +18,7 @@ from cyelec.models.building import (
     WindowOpening,
 )
 from cyelec.models.electrical import ReviewFlag, ReviewSeverity
-from cyelec.models.spatial import DeviceType, PlacedDevice, RoomWetZones
+from cyelec.models.spatial import DeviceType, PlacedDevice, RoomWetZones, SwitchLeg
 from cyelec.solver.grouper import is_commercial_building
 from cyelec.spatial.wet_zones import classify_point_wet_zone
 from cyelec.standards_loader import StandardsBundle
@@ -27,6 +27,30 @@ CORNER_CLEARANCE_MM = 220.0
 DOOR_CLEARANCE_MM = 220.0
 WINDOW_CLEARANCE_MM = 150.0
 MIN_SOCKET_SPACING_MM = 600.0
+
+# BS EN 12464 / CIBSE target illuminance (lux) & typical Cyprus LED fixture power (W)
+_ROOM_LIGHTING_SPECS: dict[RoomType, tuple[int, float]] = {
+    RoomType.LIVING_ROOM: (150, 18.0),
+    RoomType.KITCHEN: (300, 18.0),
+    RoomType.KITCHEN_LIVING: (200, 18.0),
+    RoomType.MASTER_BEDROOM: (150, 15.0),
+    RoomType.BEDROOM: (150, 15.0),
+    RoomType.BATHROOM: (200, 12.0),
+    RoomType.ENSUITE: (200, 12.0),
+    RoomType.WC: (200, 12.0),
+    RoomType.CORRIDOR: (100, 12.0),
+    RoomType.UTILITY: (200, 15.0),
+    RoomType.VERANDA: (100, 15.0),
+    RoomType.STORAGE: (100, 12.0),
+    RoomType.OPEN_OFFICE: (500, 36.0),
+    RoomType.MEETING_ROOM: (500, 36.0),
+    RoomType.SERVER_ROOM: (300, 24.0),
+    RoomType.RETAIL_FLOOR: (300, 36.0),
+    RoomType.WAREHOUSE: (200, 36.0),
+    RoomType.PLANT_ROOM: (200, 24.0),
+    RoomType.STAIRWELL: (150, 12.0),
+    RoomType.LIFT_SHAFT: (100, 12.0),
+}
 
 
 @dataclass(frozen=True)
@@ -270,15 +294,29 @@ def place_electrical_devices(
     flags: list[ReviewFlag] = []
     counters: dict[str, int] = {
         "L": 0,
+        "ML": 0,
+        "EF": 0,
         "SW": 0,
+        "FI": 0,
         "S": 0,
         "AC": 0,
         "APP": 0,
+        "CCU": 0,
+        "WHDP": 0,
+        "MTR": 0,
+        "EP": 0,
     }
 
     def _next_dev(prefix: str) -> str:
         counters[prefix] += 1
         return f"DEV-{prefix}{counters[prefix]}"
+
+    def _offset_along_wall(pt: Point2D, angle_deg: float, delta_mm: float) -> Point2D:
+        rad = math.radians(angle_deg)
+        return Point2D(
+            x_mm=round(pt.x_mm + delta_mm * math.cos(rad), 1),
+            y_mm=round(pt.y_mm + delta_mm * math.sin(rad), 1),
+        )
 
     emitted_appliance_keys: set[str] = set()
 
@@ -286,6 +324,8 @@ def place_electrical_devices(
         rt = tmpl_std.rooms[room.normalized_type]
         room_wz = wz_by_room.get(room.id)
         rpoly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
+        target_lux, lum_w = _ROOM_LIGHTING_SPECS.get(room.normalized_type, (150, 15.0))
+
         # Match both doors owned by this room AND outward-swinging doors touching its perimeter
         room_doors = [
             d
@@ -305,8 +345,24 @@ def place_electrical_devices(
             exclude_wet_zones=True,
         )
 
-        # 1. Ceiling Luminaires
+        # 1. Ceiling Luminaires (+ room lux/wattage & multi-zone switch grouping)
         lum_pts = _place_ceiling_luminaires(room, max(1, rt.min_lighting_points))
+        is_large_split = (
+            room.area_m2 >= 22.0
+            and len(lum_pts) >= 2
+            and room.normalized_type
+            in (
+                RoomType.LIVING_ROOM,
+                RoomType.KITCHEN_LIVING,
+                RoomType.OPEN_OFFICE,
+                RoomType.RETAIL_FLOOR,
+            )
+        )
+        room_lum_ids: list[str] = []
+        room_lum_group_a: list[str] = []
+        room_lum_group_b: list[str] = []
+        split_idx = max(1, len(lum_pts) // 2)
+
         for idx, lpt in enumerate(lum_pts, start=1):
             zone = classify_point_wet_zone(lpt, room_wz)
             if room.is_outdoor:
@@ -316,32 +372,218 @@ def place_electrical_devices(
             else:
                 ip = "IP20"
 
+            grp = "b" if (is_large_split and idx > split_idx) else "a"
+            lid = _next_dev("L")
+            room_lum_ids.append(lid)
+            if grp == "b":
+                room_lum_group_b.append(lid)
+            else:
+                room_lum_group_a.append(lid)
+
             devices.append(
                 PlacedDevice(
-                    device_id=_next_dev("L"),
+                    device_id=lid,
                     room_id=room.id,
                     device_type=DeviceType.LUMINAIRE,
                     label=f"Luminaire {idx} ({room.raw_label})",
                     location_mm=lpt,
                     mounting_height_mm=room.ceiling_height_mm,
                     ip_rating=ip,
+                    switch_group=grp,
+                    luminaire_wattage_w=lum_w,
+                    target_lux=target_lux,
                 )
             )
 
-        # 2. Room Light Switch
+        # 1b. Wet-room Cyprus accessories: IP44 Vanity Mirror Light + Exhaust Fan + 3P Fan Isolator
+        mirror_id: str | None = None
+        fan_id: str | None = None
+        if room.is_wet_room:
+            # Mirror light near washbasin if present, else room boundary midpoint outside Zone 1
+            basins = [f for f in room.fixtures if str(f.fixture_type) == "basin"]
+            if basins:
+                bpt = Polygon([(p.x_mm, p.y_mm) for p in basins[0].polygon_mm]).centroid
+                wall_pt = nearest_points(rpoly.exterior, bpt)[0]
+                ml_loc = Point2D(x_mm=round(float(wall_pt.x), 1), y_mm=round(float(wall_pt.y), 1))
+            else:
+                wp = rpoly.exterior.interpolate(0.25, normalized=True)
+                ml_loc = Point2D(x_mm=round(float(wp.x), 1), y_mm=round(float(wp.y), 1))
+            mirror_id = _next_dev("ML")
+            devices.append(
+                PlacedDevice(
+                    device_id=mirror_id,
+                    room_id=room.id,
+                    device_type=DeviceType.MIRROR_LIGHT,
+                    label=f"IP44 Vanity Mirror Light ({room.raw_label})",
+                    location_mm=ml_loc,
+                    mounting_height_mm=2000.0,
+                    ip_rating="IP44",
+                    switch_group="b",
+                    luminaire_wattage_w=10.0,
+                    target_lux=200,
+                )
+            )
+
+            # Exhaust fan inside wet room near exterior wall (or upper corner)
+            minx, miny, maxx, maxy = rpoly.bounds
+            fan_cand = Point(minx + 0.80 * (maxx - minx), miny + 0.80 * (maxy - miny))
+            if not rpoly.contains(fan_cand):
+                fan_cand = rpoly.representative_point()
+            fan_id = _next_dev("EF")
+            devices.append(
+                PlacedDevice(
+                    device_id=fan_id,
+                    room_id=room.id,
+                    device_type=DeviceType.EXHAUST_FAN,
+                    label=f"Bathroom Exhaust Fan ({room.raw_label})",
+                    location_mm=Point2D(
+                        x_mm=round(float(fan_cand.x), 1), y_mm=round(float(fan_cand.y), 1)
+                    ),
+                    mounting_height_mm=2400.0,
+                    ip_rating="IP44",
+                    switch_group="a",
+                    luminaire_wattage_w=20.0,
+                )
+            )
+
+        # 2. Room Light Switch(es) with deterministic 1G1W / 2G1W / 1G2W (2-way) control mapping
         sw_pt, sw_ang = _place_room_switch(room, room_doors, valid_walls, room_wz)
-        devices.append(
-            PlacedDevice(
-                device_id=_next_dev("SW"),
-                room_id=room.id,
-                device_type=DeviceType.SWITCH,
-                label=f"Light Switch ({room.raw_label})",
-                location_mm=sw_pt,
-                mounting_height_mm=1200.0,
-                wall_angle_deg=sw_ang,
-                ip_rating="IP65" if room.is_outdoor else "IP20",
+        sw_ip = "IP65" if room.is_outdoor else "IP20"
+
+        is_master_bed = room.normalized_type == RoomType.MASTER_BEDROOM or (
+            room.normalized_type == RoomType.BEDROOM
+            and any(
+                tok in room.raw_label.lower() for tok in ("master", "κυριο", "κύριο", "main")
             )
         )
+        rminx, rminy, rmaxx, rmaxy = rpoly.bounds
+        room_span_mm = max(rmaxx - rminx, rmaxy - rminy)
+        is_two_way_circulation = room.normalized_type in (
+            RoomType.CORRIDOR,
+            RoomType.STAIRWELL,
+        ) and (room_span_mm >= 3500.0 or len(room_doors) >= 2)
+
+        if room.is_wet_room:
+            ctrl_ids = room_lum_group_a + ([fan_id] if fan_id else []) + (
+                [mirror_id] if mirror_id else []
+            )
+            devices.append(
+                PlacedDevice(
+                    device_id=_next_dev("SW"),
+                    room_id=room.id,
+                    device_type=DeviceType.SWITCH,
+                    label=f"2G1W Light/Mirror Switch ({room.raw_label})",
+                    location_mm=sw_pt,
+                    mounting_height_mm=1200.0,
+                    wall_angle_deg=sw_ang,
+                    ip_rating=sw_ip,
+                    switch_group="a,b",
+                    switch_type="2G1W",
+                    controlled_device_ids=ctrl_ids,
+                )
+            )
+            # 3-Pole Fan Isolator outside wet room beside switch at H=+2200mm
+            if fan_id is not None:
+                fi_cand = _offset_along_wall(sw_pt, sw_ang, 220.0)
+                if rpoly.contains(Point(fi_cand.x_mm, fi_cand.y_mm)):
+                    fi_cand = _offset_along_wall(sw_pt, sw_ang, -220.0)
+                devices.append(
+                    PlacedDevice(
+                        device_id=_next_dev("FI"),
+                        room_id=room.id,
+                        device_type=DeviceType.FAN_ISOLATOR_3P,
+                        label=f"3-Pole Fan Isolator ({room.raw_label})",
+                        location_mm=fi_cand,
+                        mounting_height_mm=2200.0,
+                        wall_angle_deg=sw_ang,
+                        ip_rating="IP20",
+                        switch_group="a",
+                        switch_type="3P-ISOL",
+                        controlled_device_ids=[fan_id],
+                    )
+                )
+        elif is_large_split:
+            devices.append(
+                PlacedDevice(
+                    device_id=_next_dev("SW"),
+                    room_id=room.id,
+                    device_type=DeviceType.SWITCH,
+                    label=f"2G1W Zone Switch ({room.raw_label})",
+                    location_mm=sw_pt,
+                    mounting_height_mm=1200.0,
+                    wall_angle_deg=sw_ang,
+                    ip_rating=sw_ip,
+                    switch_group="a,b",
+                    switch_type="2G1W",
+                    controlled_device_ids=room_lum_ids,
+                )
+            )
+        elif is_two_way_circulation or is_master_bed:
+            # Primary 2-way switch at room entry door
+            devices.append(
+                PlacedDevice(
+                    device_id=_next_dev("SW"),
+                    room_id=room.id,
+                    device_type=DeviceType.SWITCH,
+                    label=f"1G2W Entry Switch ({room.raw_label})",
+                    location_mm=sw_pt,
+                    mounting_height_mm=1200.0,
+                    wall_angle_deg=sw_ang,
+                    ip_rating=sw_ip,
+                    switch_group="a",
+                    switch_type="1G2W",
+                    controlled_device_ids=room_lum_ids,
+                )
+            )
+            # Secondary 2-way switch at far end of corridor/stairs OR bedside wall in master bed
+            if valid_walls:
+                far_cand = max(
+                    valid_walls,
+                    key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
+                        c.line.interpolate(0.5, normalized=True)
+                    ),
+                )
+                far_pt = far_cand.line.interpolate(0.5, normalized=True)
+                sw2_loc = Point2D(x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1))
+                sw2_ang = far_cand.angle_deg
+            else:
+                sw2_loc = _offset_along_wall(sw_pt, sw_ang, 1200.0)
+                sw2_ang = sw_ang
+            devices.append(
+                PlacedDevice(
+                    device_id=_next_dev("SW"),
+                    room_id=room.id,
+                    device_type=DeviceType.SWITCH,
+                    label=(
+                        f"1G2W Bedside Switch ({room.raw_label})"
+                        if is_master_bed
+                        else f"1G2W Far-End Switch ({room.raw_label})"
+                    ),
+                    location_mm=sw2_loc,
+                    mounting_height_mm=750.0 if is_master_bed else 1200.0,
+                    wall_angle_deg=sw2_ang,
+                    ip_rating=sw_ip,
+                    switch_group="a",
+                    switch_type="1G2W",
+                    controlled_device_ids=room_lum_ids,
+                )
+            )
+        else:
+            devices.append(
+                PlacedDevice(
+                    device_id=_next_dev("SW"),
+                    room_id=room.id,
+                    device_type=DeviceType.SWITCH,
+                    label=f"1G1W Light Switch ({room.raw_label})",
+                    location_mm=sw_pt,
+                    mounting_height_mm=1200.0,
+                    wall_angle_deg=sw_ang,
+                    ip_rating=sw_ip,
+                    switch_group="a",
+                    switch_type="1G1W",
+                    controlled_device_ids=room_lum_ids,
+                )
+            )
 
         # 3. Twin 13A Socket Outlets (never placed in wet-zone socket exclusion!)
         if rt.socket_count_default > 0 and rt.socket_group != "none":
@@ -392,7 +634,7 @@ def place_electrical_devices(
                     device_id=_next_dev("AC"),
                     room_id=room.id,
                     device_type=DeviceType.SPLIT_AC,
-                    label=f"Split A/C Isolator ({room.raw_label})",
+                    label=f"20A DP Split A/C Isolator ({room.raw_label})",
                     location_mm=ac_loc,
                     mounting_height_mm=2200.0,
                     wall_angle_deg=ac_ang,
@@ -400,7 +642,7 @@ def place_electrical_devices(
                 )
             )
 
-        # 5. Dedicated Appliance Outlets (Cooker, Oven, Dishwasher, Washer, Solar WH, Plant/UPS)
+        # 5. Dedicated Appliance Outlets + Cyprus Control Switches (45A CCU, 20A DP WH)
         is_comm = is_commercial_building(building)
         room_apps = [
             a
@@ -425,14 +667,17 @@ def place_electrical_devices(
 
                 if app.category.value == "cooker":
                     dtype = DeviceType.COOKER_OUTLET
+                    app_height = 450.0
                 elif app.category.value == "oven":
                     dtype = DeviceType.OVEN_OUTLET
+                    app_height = 450.0
                 elif app.category.value == "water_heater":
                     dtype = DeviceType.WATER_HEATER_ISOLATOR
+                    app_height = 1600.0
                 else:
                     dtype = DeviceType.APPLIANCE_OUTLET
+                    app_height = 450.0
 
-                app_height = 1200.0 if app.category.value == "water_heater" else 450.0
                 devices.append(
                     PlacedDevice(
                         device_id=_next_dev("APP"),
@@ -447,4 +692,115 @@ def place_electrical_devices(
                     )
                 )
 
+                # Pair Cyprus 45A DP Cooker Control Unit (H=+1150mm) beside cooker outlet
+                if dtype == DeviceType.COOKER_OUTLET:
+                    ccu_loc = _offset_along_wall(loc, ang, 260.0)
+                    devices.append(
+                        PlacedDevice(
+                            device_id=_next_dev("CCU"),
+                            room_id=room.id,
+                            device_type=DeviceType.COOKER_CONTROL_UNIT,
+                            label=f"45A DP Cooker Control Unit ({room.raw_label})",
+                            location_mm=ccu_loc,
+                            mounting_height_mm=1150.0,
+                            wall_angle_deg=ang,
+                            ip_rating="IP20",
+                            appliance_key=app.key,
+                        )
+                    )
+                # Pair Cyprus 20A DP Switch + Neon (H=+1200mm) beside solar/immersion WH outlet
+                elif dtype == DeviceType.WATER_HEATER_ISOLATOR:
+                    dp_loc = _offset_along_wall(loc, ang, 260.0)
+                    devices.append(
+                        PlacedDevice(
+                            device_id=_next_dev("WHDP"),
+                            room_id=room.id,
+                            device_type=DeviceType.WATER_HEATER_DP_SWITCH,
+                            label=f"20A DP Water Heater Switch + Neon ({room.raw_label})",
+                            location_mm=dp_loc,
+                            mounting_height_mm=1200.0,
+                            wall_angle_deg=ang,
+                            ip_rating="IP20",
+                            appliance_key=app.key,
+                        )
+                    )
+
+    # 6. EAC Meter Cabinet & TT Earth Inspection Pit Site Markers on exterior wall nearest DB
+    if building.rooms:
+        db_pt = Point(building.db_anchor.location_mm.x_mm, building.db_anchor.location_mm.y_mm)
+        ext_pt = nearest_points(outer_ring, db_pt)[0]
+        bldg_centroid = unary_union(all_room_polys).centroid
+        out_dx = float(ext_pt.x) - float(bldg_centroid.x)
+        out_dy = float(ext_pt.y) - float(bldg_centroid.y)
+        out_norm = max(math.hypot(out_dx, out_dy), 1.0)
+        ux, uy = out_dx / out_norm, out_dy / out_norm
+        mtr_loc = Point2D(
+            x_mm=round(float(ext_pt.x) + ux * 180.0, 1),
+            y_mm=round(float(ext_pt.y) + uy * 180.0, 1),
+        )
+        pit_loc = Point2D(
+            x_mm=round(float(ext_pt.x) + ux * 700.0 - uy * 350.0, 1),
+            y_mm=round(float(ext_pt.y) + uy * 700.0 + ux * 350.0, 1),
+        )
+        ref_room_id = building.rooms[0].id
+        devices.append(
+            PlacedDevice(
+                device_id=_next_dev("MTR"),
+                room_id=ref_room_id,
+                device_type=DeviceType.EAC_METER_CABINET,
+                label="EAC Meter Cabinet (Verify Boundary on Site Plan)",
+                location_mm=mtr_loc,
+                mounting_height_mm=1500.0,
+                ip_rating="IP65",
+            )
+        )
+        devices.append(
+            PlacedDevice(
+                device_id=_next_dev("EP"),
+                room_id=ref_room_id,
+                device_type=DeviceType.EARTH_PIT,
+                label="TT Earth Pit (Cu Rod Ø16x1200mm)",
+                location_mm=pit_loc,
+                mounting_height_mm=0.0,
+                ip_rating="IP68",
+            )
+        )
+        flags.append(
+            ReviewFlag(
+                code="EAC_METER_AND_EARTH_PIT_SITE_VERIFY",
+                severity=ReviewSeverity.INFO,
+                category="eac",
+                regulation_ref="Cyprus EAC Metering & TT Earthing Requirements",
+                message=(
+                    "EAC Meter Cabinet and TT Earth Inspection Pit markers are placed adjacent to "
+                    "the nearest exterior wall; confirm exact plot-boundary coordinates on the "
+                    "official Land Registry cadastral site plan."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+
     return devices, flags
+
+
+def build_switch_legs(devices: list[PlacedDevice]) -> list[SwitchLeg]:
+    """Build deterministic SwitchLeg control links from circuit-bound switches & fan isolators."""
+    legs: list[SwitchLeg] = []
+    for dev in devices:
+        if dev.device_type not in (DeviceType.SWITCH, DeviceType.FAN_ISOLATOR_3P):
+            continue
+        if not dev.controlled_device_ids:
+            continue
+        st = dev.switch_type or "1G1W"
+        legs.append(
+            SwitchLeg(
+                switch_id=dev.device_id,
+                room_id=dev.room_id,
+                group_label=dev.switch_group or "a",
+                switch_type=st,
+                is_two_way="2W" in st,
+                target_device_ids=list(dev.controlled_device_ids),
+                circuit_id=dev.circuit_id,
+            )
+        )
+    return legs

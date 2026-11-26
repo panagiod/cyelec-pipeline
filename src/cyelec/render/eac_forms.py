@@ -58,19 +58,60 @@ def build_eac_application_rows(result: Phase2DesignResult) -> list[tuple[str, st
             "A. Premises / Υποστατικό",
             "District / Municipality / Village",
             "Επαρχία / Δήμος / Κοινότητα",
-            "[Nicosia / Limassol / Larnaca / Paphos — Complete before filing]",
+            (
+                " / ".join(
+                    p
+                    for p in (
+                        d.eac_metadata.district.strip(),
+                        d.eac_metadata.municipality.strip(),
+                    )
+                    if p
+                )
+                if d.eac_metadata
+                and (d.eac_metadata.district.strip() or d.eac_metadata.municipality.strip())
+                else "[Nicosia / Limassol / Larnaca / Paphos — Complete before filing]"
+            ),
         ),
         (
             "A. Premises / Υποστατικό",
             "Cadastral Sheet / Plan / Plot No.",
             "Φύλλο / Σχέδιο / Αρ. Τεμαχίου",
-            "[Sheet ___ / Plan ___ / Plot ___ — Attach Title Deed & Site Plan]",
+            (
+                f"Sheet/Plan: {d.eac_metadata.sheet_plan.strip() or '___'} | "
+                f"Plot: {d.eac_metadata.plot_no.strip() or '___'}"
+                + (
+                    f" | Permit: {d.eac_metadata.building_permit_no.strip()}"
+                    if d.eac_metadata.building_permit_no.strip()
+                    else ""
+                )
+                if d.eac_metadata
+                and (
+                    d.eac_metadata.sheet_plan.strip()
+                    or d.eac_metadata.plot_no.strip()
+                    or d.eac_metadata.building_permit_no.strip()
+                )
+                else "[Sheet ___ / Plan ___ / Plot ___ — Attach Title Deed & Site Plan]"
+            ),
         ),
         (
             "A. Premises / Υποστατικό",
-            "Suggested EAC Tariff Code",
-            "Προτεινόμενη Διατίμηση ΑΗΚ",
-            _suggested_eac_tariff(b.building_type),
+            "Property Owner / Applicant",
+            "Ιδιοκτήτης / Αιτητής",
+            (
+                d.eac_metadata.owner_name.strip()
+                if d.eac_metadata and d.eac_metadata.owner_name.strip()
+                else "[Owner Full Name & ID / Company Reg. No.]"
+            ),
+        ),
+        (
+            "A. Premises / Υποστατικό",
+            "EAC Tariff Code",
+            "Διατίμηση ΑΗΚ",
+            (
+                d.eac_metadata.eac_tariff.strip()
+                if d.eac_metadata and d.eac_metadata.eac_tariff.strip()
+                else _suggested_eac_tariff(b.building_type)
+            ),
         ),
         (
             "B. ETEK Designer & Contractor / Ε-ΔΔ-516",
@@ -94,7 +135,22 @@ def build_eac_application_rows(result: Phase2DesignResult) -> list[tuple[str, st
             "B. ETEK Designer & Contractor / Ε-ΔΔ-516",
             "Licensed Installer (Class A/B/C)",
             "Αδειούχος Εγκαταστάτης (Ε-ΔΔ-514)",
-            "[Contractor Name & HMY Licence No. — Complete at inspection]",
+            (
+                " — ".join(
+                    p
+                    for p in (
+                        d.eac_metadata.contractor_name.strip(),
+                        d.eac_metadata.contractor_hmy_reg.strip(),
+                    )
+                    if p
+                )
+                if d.eac_metadata
+                and (
+                    d.eac_metadata.contractor_name.strip()
+                    or d.eac_metadata.contractor_hmy_reg.strip()
+                )
+                else "[Contractor Name & HMY Licence No. — Complete at inspection]"
+            ),
         ),
         (
             "B. ETEK Designer & Contractor / Ε-ΔΔ-516",

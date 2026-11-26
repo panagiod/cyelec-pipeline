@@ -348,6 +348,15 @@ def generate_boq(
     type_s_2p = sum(
         1 for sm in design.sub_mains if sm.rcd_selective_type_s and not sm.is_three_phase
     )
+    if (
+        design.earthing_system == EarthingSystem.TT
+        and design.include_tt_main_rcd_s
+        and not design.sub_mains
+    ):
+        if is_3p_supply:
+            type_s_4p += 1
+        else:
+            type_s_2p += 1
     _add(
         "Switchgear",
         "Time-Delayed Selective RCD 4P 100 mA Type S (BS 7671 Reg 536.4.1.4)",
@@ -372,9 +381,13 @@ def generate_boq(
     if spatial is not None and spatial.devices:
         dev_counts = Counter(d.device_type for d in spatial.devices)
         n_lum = dev_counts[DeviceType.LUMINAIRE]
+        n_mirror = dev_counts[DeviceType.MIRROR_LIGHT]
+        n_fan = dev_counts[DeviceType.EXHAUST_FAN]
         n_sw = dev_counts[DeviceType.SWITCH]
         n_sock = dev_counts[DeviceType.SOCKET_TWIN]
         n_ac = dev_counts[DeviceType.SPLIT_AC]
+        n_ccu = dev_counts[DeviceType.COOKER_CONTROL_UNIT]
+        n_wh_dp = dev_counts[DeviceType.WATER_HEATER_DP_SWITCH]
         n_appl = (
             dev_counts[DeviceType.COOKER_OUTLET]
             + dev_counts[DeviceType.OVEN_OUTLET]
@@ -383,12 +396,17 @@ def generate_boq(
         )
     else:
         n_lum = max(2, len(design.building.rooms) * 2)
+        n_wet = sum(1 for r in design.building.rooms if r.is_wet_room)
+        n_mirror = n_wet
+        n_fan = n_wet
         n_sw = len(design.building.rooms)
         n_sock = sum(
             standards.room_templates.rooms[r.normalized_type].socket_count_default
             for r in design.building.rooms
         )
         n_ac = sum(1 for c in design.circuits if c.spec.category == CircuitCategory.SPLIT_AC)
+        n_ccu = sum(1 for c in design.circuits if c.spec.category == CircuitCategory.COOKER)
+        n_wh_dp = sum(1 for c in design.circuits if c.spec.category == CircuitCategory.WATER_HEATER)
         n_appl = sum(
             1
             for c in design.circuits
@@ -411,8 +429,24 @@ def generate_boq(
     )
     _add(
         "Accessories",
-        "10 A Lighting Switch (flush-mounted BS EN 60669)",
-        "Διακόπτης Φωτισμού 10 A (εντοιχισμένος)",
+        "IP44 Bathroom Vanity Mirror Light Point (Zone 2 compliant, H=+2000 mm)",
+        "Φωτιστικό Καθρέφτη Μπάνιου IP44 (Ζώνη 2, H=+2000 mm)",
+        "no.",
+        n_mirror,
+        acc.get("mirror_light_ip44", 48.0),
+    )
+    _add(
+        "Accessories",
+        "Bathroom Exhaust Fan (IP44) + 3-Pole Fan Isolator Switch (H=+2200 mm)",
+        "Ανεμιστήρας Μπάνιου IP44 + Τριπολικός Διακόπτης Απομόνωσης",
+        "set",
+        n_fan,
+        acc.get("exhaust_fan_isolator_set", 78.0),
+    )
+    _add(
+        "Accessories",
+        "10 A Lighting Switch (1G1W / 2G1W / 1G2W flush-mounted BS EN 60669)",
+        "Διακόπτης Φωτισμού 10 A (Απλός / Διπλός / Αλλέ-Ρετούρ)",
         "no.",
         n_sw,
         acc["light_switch"],
@@ -435,8 +469,24 @@ def generate_boq(
     )
     _add(
         "Accessories",
-        "45 A Cooker Control Unit / 20 A Dedicated Appliance Connection Unit",
-        "Διακόπτης Κουζίνας 45 A / Σημείο Αφιερωμένης Συσκευής 20 A",
+        "45 A Double-Pole Cooker Control Unit with Neon (H=+1150 mm)",
+        "Διπολικός Διακόπτης Κουζίνας 45 A με Ενδεικτικό",
+        "no.",
+        n_ccu,
+        acc.get("cooker_control_unit_45a", 46.0),
+    )
+    _add(
+        "Accessories",
+        "20 A Double-Pole Water Heater Switch with Neon (H=+1200 mm)",
+        "Διπολικός Διακόπτης Θερμοσίφωνα 20 A με Ενδεικτικό",
+        "no.",
+        n_wh_dp,
+        acc.get("water_heater_dp_switch_20a", 32.0),
+    )
+    _add(
+        "Accessories",
+        "Dedicated Fixed Appliance / Cooker Connection Outlet (20–45 A)",
+        "Σημείο Σύνδεσης Αφιερωμένης Συσκευής / Κουζίνας (20–45 A)",
         "no.",
         n_appl,
         acc["appliance_outlet_45a"],
@@ -468,7 +518,7 @@ def generate_boq(
         )
 
     # ------------------------------------------------------------------
-    # 5. Earthing & EV Specialist Equipment
+    # 5. Earthing, Main Equipotential Bonding, PV AC Kit & EV Equipment
     # ------------------------------------------------------------------
     if design.earthing_system == EarthingSystem.TT:
         _add(
@@ -478,6 +528,24 @@ def generate_boq(
             "set",
             1,
             acc["tt_earth_rod_kit"],
+        )
+    _add(
+        "Earthing",
+        "Main Protective Equipotential Bonding (10 mm² Cu to Water, Gas & MET Clamps)",
+        "Κύρια Ισοδυναμική Σύνδεση (10 mm² Cu σε Ύδρευση, Αέριο & MET)",
+        "set",
+        1,
+        acc.get("main_equipotential_bonding_10mm", 120.0),
+    )
+
+    if design.building.pv_capacity_kva > 0.0:
+        _add(
+            "Specialist",
+            "PV AC Lockable Rotary Isolator, Generation Meter Enclosure & Labeling (EAC Net-Meter)",
+            "Περιστροφικός Αποζεύκτης AC Φ/Β, Κιβώτιο Μετρητή Παραγωγής & Σήμανση ΑΗΚ",
+            "set",
+            1,
+            acc.get("pv_ac_isolator_meter_kit", 240.0),
         )
 
     if design.building.ev_charger_kw > 0.0:

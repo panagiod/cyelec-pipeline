@@ -176,6 +176,22 @@ class BoqSummary(BaseModel):
     grand_total_eur: float = Field(ge=0.0)
 
 
+class EacProjectMetadata(BaseModel):
+    """Cyprus EAC (ΑΗΚ) cadastral, tariff, and contractor metadata for Ε-ΔΔ-516 & sheets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    district: str = ""
+    municipality: str = ""
+    sheet_plan: str = ""
+    plot_no: str = ""
+    building_permit_no: str = ""
+    owner_name: str = ""
+    eac_tariff: str = ""
+    contractor_name: str = ""
+    contractor_hmy_reg: str = ""
+
+
 class DesignOverrides(BaseModel):
     """Structured stateless engineer overrides accepted by every pipeline run."""
 
@@ -195,6 +211,8 @@ class DesignOverrides(BaseModel):
     boq_rate_overrides: BoqRateOverrides | None = None
     tender_boq_blank_rates: bool = False
     apply_corridor_grouping: bool = False
+    include_tt_main_rcd_s: bool = True
+    eac_metadata: EacProjectMetadata | None = None
     notes: str | None = None
 
 
@@ -385,6 +403,8 @@ class ElectricalDesignResult(BaseModel):
     boq: BoqSummary | None = None
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
+    include_tt_main_rcd_s: bool = True
+    eac_metadata: EacProjectMetadata | None = None
     review_flags: list[ReviewFlag] = Field(default_factory=list)
     has_blockers: bool
     etek_signoff_required: bool = True

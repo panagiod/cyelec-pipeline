@@ -463,6 +463,10 @@ def render_etek_workbench_html(
         <input id="corridorCgChk" type="checkbox" style="width:auto;" />
         <span>Apply Auto Corridor Cg Grouping (Trunking / Tray Mode)</span>
       </label>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+        <input id="ttMainRcdChk" type="checkbox" checked style="width:auto;" />
+        <span>Include 100mA Type-S Main RCD on TT SLD (E-201)</span>
+      </label>
 
       <h2 style="margin-top:14px;">3. Branding, BOQ &amp; Language</h2>
       <label for="reportLang">Deliverable Language</label>
@@ -489,6 +493,38 @@ def render_etek_workbench_html(
       <button class="btn btn-secondary" onclick="saveFirmDefaults()">
         Save Firm Branding &amp; VAT Defaults
       </button>
+
+      <details id="eacMetaBox" style="margin-top:10px;border:1px solid #cbd5e0;border-radius:6px;
+               padding:8px 10px;background:#f8fafc;">
+        <summary style="font-size:11.5px;font-weight:700;color:#1b365d;cursor:pointer;">
+          4. EAC Cadastral &amp; Contractor Metadata (Ε-ΔΔ-516)
+        </summary>
+        <label for="eacDistrict">EAC District (Επαρχία)</label>
+        <select id="eacDistrict">
+          <option value="">-- Optional --</option>
+          <option value="Nicosia">Nicosia (Λευκωσία)</option>
+          <option value="Limassol">Limassol (Λεμεσός)</option>
+          <option value="Larnaca">Larnaca (Λάρνακα)</option>
+          <option value="Paphos">Paphos (Πάφος)</option>
+          <option value="Famagusta">Famagusta (Αμμόχωστος)</option>
+        </select>
+        <label for="eacMunicipality">Municipality / Village</label>
+        <input id="eacMunicipality" placeholder="e.g., Strovolos / Germasogeia" />
+        <label for="eacSheetPlan">Cadastral Sheet / Plan</label>
+        <input id="eacSheetPlan" placeholder="e.g., 21/54E2" />
+        <label for="eacPlotNo">Plot No. (Αρ. Τεμαχίου)</label>
+        <input id="eacPlotNo" placeholder="e.g., 412" />
+        <label for="eacPermitNo">Building Permit No.</label>
+        <input id="eacPermitNo" placeholder="e.g., BP-2026/0841" />
+        <label for="eacOwner">Property Owner / Applicant</label>
+        <input id="eacOwner" placeholder="Owner full name or company" />
+        <label for="eacTariff">EAC Tariff Code (optional)</label>
+        <input id="eacTariff" placeholder="Auto (e.g., Code 01 Domestic)" />
+        <label for="eacContractor">Licensed Installer Name</label>
+        <input id="eacContractor" placeholder="Class A Electrical Contractor" />
+        <label for="eacHmyReg">Contractor HMY Licence No.</label>
+        <input id="eacHmyReg" placeholder="e.g., HMY-A-1420" />
+      </details>
 
       <button class="btn btn-primary" onclick="runSolve()">Run Deterministic Solve</button>
       <button class="btn btn-secondary" onclick="downloadBundle()">Download EAC ZIP Pack</button>
@@ -520,10 +556,13 @@ def render_etek_workbench_html(
             Circuits &amp; Pass-2 Overrides
           </button>
           <button class="tab" onclick="openTab('tabFloorplan', this)">
-            Interactive Floorplan (SVG)
+            Drawing Set (E-100 / E-101 / E-102)
           </button>
           <button class="tab" onclick="openTab('tabSld', this)">
-            Single-Line Diagram (SVG)
+            SLD (E-201)
+          </button>
+          <button class="tab" onclick="openTab('tabDetails', this)">
+            Details &amp; Notes (E-301)
           </button>
           <button class="tab" onclick="openTab('tabBoq', this)">
             Bill of Quantities (EUR)
@@ -556,8 +595,15 @@ def render_etek_workbench_html(
         </div>
 
         <div id="tabFloorplan" class="tab-pane">
-          <div class="fp-toolbar">
-            <span><strong>Visual Pass-2 Editor:</strong> Click any room to reclassify, or</span>
+          <div class="fp-toolbar" style="margin-bottom:8px;gap:6px;flex-wrap:wrap;">
+            <strong>Sheet View:</strong>
+            <button id="btnSheetCombined" class="btn btn-primary btn-sm"
+              onclick="selectDrawingSheet('combined')">E-100 Combined</button>
+            <button id="btnSheetLighting" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('lighting')">E-101 Lighting &amp; Switching</button>
+            <button id="btnSheetPower" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('power')">E-102 Power &amp; Accessories</button>
+            <span style="margin-left:8px;">|</span>
             <button id="btnDbMode" class="btn btn-secondary btn-sm" onclick="toggleDbMode()">
               Relocate DB1 on Floorplan
             </button>
@@ -577,6 +623,12 @@ def render_etek_workbench_html(
 
         <div id="tabSld" class="tab-pane">
           <div id="sldSvg" class="svg-box">Run a solve to render Single-Line Diagram.</div>
+        </div>
+
+        <div id="tabDetails" class="tab-pane">
+          <div id="detailsSvg" class="svg-box">
+            Run a solve to render E-301 Construction Details, Earthing &amp; General Notes.
+          </div>
         </div>
 
         <div id="tabBoq" class="tab-pane">
@@ -795,6 +847,7 @@ def render_etek_workbench_html(
         report_language: document.getElementById('reportLang').value,
         tender_boq_blank_rates: document.getElementById('tenderBoqChk').checked,
         apply_corridor_grouping: document.getElementById('corridorCgChk').checked,
+        include_tt_main_rcd_s: document.getElementById('ttMainRcdChk').checked,
         circuit_overrides: circuitOverrides,
         room_type_overrides: roomTypeOverrides
       }};
@@ -815,6 +868,20 @@ def render_etek_workbench_html(
       const etek = document.getElementById('etekReg').value.trim();
       if (firm || eng || etek) {{
         ov.branding = {{ firm_name: firm, engineer_name: eng, etek_reg_no: etek }};
+      }}
+      const eacMeta = {{
+        district: (document.getElementById('eacDistrict').value || '').trim(),
+        municipality: (document.getElementById('eacMunicipality').value || '').trim(),
+        sheet_plan: (document.getElementById('eacSheetPlan').value || '').trim(),
+        plot_no: (document.getElementById('eacPlotNo').value || '').trim(),
+        building_permit_no: (document.getElementById('eacPermitNo').value || '').trim(),
+        owner_name: (document.getElementById('eacOwner').value || '').trim(),
+        eac_tariff: (document.getElementById('eacTariff').value || '').trim(),
+        contractor_name: (document.getElementById('eacContractor').value || '').trim(),
+        contractor_hmy_reg: (document.getElementById('eacHmyReg').value || '').trim(),
+      }};
+      if (Object.values(eacMeta).some(v => v.length > 0)) {{
+        ov.eac_metadata = eacMeta;
       }}
       return ov;
     }}
@@ -844,6 +911,25 @@ def render_etek_workbench_html(
         circuitOverrides[cid][field] = (field === 'grouping_count') ? parseInt(val, 10) : val;
       }}
       if (Object.keys(circuitOverrides[cid]).length <= 1) delete circuitOverrides[cid];
+    }}
+
+    function selectDrawingSheet(sheetKey) {{
+      const key = (sheetKey === 'lighting' || sheetKey === 'power') ? sheetKey : 'combined';
+      window._cyelecActiveSheet = key;
+      const sheets = window._cyelecSheets || {{}};
+      document.getElementById('floorplanSvg').innerHTML =
+        sheets[key] || sheets.combined || 'Run a solve to render floorplan overlay.';
+      const btnMap = {{
+        combined: 'btnSheetCombined',
+        lighting: 'btnSheetLighting',
+        power: 'btnSheetPower',
+      }};
+      Object.entries(btnMap).forEach(([k, id]) => {{
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.classList.toggle('btn-primary', k === key);
+        el.classList.toggle('btn-secondary', k !== key);
+      }});
     }}
 
     function renderResult(data) {{
@@ -946,8 +1032,15 @@ def render_etek_workbench_html(
         </tr>`;
       }}).join('');
 
-      document.getElementById('floorplanSvg').innerHTML = data.floorplan_svg;
-      document.getElementById('sldSvg').innerHTML = data.sld_svg;
+      window._cyelecSheets = {{
+        combined: data.floorplan_svg || '',
+        lighting: data.lighting_svg || data.floorplan_svg || '',
+        power: data.power_svg || data.floorplan_svg || '',
+      }};
+      selectDrawingSheet(window._cyelecActiveSheet || 'combined');
+      document.getElementById('sldSvg').innerHTML = data.sld_svg || '';
+      document.getElementById('detailsSvg').innerHTML =
+        data.details_svg || 'Details sheet unavailable.';
 
       if (boq && boq.items) {{
         const lang = document.getElementById('reportLang').value;

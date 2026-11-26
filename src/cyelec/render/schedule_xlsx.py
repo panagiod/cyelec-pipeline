@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from cyelec.models.electrical import ElectricalDesignResult, ReviewSeverity
+from cyelec.models.spatial import DeviceType, PlacedDevice, SpatialLayoutResult
 
 _NAVY_FILL = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
 _SUBHEADER_FILL = PatternFill(start_color="D9E2EC", end_color="D9E2EC", fill_type="solid")
@@ -82,8 +83,13 @@ def _autosize_columns(ws: Worksheet, min_width: int = 9, max_width: int = 44) ->
         ws.column_dimensions[letter].width = best
 
 
-def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) -> Path:
-    """Export two-sheet formula-backed Excel workbook ('Load Schedule' + 'EAC & Review Flags')."""
+def export_load_schedule_xlsx(
+    result: ElectricalDesignResult,
+    out_path: Path,
+    *,
+    spatial: SpatialLayoutResult | None = None,
+) -> Path:
+    """Export 6-sheet formula-backed Excel workbook (Load, EAC, BOQ, Form, HMY 58, Lighting)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
 
@@ -690,6 +696,121 @@ def export_load_schedule_xlsx(result: ElectricalDesignResult, out_path: Path) ->
             tc.font = _BOLD_FONT if c_idx == 2 else _BODY_FONT
             tc.border = _CELL_BORDER
     _autosize_columns(ws5, max_width=32)
+
+    # ==================================================================
+    # Sheet 6: Luminaire & Switching Schedule (E-101 Construction Takeoff)
+    # ==================================================================
+    ws6 = wb.create_sheet(title="Luminaire & Switching")
+    ws6.views.sheetView[0].showGridLines = True
+    ws6.page_setup.orientation = ws6.ORIENTATION_LANDSCAPE
+    ws6.page_setup.paperSize = ws6.PAPERSIZE_A4
+
+    ws6["A1"] = "E-101 LUMINAIRE, SWITCHING & BATHROOM ACCESSORY SCHEDULE (BS EN 12464 / CYPRUS)"
+    ws6["A1"].font = _TITLE_FONT
+    ws6["A2"] = (
+        f"Project: {result.building.project_name} | "
+        "Switch Codes: 1G1W=1-Gang 1-Way, 2G1W=2-Gang 1-Way, 1G2W=2-Way (Corridor/Stairs/Master)"
+    )
+    ws6["A2"].font = _BODY_FONT
+
+    ls_headers = [
+        "Room ID",
+        "Space / Room",
+        "Floor",
+        "Area (m²)",
+        "Target Lux",
+        "Ceiling Points",
+        "IP Rating",
+        "Est. Lighting (W)",
+        "Switch Type & Qty",
+        "Groups",
+        "Mirror Light / Exhaust Fan",
+        "Mounting Heights (FFL)",
+    ]
+    for c_idx, title in enumerate(ls_headers, start=1):
+        cell = ws6.cell(row=4, column=c_idx, value=title)
+        cell.font = _HEADER_FONT
+        cell.fill = _NAVY_FILL
+        cell.border = _CELL_BORDER
+
+    devs_by_room: dict[str, list[PlacedDevice]] = {}
+    if spatial is not None:
+        for d in spatial.devices:
+            devs_by_room.setdefault(d.room_id, []).append(d)
+
+    for r_idx, room in enumerate(result.building.rooms, start=5):
+        room_devs = devs_by_room.get(room.id, [])
+        lums = [d for d in room_devs if d.device_type == DeviceType.LUMINAIRE]
+        sws = [d for d in room_devs if d.device_type == DeviceType.SWITCH]
+        mirrors = [d for d in room_devs if d.device_type == DeviceType.MIRROR_LIGHT]
+        fans = [d for d in room_devs if d.device_type == DeviceType.EXHAUST_FAN]
+
+        if lums:
+            lum_cnt = len(lums)
+            ip_val = lums[0].ip_rating
+            lux_val = lums[0].target_lux or 150
+            watts = round(
+                sum(
+                    (d.luminaire_wattage_w or 15.0)
+                    for d in (lums + mirrors + fans)
+                ),
+                1,
+            )
+        else:
+            lum_cnt = 1
+            ip_val = "IP65" if room.is_outdoor else ("IP44" if room.is_wet_room else "IP20")
+            lux_val = (
+                200
+                if room.is_wet_room
+                else (300 if "kitchen" in room.normalized_type.value else 150)
+            )
+            watts = 15.0
+
+        if sws:
+            st_counts: dict[str, int] = {}
+            groups: list[str] = []
+            for sw_d in sws:
+                st = sw_d.switch_type or "1G1W"
+                st_counts[st] = st_counts.get(st, 0) + 1
+                if sw_d.switch_group and sw_d.switch_group not in groups:
+                    groups.append(sw_d.switch_group)
+            sw_summary = ", ".join(f"{cnt}x {st}" for st, cnt in st_counts.items())
+            grp_summary = ", ".join(groups) or "a"
+        else:
+            sw_summary = "1x 2G1W" if room.is_wet_room else "1x 1G1W"
+            grp_summary = "a,b" if room.is_wet_room else "a"
+
+        wet_acc = (
+            f"{len(mirrors)}x IP44 Mirror + {len(fans)}x Fan/3P Isol"
+            if (mirrors or fans)
+            else ("IP44 Mirror + Fan/3P Isol" if room.is_wet_room else "-")
+        )
+        has_bedside = any(abs(s.mounting_height_mm - 750.0) < 10.0 for s in sws)
+        mh_txt = (
+            "SW +1.2m (outside), ML +2.0m, 3P +2.2m, Fan +2.4m"
+            if room.is_wet_room
+            else ("SW +1.2m & Bedside +0.75m (2W)" if has_bedside else "SW +1.2m, Ceiling")
+        )
+
+        ls_row: list[str | float | int] = [
+            room.id,
+            room.raw_label,
+            room.floor,
+            round(room.area_m2, 2),
+            lux_val,
+            lum_cnt,
+            ip_val,
+            watts,
+            sw_summary,
+            grp_summary,
+            wet_acc,
+            mh_txt,
+        ]
+        for c_idx, val in enumerate(ls_row, start=1):
+            lc = ws6.cell(row=r_idx, column=c_idx, value=val)
+            lc.font = _BOLD_FONT if c_idx == 1 else _BODY_FONT
+            lc.border = _CELL_BORDER
+    _autosize_columns(ws6, max_width=36)
 
     wb.save(str(out_path))
     return out_path

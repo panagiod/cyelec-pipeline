@@ -299,6 +299,7 @@ def test_ws3_eac_edd516_hmy58_html_and_5_sheet_excel(tmp_path: Path) -> None:
         "Bill of Quantities",
         "EAC Application",
         "HMY 58 Test Schedule",
+        "Luminaire & Switching",
     ]
     ws5 = wb["HMY 58 Test Schedule"]
     # Header + at least one row per circuit

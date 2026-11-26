@@ -14,13 +14,20 @@ class DeviceType(StrEnum):
     """Placed electrical accessory or equipment symbol type."""
 
     LUMINAIRE = "luminaire"
+    MIRROR_LIGHT = "mirror_light"
+    EXHAUST_FAN = "exhaust_fan"
     SWITCH = "switch"
+    FAN_ISOLATOR_3P = "fan_isolator_3p"
     SOCKET_TWIN = "socket_twin"
     SPLIT_AC = "split_ac"
+    COOKER_CONTROL_UNIT = "cooker_control_unit"
     COOKER_OUTLET = "cooker_outlet"
     OVEN_OUTLET = "oven_outlet"
     APPLIANCE_OUTLET = "appliance_outlet"
+    WATER_HEATER_DP_SWITCH = "water_heater_dp_switch"
     WATER_HEATER_ISOLATOR = "water_heater_isolator"
+    EAC_METER_CABINET = "eac_meter_cabinet"
+    EARTH_PIT = "earth_pit"
 
 
 class RoomWetZones(BaseModel):
@@ -52,6 +59,25 @@ class PlacedDevice(BaseModel):
     ip_rating: str = "IP20"
     circuit_id: str | None = None
     appliance_key: str | None = None
+    switch_group: str | None = None
+    switch_type: str | None = None
+    controlled_device_ids: list[str] = Field(default_factory=list)
+    luminaire_wattage_w: float | None = None
+    target_lux: int | None = None
+
+
+class SwitchLeg(BaseModel):
+    """Logical switch-to-luminaire/fan control wiring link rendered on E-101 Lighting Plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    switch_id: str
+    room_id: str
+    group_label: str
+    switch_type: str = "1G1W"
+    is_two_way: bool = False
+    target_device_ids: list[str] = Field(default_factory=list)
+    circuit_id: str | None = None
 
 
 class ConduitSegment(BaseModel):
@@ -86,6 +112,7 @@ class SpatialLayoutResult(BaseModel):
 
     wet_zones: list[RoomWetZones] = Field(default_factory=list)
     devices: list[PlacedDevice] = Field(default_factory=list)
+    switch_legs: list[SwitchLeg] = Field(default_factory=list)
     routed_circuits: list[RoutedCircuit] = Field(default_factory=list)
     total_conduit_m: float = Field(ge=0.0)
     flags: list[ReviewFlag] = Field(default_factory=list)

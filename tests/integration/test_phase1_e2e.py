@@ -59,6 +59,7 @@ def test_phase1_end_to_end_deliverables(tmp_path: Path) -> None:
         "Bill of Quantities",
         "EAC Application",
         "HMY 58 Test Schedule",
+        "Luminaire & Switching",
     ]
 
     ws = wb["Load Schedule"]

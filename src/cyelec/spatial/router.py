@@ -156,6 +156,8 @@ def build_conduit_graph(
     db_node = _attach_node_to_graph(graph, building.db_anchor.location_mm, kind="db")
     device_nodes: dict[str, tuple[int, int]] = {}
     for dev in devices:
+        if dev.device_type in (DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT):
+            continue
         device_nodes[dev.device_id] = _attach_node_to_graph(graph, dev.location_mm, kind="device")
 
     # 4. Ensure global connectivity if any disconnected components exist (e.g. detached outbuilding)
@@ -228,20 +230,33 @@ def assign_devices_to_circuits(
 
     for dev in devices:
         cid: str | None = None
-        if dev.device_type in (DeviceType.LUMINAIRE, DeviceType.SWITCH):
+        if dev.device_type in (
+            DeviceType.LUMINAIRE,
+            DeviceType.MIRROR_LIGHT,
+            DeviceType.EXHAUST_FAN,
+            DeviceType.SWITCH,
+            DeviceType.FAN_ISOLATOR_3P,
+        ):
             cid = lighting_by_room.get(dev.room_id)
         elif dev.device_type == DeviceType.SOCKET_TWIN:
             cid = socket_by_room.get(dev.room_id)
         elif dev.device_type == DeviceType.SPLIT_AC:
             cid = ac_by_room.get(dev.room_id)
-        elif dev.device_type == DeviceType.COOKER_OUTLET:
+        elif dev.device_type in (DeviceType.COOKER_OUTLET, DeviceType.COOKER_CONTROL_UNIT):
             cid = app_by_category_room.get(("cooker", dev.room_id)) or app_by_category.get("cooker")
         elif dev.device_type == DeviceType.OVEN_OUTLET:
             cid = app_by_category_room.get(("oven", dev.room_id)) or app_by_category.get("oven")
-        elif dev.device_type == DeviceType.WATER_HEATER_ISOLATOR:
+        elif dev.device_type in (
+            DeviceType.WATER_HEATER_ISOLATOR,
+            DeviceType.WATER_HEATER_DP_SWITCH,
+        ):
             cid = app_by_category_room.get(("water_heater", dev.room_id)) or app_by_category.get(
                 "water_heater"
             )
+        elif dev.device_type == DeviceType.EAC_METER_CABINET:
+            cid = "EAC-INCOMER"
+        elif dev.device_type == DeviceType.EARTH_PIT:
+            cid = "EARTHING"
         elif dev.device_type == DeviceType.APPLIANCE_OUTLET:
             # Match by appliance key/label or room
             for ac in appliance_circuits:
