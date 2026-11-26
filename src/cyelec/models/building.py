@@ -115,6 +115,27 @@ class PlumbingFixture(BaseModel):
     polygon_mm: list[Point2D] = Field(min_length=3)
 
 
+class FurnitureItem(BaseModel):
+    """Detected architectural furniture/joinery block for furniture-aware electrical placement."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    room_id: str
+    furniture_type: Literal[
+        "bed",
+        "tv",
+        "sofa",
+        "wardrobe",
+        "dining_table",
+        "kitchen_counter",
+        "stove",
+        "fridge",
+    ]
+    polygon_mm: list[Point2D] = Field(min_length=3)
+    centroid_mm: Point2D
+
+
 class Room(BaseModel):
     """Normalized architectural room with closed boundary polygon in millimetres."""
 
@@ -131,6 +152,7 @@ class Room(BaseModel):
     is_outdoor: bool = False
     ambient_temp_c: int | None = None
     fixtures: list[PlumbingFixture] = Field(default_factory=list)
+    furniture: list[FurnitureItem] = Field(default_factory=list)
 
     def centroid_mm(self) -> Point2D:
         """Compute simple vertex centroid of the room polygon."""

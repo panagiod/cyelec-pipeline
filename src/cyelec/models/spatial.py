@@ -14,12 +14,29 @@ class DeviceType(StrEnum):
     """Placed electrical accessory or equipment symbol type."""
 
     LUMINAIRE = "luminaire"
+    PENDANT_LIGHT = "pendant_light"
+    WALL_SCONCE = "wall_sconce"
+    LINEAR_COVE = "linear_cove"
+    OUTDOOR_PIR_LIGHT = "outdoor_pir_light"
     MIRROR_LIGHT = "mirror_light"
     EXHAUST_FAN = "exhaust_fan"
     SWITCH = "switch"
+    DIMMER_SWITCH = "dimmer_switch"
     FAN_ISOLATOR_3P = "fan_isolator_3p"
     SOCKET_TWIN = "socket_twin"
     SPLIT_AC = "split_ac"
+    SHUTTER_SWITCH = "shutter_switch"
+    HEAT_PUMP_OUTDOOR = "heat_pump_outdoor"
+    HEAT_PUMP_HYDROBOX = "heat_pump_hydrobox"
+    UFH_MANIFOLD = "ufh_manifold"
+    ROOM_THERMOSTAT = "room_thermostat"
+    VRV_OUTDOOR = "vrv_outdoor"
+    VRV_INDOOR_ISOLATOR = "vrv_indoor_isolator"
+    WATER_BOOSTER_PUMP = "water_booster_pump"
+    GATE_MOTOR = "gate_motor"
+    EV_WALLBOX = "ev_wallbox"
+    POOL_SUB_DB = "pool_sub_db"
+    KITCHEN_FCU = "kitchen_fcu"
     COOKER_CONTROL_UNIT = "cooker_control_unit"
     COOKER_OUTLET = "cooker_outlet"
     OVEN_OUTLET = "oven_outlet"
@@ -28,6 +45,22 @@ class DeviceType(StrEnum):
     WATER_HEATER_ISOLATOR = "water_heater_isolator"
     EAC_METER_CABINET = "eac_meter_cabinet"
     EARTH_PIT = "earth_pit"
+    # ELV / Weak-Current / Life Safety / KNX / Site
+    TELECOM_CABINET = "telecom_cabinet"
+    DATA_RJ45 = "data_rj45"
+    TV_OUTLET = "tv_outlet"
+    WIFI_AP = "wifi_ap"
+    INTERCOM_OUTDOOR = "intercom_outdoor"
+    INTERCOM_INDOOR = "intercom_indoor"
+    ALARM_PANEL = "alarm_panel"
+    ALARM_PIR = "alarm_pir"
+    ALARM_KEYPAD = "alarm_keypad"
+    ALARM_SIREN = "alarm_siren"
+    CCTV_CAMERA = "cctv_camera"
+    SMOKE_DETECTOR = "smoke_detector"
+    HEAT_DETECTOR = "heat_detector"
+    KNX_KEYPAD = "knx_keypad"
+    GARDEN_BOLLARD = "garden_bollard"
 
 
 class RoomWetZones(BaseModel):
@@ -63,6 +96,8 @@ class PlacedDevice(BaseModel):
     switch_type: str | None = None
     controlled_device_ids: list[str] = Field(default_factory=list)
     luminaire_wattage_w: float | None = None
+    luminaire_fixture_type: str | None = None
+    lumens: int | None = None
     target_lux: int | None = None
 
 

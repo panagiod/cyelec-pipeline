@@ -132,9 +132,7 @@ def generate_boq(
 
     for (size_mm2, is_3p), length_m in sorted(cable_m.items()):
         base_rate = rates.get_cable_rate(size_mm2)
-        unit_rate = (
-            round(base_rate * rates.three_phase_cable_multiplier, 2) if is_3p else base_rate
-        )
+        unit_rate = round(base_rate * rates.three_phase_cable_multiplier, 2) if is_3p else base_rate
         cores = "5-core (3P+N+PE)" if is_3p else "3-core (L+N+PE)"
         cores_el = "5-κλωνο (3Φ+N+PE)" if is_3p else "3-κλωνο (L+N+PE)"
         insul_en = "Cu XLPE/SWA Cable" if size_mm2 >= 50.0 else "Cu PVC Cable"
@@ -548,19 +546,300 @@ def generate_boq(
             acc.get("pv_ac_isolator_meter_kit", 240.0),
         )
 
-    if design.building.ev_charger_kw > 0.0:
-        is_22kw = design.building.ev_charger_kw > 7.4
+    effective_ev_kw = (
+        design.residential_brief.ev_charger_kw
+        if design.residential_brief.ev_charger_kw is not None
+        else design.building.ev_charger_kw
+    )
+    if effective_ev_kw > 0.0:
+        is_22kw = effective_ev_kw > 7.4
         _add(
             "Specialist",
-            f"Mode 3 Wallbox EV Charger ({design.building.ev_charger_kw:g} kW) supply & install",
-            (
-                "Επιτοίχιος Φορτιστής Ηλεκτρικού Οχήματος Mode 3 "
-                f"({design.building.ev_charger_kw:g} kW)"
-            ),
+            f"Mode 3 Wallbox EV Charger ({effective_ev_kw:g} kW) supply & install",
+            (f"Επιτοίχιος Φορτιστής Ηλεκτρικού Οχήματος Mode 3 ({effective_ev_kw:g} kW)"),
             "no.",
             1,
             acc["ev_charger_22kw"] if is_22kw else acc["ev_charger_7kw"],
         )
+
+    # ------------------------------------------------------------------
+    # 6. Stage 5: Lighting Upgrades, Mechanical Plant, ELV, Site, KNX & Testing
+    # ------------------------------------------------------------------
+    brief = design.residential_brief
+    if spatial is not None:
+        dev_counts = Counter(d.device_type for d in spatial.devices)
+        _add(
+            "Lighting",
+            "LED Rotary Dimmer Switch (Trailing-Edge 250W, H=+1200 mm)",
+            "Ρυθμιστής Έντασης LED (Dimmer 250W, H=+1200 mm)",
+            "no.",
+            dev_counts[DeviceType.DIMMER_SWITCH],
+            acc.get("dimmer_switch", 48.0),
+        )
+        _add(
+            "Lighting",
+            "Dining / Feature Pendant Luminaire Point (3000K)",
+            "Φωτιστικό Κρεμαστό Τραπεζαρίας (3000K)",
+            "no.",
+            dev_counts[DeviceType.PENDANT_LIGHT],
+            acc.get("pendant_light_point", 55.0),
+        )
+        _add(
+            "Lighting",
+            "IP65 Outdoor LED PIR Security / Entry Floodlight (20W)",
+            "Εξωτερικός Προβολέας LED IP65 με Αισθητήρα Κίνησης PIR",
+            "no.",
+            dev_counts[DeviceType.OUTDOOR_PIR_LIGHT],
+            acc.get("outdoor_pir_light_ip65", 68.0),
+        )
+        # Mechanical / Shutters / Plant
+        _add(
+            "Mechanical & Plant",
+            "Motorized Window Shutter Double-Pole Up/Down Switch & Conduit (H=+1200 mm)",
+            "Διακόπτης Ηλεκτρικού Ρολού (Πάνω/Κάτω) με Σωλήνωση",
+            "no.",
+            dev_counts[DeviceType.SHUTTER_SWITCH],
+            acc.get("shutter_switch_dp", 34.0),
+        )
+        _add(
+            "Mechanical & Plant",
+            "13 A Switched Fused Connection Unit (Kitchen Hood / Fridge / Microwave)",
+            "Ασφαλειοδιακόπτης 13 A FCU (Απορροφητήρας / Ψυγείο / Φούρνος Μικροκυμάτων)",
+            "no.",
+            dev_counts[DeviceType.KITCHEN_FCU],
+            acc.get("kitchen_fcu_13a", 32.0),
+        )
+        _add(
+            "Mechanical & Plant",
+            "Room Heating/Cooling Thermostat Point & Control Conduit (H=+1500 mm)",
+            "Θερμοστάτης Χώρου (Ενδοδαπέδια / VRV) με Σωλήνωση Ελέγχου",
+            "no.",
+            dev_counts[DeviceType.ROOM_THERMOSTAT],
+            acc.get("room_thermostat_point", 58.0),
+        )
+        if dev_counts[DeviceType.HEAT_PUMP_OUTDOOR] > 0:
+            _add(
+                "Mechanical & Plant",
+                "3-Phase IP65 Rotary Isolator & Hydrobox/UFH Manifold Power Connection Kit",
+                "Τριφασικός Αποζεύκτης IP65 Αντλίας Θερμότητας & Σύνδεση Ενδοδαπέδιας",
+                "set",
+                1,
+                acc.get("heat_pump_3p_isolator_kit", 185.0),
+            )
+        if dev_counts[DeviceType.VRV_OUTDOOR] > 0:
+            _add(
+                "Mechanical & Plant",
+                "3-Phase IP65 VRV/VRF Outdoor Isolator & Indoor FCU Isolation Kit",
+                "Τριφασικός Αποζεύκτης IP65 Εξωτερικής Μονάδας VRV & Εσωτερικών Μονάδων",
+                "set",
+                1,
+                acc.get("vrv_3p_isolator_kit", 195.0),
+            )
+        if dev_counts[DeviceType.WATER_BOOSTER_PUMP] > 0:
+            _add(
+                "Mechanical & Plant",
+                "Water Pressure Booster & Hot-Water Recirculation Pump IP55 Isolator Kit",
+                "Αποζεύκτης IP55 Πιεστικού Νερού & Κυκλοφορητή Ζεστού Νερού",
+                "set",
+                1,
+                acc.get("water_pump_isolator_kit", 72.0),
+            )
+        if dev_counts[DeviceType.GATE_MOTOR] > 0:
+            _add(
+                "Mechanical & Plant",
+                "Sliding Yard Gate / Garage Motor IP65 Isolator, Safety Photocells & Beacon Wiring",
+                "Ηλεκτρική Παροχή Αυλόπορτας / Γκαραζόπορτας με Φωτοκύτταρα Ασφαλείας",
+                "set",
+                1,
+                acc.get("gate_motor_supply_kit", 110.0),
+            )
+        if dev_counts[DeviceType.POOL_SUB_DB] > 0:
+            _add(
+                "Mechanical & Plant",
+                "Swimming Pool IP65 Sub-DB, 30mA RCBOs & SELV 12V Transformer (BS 7671 Sec. 702)",
+                "Υποπίνακας Πισίνας IP65, 30mA RCBO & Μετασχηματιστής SELV 12V (Sec. 702)",
+                "set",
+                1,
+                acc.get("pool_sub_db_sec702_kit", 680.0),
+            )
+        # ELV / Weak-Current / Security / Life Safety
+        if dev_counts[DeviceType.TELECOM_CABINET] > 0:
+            _add(
+                "ELV & Security",
+                "9U Wall-Mounted Telecom Rack, 24-Port Cat6 Patch Panel & Cyta Fiber ONT Provision",
+                (
+                    "Επιτοίχιο Καμπινέ Τηλεπικοινωνιών 9U, Patch Panel 24-Port Cat6 "
+                    "& Πρόνοια Οπτικής Ίνας"
+                ),
+                "set",
+                1,
+                acc.get("telecom_cabinet_9u_patch", 390.0),
+            )
+        _add(
+            "ELV & Security",
+            "Dual Cat6 UTP RJ45 Data Outlet incl. Cable Run to Telecom Rack (H=+450 mm)",
+            "Διπλή Πρίζα Δεδομένων Cat6 RJ45 με Καλωδίωση στο Καμπινέ",
+            "no.",
+            dev_counts[DeviceType.DATA_RJ45],
+            acc.get("cat6_dual_rj45_point", 68.0),
+        )
+        _add(
+            "ELV & Security",
+            "TV / Satellite RG6 Coaxial Outlet incl. Star Cable to Rack",
+            "Πρίζα Τηλεόρασης / Δορυφορικής RG6 με Καλωδίωση",
+            "no.",
+            dev_counts[DeviceType.TV_OUTLET],
+            acc.get("tv_coax_point", 42.0),
+        )
+        _add(
+            "ELV & Security",
+            "Ceiling PoE Wi-Fi 6 Access Point Cat6A Drop & Conduit",
+            "Σημείο Οροφής PoE Wi-Fi 6 Access Point (Cat6A)",
+            "no.",
+            dev_counts[DeviceType.WIFI_AP],
+            acc.get("wifi_poe_ap_drop", 55.0),
+        )
+        if dev_counts[DeviceType.INTERCOM_OUTDOOR] > 0:
+            _add(
+                "ELV & Security",
+                "IP Video Intercom System (IP65 Outdoor Gate Unit, 1x Monitor & Electric Strike)",
+                "Σύστημα Θυροτηλεόρασης IP (Εξωτερική Μονάδα IP65, 1x Οθόνη & Ηλεκτρική Κλειδαριά)",
+                "set",
+                1,
+                acc.get("video_intercom_kit_outdoor_indoor", 440.0),
+            )
+            extra_mon = max(0, dev_counts[DeviceType.INTERCOM_INDOOR] - 1)
+            _add(
+                "ELV & Security",
+                "Additional Floor Video Intercom Indoor Monitor (7-inch Touch)",
+                "Επιπρόσθετη Εσωτερική Οθόνη Θυροτηλεόρασης Ορόφου",
+                "no.",
+                extra_mon,
+                acc.get("video_intercom_extra_monitor", 165.0),
+            )
+        if dev_counts[DeviceType.ALARM_PANEL] > 0:
+            _add(
+                "ELV & Security",
+                "EN 50131 Grade 2 Intruder Alarm Control Panel, Entry Keypad & External Siren",
+                "Κεντρικός Πίνακας Συναγερμού Grade 2, Πληκτρολόγιο & Εξωτερική Σειρήνα",
+                "set",
+                1,
+                acc.get("intruder_alarm_panel_keypad_siren", 520.0),
+            )
+        _add(
+            "ELV & Security",
+            "Intruder Alarm Dual-Tech PIR Motion Detector & Magnetic Contact Wiring",
+            "Αισθητήρας Κίνησης Συναγερμού Dual-Tech PIR & Μαγνητική Επαφή",
+            "no.",
+            dev_counts[DeviceType.ALARM_PIR],
+            acc.get("intruder_alarm_pir_point", 58.0),
+        )
+        _add(
+            "ELV & Security",
+            "IP67 4MP Exterior PoE CCTV Camera Point & Cat6 Drop to NVR (H=+2800 mm)",
+            "Σημείο Εξωτερικής Κάμερας CCTV IP67 PoE με Καλωδίωση Cat6",
+            "no.",
+            dev_counts[DeviceType.CCTV_CAMERA],
+            acc.get("cctv_poe_camera_point", 145.0),
+        )
+        n_smoke_heat = dev_counts[DeviceType.SMOKE_DETECTOR] + dev_counts[DeviceType.HEAT_DETECTOR]
+        _add(
+            "ELV & Security",
+            "BS 5839-6 Grade D1 Interlinked Optical Smoke / Kitchen Heat Detector (230V+Bat)",
+            "Διασυνδεδεμένος Ανιχνευτής Καπνού / Θερμότητας (BS 5839-6 Grade D1)",
+            "no.",
+            n_smoke_heat,
+            acc.get("smoke_heat_detector_grade_d1", 52.0),
+        )
+        # External Site Works & Trenching
+        if dev_counts[DeviceType.GARDEN_BOLLARD] > 0:
+            _add(
+                "Site Works",
+                "IP65 Exterior LED Garden / Driveway Bollard & SWA Underground Connection",
+                "Εξωτερικό Φωτιστικό Κήπου Bollard IP65 με Υπόγεια Παροχή",
+                "no.",
+                dev_counts[DeviceType.GARDEN_BOLLARD],
+                acc.get("garden_bollard_ip65_point", 95.0),
+            )
+        if brief.include_site_works and design.building.building_type.value == "independent_house":
+            trench_m = round(max(6.0, brief.street_setback_m + 3.0), 1)
+            _add(
+                "Site Works",
+                "Underground EAC Supply Trench (2xØ110mm HDPE Ducts, Sand Bed & Warning Tape)",
+                "Υπόγεια Εκσκαφή & Σωλήνες Παροχής ΑΗΚ (2xØ110mm HDPE με Ταινία Σήμανσης)",
+                "m",
+                trench_m,
+                acc.get("underground_trench_eac_duct_per_m", 48.0),
+            )
+            _add(
+                "Site Works",
+                "Underground Telecom / Cyta Fiber Entry Ducts (2xØ32mm HDPE + Draw Pit)",
+                "Υπόγειοι Σωλήνες Τηλεπικοινωνιών / Cyta (2xØ32mm HDPE & Φρεάτιο)",
+                "m",
+                trench_m,
+                acc.get("underground_telecom_duct_per_m", 18.0),
+            )
+        # Foundation Earthing & IEC 62305-2 LPS
+        if brief.earthing_electrode_type == "foundation_ring" and brief.include_site_works:
+            _add(
+                "Earthing",
+                "Foundation / Ring Earth Electrode (30x3.5mm Cu/Galv Tape, Clamps & Test Links)",
+                "Θεμελιακή / Δακτυλιοειδής Γείωση (Ταινία 30x3.5mm, Σφιγκτήρες & Σημεία Ελέγχου)",
+                "set",
+                1,
+                acc.get("foundation_ring_earthing_kit", 420.0),
+            )
+        if design.lightning_risk is not None and design.lightning_risk.lps_required:
+            _add(
+                "Earthing",
+                (
+                    "IEC 62305 External Lightning Protection System "
+                    "(Class IV Air Term, Down Conductors)"
+                ),
+                "Σύστημα Εξωτερικής Αντικεραυνικής Προστασίας (IEC 62305 Κατηγορία IV)",
+                "set",
+                1,
+                acc.get("lps_class4_external_kit", 2450.0),
+            )
+        # Optional Smart Home KNX
+        if brief.include_knx:
+            _add(
+                "KNX Automation",
+                "KNX Bus Power Supply 640mA (DIN-Rail) & IP/DALI Interface Gateway",
+                "Τροφοδοτικό KNX 640mA (Ράγας DIN) & Πύλη IP/DALI",
+                "set",
+                1,
+                acc.get("knx_psu_640ma_din", 240.0),
+            )
+            _add(
+                "KNX Automation",
+                "KNX 8-Channel Switching / Dimming / Shutter DIN-Rail Actuator",
+                "Ενεργοποιητής KNX 8 Καναλιών (Φωτισμός / Ρολά / Dimming)",
+                "no.",
+                2,
+                acc.get("knx_actuator_8ch_din", 340.0),
+            )
+            _add(
+                "KNX Automation",
+                "KNX 4-Fold Tactile Scene / Temperature Keypad incl. EIB Bus Cable",
+                "Πληκτρολόγιο Σκηνών KNX 4-Πλήκτρων με Καλώδιο EIB Bus",
+                "no.",
+                dev_counts[DeviceType.KNX_KEYPAD],
+                acc.get("knx_scene_keypad", 145.0),
+            )
+
+    # Section 10: Testing, Commissioning, HMY 58 Certification & As-Built Drawings
+    _add(
+        "Testing & Commissioning",
+        (
+            "BS 7671 Initial Verification, Form HMY 58 Certification, "
+            "EAC Inspection & As-Built Drawings"
+        ),
+        "Αρχικός Έλεγχος BS 7671, Πιστοποιητικό ΗΜΥ 58, Επιθεώρηση ΑΗΚ & Σχέδια As-Built",
+        "item",
+        1,
+        acc.get("testing_commissioning_hmy58_asbuilt", 450.0),
+    )
 
     subtotal = 0.0 if tender_blank_rates else round(sum(item.total_eur for item in items), 2)
     vat_eur = 0.0 if tender_blank_rates else round(subtotal * rates.vat_rate, 2)

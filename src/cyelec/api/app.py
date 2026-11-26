@@ -117,10 +117,7 @@ _PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), payment=()"
 
 def _is_cad_client_error(exc: Exception) -> bool:
     """Return True if an exception represents an invalid uploaded CAD/BIM file error."""
-    return (
-        isinstance(exc, (ValueError, ImportError, OSError))
-        or type(exc).__name__ == "DXFError"
-    )
+    return isinstance(exc, (ValueError, ImportError, OSError)) or type(exc).__name__ == "DXFError"
 
 
 class HealthResponse(BaseModel):
@@ -161,7 +158,7 @@ class SolveResponseEnvelope(BaseModel):
 
 
 class SolvePreviewEnvelope(BaseModel):
-    """Preview response returning full design JSON plus E-100/E-101/E-102/E-201/E-301 SVGs."""
+    """Preview response returning full design JSON plus E-100..E-301 vector preview SVGs."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -171,6 +168,9 @@ class SolvePreviewEnvelope(BaseModel):
     sld_svg: str
     lighting_svg: str = ""
     power_svg: str = ""
+    elv_svg: str = ""
+    site_svg: str = ""
+    riser_svg: str = ""
     details_svg: str = ""
 
 
@@ -403,9 +403,7 @@ def _parse_overrides_json(raw: str | None) -> DesignOverrides | None:
     try:
         return DesignOverrides.model_validate_json(raw)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=422, detail=f"Invalid DesignOverrides JSON: {exc}"
-        ) from exc
+        raise HTTPException(status_code=422, detail=f"Invalid DesignOverrides JSON: {exc}") from exc
 
 
 def _parse_layer_mapping_json(raw: str | None) -> DxfLayerMapping | None:
@@ -414,9 +412,7 @@ def _parse_layer_mapping_json(raw: str | None) -> DxfLayerMapping | None:
     try:
         return DxfLayerMapping.model_validate_json(raw)
     except ValidationError as exc:
-        raise HTTPException(
-            status_code=422, detail=f"Invalid DxfLayerMapping JSON: {exc}"
-        ) from exc
+        raise HTTPException(status_code=422, detail=f"Invalid DxfLayerMapping JSON: {exc}") from exc
 
 
 async def _read_upload_bounded(file: UploadFile, max_bytes: int = _MAX_UPLOAD_BYTES) -> bytes:
@@ -522,8 +518,7 @@ def _validate_safe_id(value: str, field_name: str) -> str:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid {field_name}: must be 1-64 characters of "
-                "[A-Za-z0-9._-] without '..'."
+                f"Invalid {field_name}: must be 1-64 characters of [A-Za-z0-9._-] without '..'."
             ),
         )
     return clean
@@ -662,9 +657,7 @@ def _solve_multifloor_bundle_sync(
             building_type,
             layer_mapping,
         )
-        outputs = export_phase3_deliverables(
-            p2, tmp / "pack", export_pdf=is_weasyprint_available()
-        )
+        outputs = export_phase3_deliverables(p2, tmp / "pack", export_pdf=is_weasyprint_available())
         zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
         return p2, zip_path.read_bytes()
 
@@ -940,16 +933,13 @@ def create_app(
         # Layer-1 guardrail: bounded sliding-window rate limit using trusted rightmost client IP
         rpm_raw = os.environ.get("CYELEC_RATE_LIMIT_RPM", "0").strip()
         rpm_limit = int(rpm_raw) if rpm_raw.isdigit() else 0
-        rate_limited_route = (
-            request.method == "POST"
-            and (
-                path.startswith("/v1/solve/")
-                or path == "/v1/dxf/layers"
-                or path.startswith("/v1/admin/")
-                or path.startswith("/v1/auth/")
-                or path == "/v1/tenants/me/api-key"
-                or "/revisions" in path
-            )
+        rate_limited_route = request.method == "POST" and (
+            path.startswith("/v1/solve/")
+            or path == "/v1/dxf/layers"
+            or path.startswith("/v1/admin/")
+            or path.startswith("/v1/auth/")
+            or path == "/v1/tenants/me/api-key"
+            or "/revisions" in path
         )
         if rpm_limit > 0 and rate_limited_route:
             xff_parts = [
@@ -958,8 +948,10 @@ def create_app(
                 if part.strip()
             ]
             # Cloud Run / Google Front End appends the real client IP on the right
-            trusted_ip = xff_parts[-1] if xff_parts else (
-                request.client.host if request.client else "unknown"
+            trusted_ip = (
+                xff_parts[-1]
+                if xff_parts
+                else (request.client.host if request.client else "unknown")
             )
             bucket_key = auth_tenant or trusted_ip
             now_mono = time.monotonic()
@@ -1146,9 +1138,7 @@ def create_app(
         return {
             "pipeline_version": __version__,
             "versions": std.versions_map(),
-            "eac_profiles": {
-                k.value: v.model_dump() for k, v in std.eac_rules.profiles.items()
-            },
+            "eac_profiles": {k.value: v.model_dump() for k, v in std.eac_rules.profiles.items()},
             "earthing_default": std.eac_rules.earthing.default_system.value,
             "ambient_defaults_c": std.eac_rules.ambient_defaults_c.model_dump(),
         }
@@ -1191,6 +1181,8 @@ def create_app(
         from cyelec.pipeline import run_phase2_pipeline
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
         from cyelec.synth.benchmarks import generate_benchmark_dxf
 
@@ -1212,6 +1204,9 @@ def create_app(
             sld_svg=render_sld_svg(p2.design),
             lighting_svg=render_floorplan_svg(p2, discipline="lighting"),
             power_svg=render_floorplan_svg(p2, discipline="power"),
+            elv_svg=render_floorplan_svg(p2, discipline="elv"),
+            site_svg=render_site_plan_svg(p2),
+            riser_svg=render_riser_and_db_svg(p2),
             details_svg=render_details_notes_svg(p2),
         )
 
@@ -1278,9 +1273,7 @@ def create_app(
                 raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
-        store.record_usage(
-            tid, "dxf_layer_inspect", (time.perf_counter() - t0) * 1000.0, len(data)
-        )
+        store.record_usage(tid, "dxf_layer_inspect", (time.perf_counter() - t0) * 1000.0, len(data))
         return DxfLayersResponse(tenant_id=tid, filename=filename, layers=layers)
 
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
@@ -1327,6 +1320,8 @@ def create_app(
     ) -> SolvePreviewEnvelope:
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
 
         envelope = await solve_dxf_upload(
@@ -1344,6 +1339,11 @@ def create_app(
         pw_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(envelope.result, discipline="power")
         )
+        elv_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(envelope.result, discipline="elv")
+        )
+        site_svg = await anyio.to_thread.run_sync(render_site_plan_svg, envelope.result)
+        riser_svg = await anyio.to_thread.run_sync(render_riser_and_db_svg, envelope.result)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, envelope.result.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, envelope.result)
         return SolvePreviewEnvelope(
@@ -1353,6 +1353,9 @@ def create_app(
             sld_svg=sld_svg,
             lighting_svg=lt_svg,
             power_svg=pw_svg,
+            elv_svg=elv_svg,
+            site_svg=site_svg,
+            riser_svg=riser_svg,
             details_svg=dt_svg,
         )
 
@@ -1430,9 +1433,7 @@ def create_app(
             try:
                 parsed_labels = json.loads(floors_json)
             except json.JSONDecodeError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"Invalid floors_json: {exc}"
-                ) from exc
+                raise HTTPException(status_code=422, detail=f"Invalid floors_json: {exc}") from exc
             if not isinstance(parsed_labels, list) or len(parsed_labels) != len(files):
                 raise HTTPException(
                     status_code=422,
@@ -1495,6 +1496,8 @@ def create_app(
 
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
+        from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
 
         fp_svg = await anyio.to_thread.run_sync(render_floorplan_svg, p2)
@@ -1504,6 +1507,9 @@ def create_app(
         pw_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(p2, discipline="power")
         )
+        elv_svg = await anyio.to_thread.run_sync(lambda: render_floorplan_svg(p2, discipline="elv"))
+        site_svg = await anyio.to_thread.run_sync(render_site_plan_svg, p2)
+        riser_svg = await anyio.to_thread.run_sync(render_riser_and_db_svg, p2)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, p2)
         store.record_usage(
@@ -1516,6 +1522,9 @@ def create_app(
             sld_svg=sld_svg,
             lighting_svg=lt_svg,
             power_svg=pw_svg,
+            elv_svg=elv_svg,
+            site_svg=site_svg,
+            riser_svg=riser_svg,
             details_svg=dt_svg,
         )
 
@@ -1551,9 +1560,7 @@ def create_app(
             try:
                 parsed_labels = json.loads(floors_json)
             except json.JSONDecodeError as exc:
-                raise HTTPException(
-                    status_code=422, detail=f"Invalid floors_json: {exc}"
-                ) from exc
+                raise HTTPException(status_code=422, detail=f"Invalid floors_json: {exc}") from exc
             if not isinstance(parsed_labels, list) or len(parsed_labels) != len(files):
                 raise HTTPException(
                     status_code=422,

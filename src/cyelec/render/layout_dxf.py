@@ -22,7 +22,7 @@ from cyelec.models.electrical import CircuitCategory
 from cyelec.models.spatial import DeviceType, Phase2DesignResult
 from cyelec.synth.sample_plan import render_building_to_dxf
 
-LayoutDiscipline = Literal["combined", "lighting", "power"]
+LayoutDiscipline = Literal["combined", "lighting", "power", "elv"]
 
 
 def _read_dxf_safe(path: str | Path) -> Drawing:
@@ -61,29 +61,44 @@ def _clone_underlay_to_r2018(src_doc: Drawing) -> Drawing:
         importer.finalize()
     return target
 
+
 ELECTRICAL_LAYERS: dict[str, int] = {
-    "E-WETZONE-Z0": 1,     # Red: Section 701 Zone 0/1
-    "E-WETZONE-Z2": 30,    # Orange: Section 701 Zone 2 (600 mm)
-    "E-WETZONE-EXCL": 6,   # Magenta: EAC socket exclusion (2.5 m / 3.0 m)
-    "E-LITE": 2,           # Yellow: Ceiling luminaires, mirror lights & fans
-    "E-SWIT": 3,           # Green: Light switches & 3P fan isolators
-    "E-SWIT-LEG": 94,      # Light green: Dashed switch-to-luminaire control arcs
-    "E-SOCK": 4,           # Cyan: Twin 13A sockets
-    "E-AC": 5,             # Blue: Split A/C isolators
-    "E-APPL": 210,         # Purple: Dedicated appliances, CCU & DP switches
-    "E-EARTHING": 92,      # Green-Yellow: EAC Meter Cabinet & TT Earth Pit
-    "E-COND-LITE": 50,     # Warm yellow-amber: Lighting conduit runs
-    "E-COND-PWR": 140,     # Cool cyan-blue: Socket/ring power conduits
-    "E-COND-DED": 200,     # Violet: Dedicated A/C, cooker, EV, PV, 3P feeders
-    "E-TITLE": 7,          # White/Black: EAC / ETEK CAD title block & legend
+    "E-WETZONE-Z0": 1,  # Red: Section 701 Zone 0/1
+    "E-WETZONE-Z2": 30,  # Orange: Section 701 Zone 2 (600 mm)
+    "E-WETZONE-EXCL": 6,  # Magenta: EAC socket exclusion (2.5 m / 3.0 m)
+    "E-LITE": 2,  # Yellow: Ceiling luminaires, pendants, mirror lights & fans
+    "E-SWIT": 3,  # Green: Light switches, dimmers & 3P fan isolators
+    "E-SWIT-LEG": 94,  # Light green: Dashed switch-to-luminaire control arcs
+    "E-SOCK": 4,  # Cyan: Twin 13A sockets & kitchen FCUs
+    "E-AC": 5,  # Blue: Split A/C, VRV, Heat Pump & thermostats
+    "E-APPL": 210,  # Purple: Dedicated appliances, shutters, CCU, EV, Pool & pumps
+    "E-EARTHING": 92,  # Green-Yellow: EAC Meter Cabinet & TT Earth Pit
+    "E-COND-LITE": 50,  # Warm yellow-amber: Lighting home-run arrows & loop arcs
+    "E-COND-PWR": 140,  # Cool cyan-blue: Socket/ring power home-run arrows & arcs
+    "E-COND-DED": 200,  # Violet: Dedicated A/C, cooker, EV, PV, 3P home-runs
+    "E-TITLE": 7,  # White/Black: EAC / ETEK CAD title block & legend
+}
+
+STAGE5_EXTRA_LAYERS: dict[str, int] = {
+    "E-ROUTE-CONDUIT": 8,  # Grey (OFF by default): Full NetworkX wall/ceiling routed paths
+    "E-ELV-DATA": 150,  # Deep blue: Cat6 Data, TV, Wi-Fi AP & 9U Telecom Rack
+    "E-ELV-SEC": 220,  # Violet-red: Video Intercom, Intruder Alarm & CCTV
+    "E-ELV-SMOKE": 30,  # Orange: BS 5839-6 Interlinked Smoke & Heat Detectors
+    "E-KNX": 82,  # Emerald: Optional KNX Bus & Scene Keypads
 }
 
 _LIGHTING_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
     {
         DeviceType.LUMINAIRE,
+        DeviceType.PENDANT_LIGHT,
+        DeviceType.WALL_SCONCE,
+        DeviceType.LINEAR_COVE,
+        DeviceType.OUTDOOR_PIR_LIGHT,
+        DeviceType.GARDEN_BOLLARD,
         DeviceType.MIRROR_LIGHT,
         DeviceType.EXHAUST_FAN,
         DeviceType.SWITCH,
+        DeviceType.DIMMER_SWITCH,
         DeviceType.FAN_ISOLATOR_3P,
     }
 )
@@ -91,7 +106,19 @@ _LIGHTING_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
 _POWER_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
     {
         DeviceType.SOCKET_TWIN,
+        DeviceType.KITCHEN_FCU,
         DeviceType.SPLIT_AC,
+        DeviceType.SHUTTER_SWITCH,
+        DeviceType.HEAT_PUMP_OUTDOOR,
+        DeviceType.HEAT_PUMP_HYDROBOX,
+        DeviceType.UFH_MANIFOLD,
+        DeviceType.ROOM_THERMOSTAT,
+        DeviceType.VRV_OUTDOOR,
+        DeviceType.VRV_INDOOR_ISOLATOR,
+        DeviceType.WATER_BOOSTER_PUMP,
+        DeviceType.GATE_MOTOR,
+        DeviceType.EV_WALLBOX,
+        DeviceType.POOL_SUB_DB,
         DeviceType.COOKER_CONTROL_UNIT,
         DeviceType.COOKER_OUTLET,
         DeviceType.OVEN_OUTLET,
@@ -103,14 +130,51 @@ _POWER_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
     }
 )
 
+_ELV_DEVICE_TYPES: frozenset[DeviceType] = frozenset(
+    {
+        DeviceType.TELECOM_CABINET,
+        DeviceType.DATA_RJ45,
+        DeviceType.TV_OUTLET,
+        DeviceType.WIFI_AP,
+        DeviceType.INTERCOM_OUTDOOR,
+        DeviceType.INTERCOM_INDOOR,
+        DeviceType.ALARM_PANEL,
+        DeviceType.ALARM_PIR,
+        DeviceType.ALARM_KEYPAD,
+        DeviceType.ALARM_SIREN,
+        DeviceType.CCTV_CAMERA,
+        DeviceType.SMOKE_DETECTOR,
+        DeviceType.HEAT_DETECTOR,
+        DeviceType.KNX_KEYPAD,
+    }
+)
+
 _BLOCK_NAMES: dict[DeviceType, str] = {
     DeviceType.LUMINAIRE: "CYELEC_LUMINAIRE",
+    DeviceType.PENDANT_LIGHT: "CYELEC_PENDANT",
+    DeviceType.WALL_SCONCE: "CYELEC_MIRROR_LIGHT",
+    DeviceType.LINEAR_COVE: "CYELEC_LUMINAIRE",
+    DeviceType.OUTDOOR_PIR_LIGHT: "CYELEC_OUTDOOR_PIR",
+    DeviceType.GARDEN_BOLLARD: "CYELEC_LUMINAIRE",
     DeviceType.MIRROR_LIGHT: "CYELEC_MIRROR_LIGHT",
     DeviceType.EXHAUST_FAN: "CYELEC_EXHAUST_FAN",
     DeviceType.SWITCH: "CYELEC_SWITCH",
+    DeviceType.DIMMER_SWITCH: "CYELEC_DIMMER",
     DeviceType.FAN_ISOLATOR_3P: "CYELEC_FAN_ISOL",
     DeviceType.SOCKET_TWIN: "CYELEC_SOCKET_13A",
+    DeviceType.KITCHEN_FCU: "CYELEC_DP_20A",
     DeviceType.SPLIT_AC: "CYELEC_AC_ISOL",
+    DeviceType.SHUTTER_SWITCH: "CYELEC_SHUTTER",
+    DeviceType.HEAT_PUMP_OUTDOOR: "CYELEC_PLANT_BOX",
+    DeviceType.HEAT_PUMP_HYDROBOX: "CYELEC_PLANT_BOX",
+    DeviceType.UFH_MANIFOLD: "CYELEC_PLANT_BOX",
+    DeviceType.ROOM_THERMOSTAT: "CYELEC_THERMOSTAT",
+    DeviceType.VRV_OUTDOOR: "CYELEC_PLANT_BOX",
+    DeviceType.VRV_INDOOR_ISOLATOR: "CYELEC_AC_ISOL",
+    DeviceType.WATER_BOOSTER_PUMP: "CYELEC_PLANT_BOX",
+    DeviceType.GATE_MOTOR: "CYELEC_PLANT_BOX",
+    DeviceType.EV_WALLBOX: "CYELEC_EV_BOX",
+    DeviceType.POOL_SUB_DB: "CYELEC_DB",
     DeviceType.COOKER_CONTROL_UNIT: "CYELEC_CCU_45A",
     DeviceType.COOKER_OUTLET: "CYELEC_APPL",
     DeviceType.OVEN_OUTLET: "CYELEC_APPL",
@@ -119,6 +183,20 @@ _BLOCK_NAMES: dict[DeviceType, str] = {
     DeviceType.WATER_HEATER_ISOLATOR: "CYELEC_APPL",
     DeviceType.EAC_METER_CABINET: "CYELEC_METER_BOX",
     DeviceType.EARTH_PIT: "CYELEC_EARTH_PIT",
+    DeviceType.TELECOM_CABINET: "CYELEC_RACK",
+    DeviceType.DATA_RJ45: "CYELEC_DATA",
+    DeviceType.TV_OUTLET: "CYELEC_TV",
+    DeviceType.WIFI_AP: "CYELEC_WIFI",
+    DeviceType.INTERCOM_OUTDOOR: "CYELEC_INTERCOM",
+    DeviceType.INTERCOM_INDOOR: "CYELEC_INTERCOM",
+    DeviceType.ALARM_PANEL: "CYELEC_RACK",
+    DeviceType.ALARM_PIR: "CYELEC_PIR",
+    DeviceType.ALARM_KEYPAD: "CYELEC_INTERCOM",
+    DeviceType.ALARM_SIREN: "CYELEC_SIREN",
+    DeviceType.CCTV_CAMERA: "CYELEC_CCTV",
+    DeviceType.SMOKE_DETECTOR: "CYELEC_SMOKE",
+    DeviceType.HEAT_DETECTOR: "CYELEC_SMOKE",
+    DeviceType.KNX_KEYPAD: "CYELEC_KNX",
 }
 
 
@@ -205,9 +283,7 @@ def _ensure_iec_blocks(doc: Drawing, inv_scale: float) -> None:
         blk = doc.blocks.new(name="CYELEC_SWITCH")
         blk.add_circle((0.0, 0.0), radius=_s(65.0), dxfattribs={"layer": "0"})
         blk.add_line((0.0, 0.0), (_s(120.0), _s(120.0)), dxfattribs={"layer": "0"})
-        blk.add_line(
-            (_s(120.0), _s(120.0)), (_s(155.0), _s(85.0)), dxfattribs={"layer": "0"}
-        )
+        blk.add_line((_s(120.0), _s(120.0)), (_s(155.0), _s(85.0)), dxfattribs={"layer": "0"})
 
     # 3. Twin 13A BS 1363 Socket (wall-aligned semicircle + base bar + twin ticks)
     if "CYELEC_SOCKET_13A" not in doc.blocks:
@@ -343,8 +419,13 @@ def _ensure_iec_blocks(doc: Drawing, inv_scale: float) -> None:
             dxfattribs={"layer": "0"},
         )
         blk.add_lwpolyline(
-            [(-_s(90.0), -_s(60.0)), (-_s(90.0), _s(60.0)), (0.0, 0.0),
-             (_s(90.0), _s(60.0)), (_s(90.0), -_s(60.0))],
+            [
+                (-_s(90.0), -_s(60.0)),
+                (-_s(90.0), _s(60.0)),
+                (0.0, 0.0),
+                (_s(90.0), _s(60.0)),
+                (_s(90.0), -_s(60.0)),
+            ],
             dxfattribs={"layer": "0"},
         )
 
@@ -357,6 +438,110 @@ def _ensure_iec_blocks(doc: Drawing, inv_scale: float) -> None:
         blk.add_line((-_s(75.0), -_s(15.0)), (_s(75.0), -_s(15.0)), dxfattribs={"layer": "0"})
         blk.add_line((-_s(50.0), -_s(48.0)), (_s(50.0), -_s(48.0)), dxfattribs={"layer": "0"})
         blk.add_line((-_s(25.0), -_s(80.0)), (_s(25.0), -_s(80.0)), dxfattribs={"layer": "0"})
+
+    # 16. Stage 5 Blocks (Pendant, Dimmer, Outdoor PIR, Shutter, Plant, EV, ELV, Smoke & KNX)
+    def _box_block(name: str, w: float, h: float, diag: bool = False) -> None:
+        if name in doc.blocks:
+            return
+        b = doc.blocks.new(name=name)
+        hw, hh = _s(w), _s(h)
+        b.add_lwpolyline(
+            [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)], close=True, dxfattribs={"layer": "0"}
+        )
+        if diag:
+            b.add_line((-hw, -hh), (hw, hh), dxfattribs={"layer": "0"})
+
+    if "CYELEC_PENDANT" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_PENDANT")
+        b.add_circle((0.0, 0.0), radius=_s(130.0), dxfattribs={"layer": "0"})
+        b.add_circle((0.0, 0.0), radius=_s(65.0), dxfattribs={"layer": "0"})
+    if "CYELEC_OUTDOOR_PIR" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_OUTDOOR_PIR")
+        b.add_circle((0.0, 0.0), radius=_s(110.0), dxfattribs={"layer": "0"})
+        b.add_arc(
+            (0.0, 0.0),
+            radius=_s(165.0),
+            start_angle=210.0,
+            end_angle=330.0,
+            dxfattribs={"layer": "0"},
+        )
+    if "CYELEC_DIMMER" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_DIMMER")
+        b.add_circle((0.0, 0.0), radius=_s(65.0), dxfattribs={"layer": "0"})
+        b.add_line((0.0, 0.0), (_s(130.0), _s(130.0)), dxfattribs={"layer": "0"})
+        b.add_line((-_s(90.0), -_s(90.0)), (_s(90.0), _s(90.0)), dxfattribs={"layer": "0"})
+    if "CYELEC_SHUTTER" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_SHUTTER")
+        r = _s(90.0)
+        b.add_lwpolyline(
+            [(-r, -r), (r, -r), (r, r), (-r, r)], close=True, dxfattribs={"layer": "0"}
+        )
+        b.add_line((0.0, -_s(55.0)), (0.0, _s(55.0)), dxfattribs={"layer": "0"})
+        b.add_line((-_s(35.0), _s(25.0)), (0.0, _s(55.0)), dxfattribs={"layer": "0"})
+        b.add_line((_s(35.0), _s(25.0)), (0.0, _s(55.0)), dxfattribs={"layer": "0"})
+    if "CYELEC_THERMOSTAT" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_THERMOSTAT")
+        b.add_circle((0.0, 0.0), radius=_s(95.0), dxfattribs={"layer": "0"})
+        b.add_line((-_s(45.0), _s(40.0)), (_s(45.0), _s(40.0)), dxfattribs={"layer": "0"})
+        b.add_line((0.0, _s(40.0)), (0.0, -_s(50.0)), dxfattribs={"layer": "0"})
+    _box_block("CYELEC_PLANT_BOX", 180.0, 120.0, diag=True)
+    _box_block("CYELEC_EV_BOX", 150.0, 110.0, diag=False)
+    _box_block("CYELEC_RACK", 190.0, 115.0, diag=True)
+    if "CYELEC_DATA" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_DATA")
+        r = _s(100.0)
+        b.add_lwpolyline([(0.0, r), (-r, -r), (r, -r)], close=True, dxfattribs={"layer": "0"})
+    if "CYELEC_TV" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_TV")
+        r = _s(95.0)
+        b.add_lwpolyline(
+            [(-r, -r), (r, -r), (r, r), (-r, r)], close=True, dxfattribs={"layer": "0"}
+        )
+        b.add_line((-_s(50.0), _s(40.0)), (_s(50.0), _s(40.0)), dxfattribs={"layer": "0"})
+    if "CYELEC_WIFI" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_WIFI")
+        b.add_circle((0.0, 0.0), radius=_s(45.0), dxfattribs={"layer": "0"})
+        b.add_circle((0.0, 0.0), radius=_s(105.0), dxfattribs={"layer": "0"})
+        b.add_circle((0.0, 0.0), radius=_s(160.0), dxfattribs={"layer": "0"})
+    _box_block("CYELEC_INTERCOM", 105.0, 85.0, diag=False)
+    if "CYELEC_PIR" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_PIR")
+        b.add_arc(
+            (0.0, 0.0), radius=_s(120.0), start_angle=0.0, end_angle=90.0, dxfattribs={"layer": "0"}
+        )
+        b.add_line((0.0, 0.0), (_s(120.0), 0.0), dxfattribs={"layer": "0"})
+        b.add_line((0.0, 0.0), (0.0, _s(120.0)), dxfattribs={"layer": "0"})
+    if "CYELEC_SIREN" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_SIREN")
+        r = _s(110.0)
+        b.add_lwpolyline([(-r, -r), (r, -r), (0.0, r)], close=True, dxfattribs={"layer": "0"})
+    if "CYELEC_CCTV" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_CCTV")
+        b.add_lwpolyline(
+            [
+                (-_s(120.0), -_s(60.0)),
+                (_s(70.0), -_s(60.0)),
+                (_s(70.0), _s(60.0)),
+                (-_s(120.0), _s(60.0)),
+            ],
+            close=True,
+            dxfattribs={"layer": "0"},
+        )
+        b.add_lwpolyline(
+            [
+                (_s(70.0), -_s(30.0)),
+                (_s(140.0), -_s(65.0)),
+                (_s(140.0), _s(65.0)),
+                (_s(70.0), _s(30.0)),
+            ],
+            close=True,
+            dxfattribs={"layer": "0"},
+        )
+    if "CYELEC_SMOKE" not in doc.blocks:
+        b = doc.blocks.new(name="CYELEC_SMOKE")
+        b.add_circle((0.0, 0.0), radius=_s(100.0), dxfattribs={"layer": "0"})
+        b.add_circle((0.0, 0.0), radius=_s(50.0), dxfattribs={"layer": "0"})
+    _box_block("CYELEC_KNX", 95.0, 95.0, diag=True)
 
 
 def _conduit_layer_for_category(cat: CircuitCategory | None) -> str:
@@ -377,10 +562,7 @@ def _boxes_overlap(
     pad: float = 0.0,
 ) -> bool:
     return not (
-        a[2] + pad <= b[0]
-        or b[2] + pad <= a[0]
-        or a[3] + pad <= b[1]
-        or b[3] + pad <= a[1]
+        a[2] + pad <= b[0] or b[2] + pad <= a[0] or a[3] + pad <= b[1] or b[3] + pad <= a[1]
     )
 
 
@@ -404,13 +586,13 @@ def _place_decollided_label(
     for rad in (r1, r2, r3):
         candidates.extend(
             [
-                (x + rad, y + rad * 0.35),              # E-NE
-                (x + rad, y - rad * 0.35 - h),          # E-SE
-                (x - rad - w, y + rad * 0.35),          # W-NW
-                (x - rad - w, y - rad * 0.35 - h),      # W-SW
-                (x - w * 0.5, y + rad),                 # N
-                (x - w * 0.5, y - rad - h),             # S
-                (x + rad * 0.7, y + rad * 0.85),        # NE
+                (x + rad, y + rad * 0.35),  # E-NE
+                (x + rad, y - rad * 0.35 - h),  # E-SE
+                (x - rad - w, y + rad * 0.35),  # W-NW
+                (x - rad - w, y - rad * 0.35 - h),  # W-SW
+                (x - w * 0.5, y + rad),  # N
+                (x - w * 0.5, y - rad - h),  # S
+                (x + rad * 0.7, y + rad * 0.85),  # NE
                 (x - rad * 0.7 - w, y - rad * 0.85 - h),  # SW
             ]
         )
@@ -500,7 +682,7 @@ def render_electrical_layout_dxf(
     def _s(v_mm: float) -> float:
         return v_mm * inv_scale
 
-    for layer_name, color_idx in ELECTRICAL_LAYERS.items():
+    for layer_name, color_idx in {**ELECTRICAL_LAYERS, **STAGE5_EXTRA_LAYERS}.items():
         if layer_name not in doc.layers:
             doc.layers.add(layer_name, color=color_idx)
 
@@ -519,12 +701,10 @@ def render_electrical_layout_dxf(
         dx, dy = _s(db_pt.x_mm), _s(db_pt.y_mm)
         msp.add_blockref("CYELEC_DB", (dx, dy), dxfattribs={"layer": "E-TITLE"})
         occupied_boxes.append((dx - _s(240.0), dy - _s(130.0), dx + _s(240.0), dy + _s(130.0)))
-        lbl_x, lbl_y = _place_decollided_label(
-            dx, dy, db_id, _s(110.0), occupied_boxes, inv_scale
+        lbl_x, lbl_y = _place_decollided_label(dx, dy, db_id, _s(110.0), occupied_boxes, inv_scale)
+        msp.add_text(db_id, dxfattribs={"layer": "E-TITLE", "height": _s(110.0)}).set_placement(
+            (lbl_x, lbl_y)
         )
-        msp.add_text(
-            db_id, dxfattribs={"layer": "E-TITLE", "height": _s(110.0)}
-        ).set_placement((lbl_x, lbl_y))
 
     # 1. Section 701 wet-zone polygons (Power & Combined sheets)
     if discipline in ("combined", "power"):
@@ -548,11 +728,19 @@ def render_electrical_layout_dxf(
                     dxfattribs={"layer": "E-WETZONE-EXCL"},
                 )
 
-    # 2. Split-layer & parallel-offset NetworkX conduit runs + homerun ticks + trunk callouts
+    # 2. Cyprus Home-Run Arrows + Loop Arcs (full NetworkX routes kept on E-ROUTE-CONDUIT)
     circuit_map = {c.spec.circuit_id: c for c in result.design.circuits}
     circuit_cat_map = {c.spec.circuit_id: c.spec.category for c in result.design.circuits}
+    drafting_style = result.design.residential_brief.conduit_drafting_style
+    use_homerun_style = drafting_style == "homerun_arcs"
+
+    if use_homerun_style and "E-ROUTE-CONDUIT" in doc.layers:
+        with suppress(Exception):
+            doc.layers.get("E-ROUTE-CONDUIT").off()
 
     def _route_included(cid: str) -> bool:
+        if discipline == "elv":
+            return False
         cat = circuit_cat_map.get(cid)
         is_lite = cat in (CircuitCategory.LIGHTING, CircuitCategory.EMERGENCY_LIGHTING)
         if discipline == "lighting":
@@ -562,6 +750,12 @@ def render_electrical_layout_dxf(
         return True
 
     active_routes = [rc for rc in spatial.routed_circuits if _route_included(rc.circuit_id)]
+    devs_by_id_all = {d.device_id: d for d in spatial.devices}
+    board_locs: dict[str, tuple[float, float]] = {
+        db_anchor.id: (db_anchor.location_mm.x_mm, db_anchor.location_mm.y_mm)
+    }
+    for sb in result.design.building.sub_boards:
+        board_locs[sb.board_id] = (sb.location_mm.x_mm, sb.location_mm.y_mm)
 
     # Index coincident corridor segments so parallel runs fan out perpendicularly (35 mm pitch)
     seg_circuits: dict[tuple[tuple[int, int], tuple[int, int]], list[str]] = defaultdict(list)
@@ -578,6 +772,7 @@ def render_electrical_layout_dxf(
     trunk_callout_anchors: list[tuple[float, float, str, str]] = []
     for rc in active_routes:
         cond_layer = _conduit_layer_for_category(circuit_cat_map.get(rc.circuit_id))
+        route_layer = "E-ROUTE-CONDUIT" if use_homerun_style else cond_layer
         solved_c = circuit_map.get(rc.circuit_id)
         for seg_idx, seg in enumerate(rc.segments):
             x1, y1 = seg.start_mm.x_mm, seg.start_mm.y_mm
@@ -600,10 +795,10 @@ def render_electrical_layout_dxf(
 
             sx1, sy1 = _s(x1 + ox_mm), _s(y1 + oy_mm)
             sx2, sy2 = _s(x2 + ox_mm), _s(y2 + oy_mm)
-            msp.add_line((sx1, sy1), (sx2, sy2), dxfattribs={"layer": cond_layer})
+            msp.add_line((sx1, sy1), (sx2, sy2), dxfattribs={"layer": route_layer})
 
-            # Crisp homerun arrow tick on the first DB departure segment
-            if seg_idx == 0:
+            # In full_routed mode, draw departure arrow right at DB
+            if (not use_homerun_style) and seg_idx == 0:
                 seg_l = math.hypot(sx2 - sx1, sy2 - sy1)
                 if seg_l > _s(250.0):
                     ux, uy = (sx2 - sx1) / seg_l, (sy2 - sy1) / seg_l
@@ -626,13 +821,92 @@ def render_electrical_layout_dxf(
                         callout = f"{rc.circuit_id}:{conduit_d} {cores}x{solved_c.cable_mm2:g}"
                         trunk_callout_anchors.append((hx, hy, callout, cond_layer))
 
-    # 3. Placed IEC 60617 named BLOCK references (wall-rotated) + de-collided circuit tags
+        # Cyprus Consultant Home-Run Drafting: clean daisy-chain arcs + Home-Run Arrow toward DB
+        if use_homerun_style:
+            c_devs = [devs_by_id_all[did] for did in rc.device_ids if did in devs_by_id_all]
+            # Filter devices to current discipline
+            if discipline == "lighting":
+                c_devs = [d for d in c_devs if d.device_type in _LIGHTING_DEVICE_TYPES]
+            elif discipline == "power":
+                c_devs = [d for d in c_devs if d.device_type in _POWER_DEVICE_TYPES]
+            if c_devs:
+                db_xy = board_locs.get(
+                    solved_c.spec.board_id if solved_c else db_anchor.id,
+                    (db_anchor.location_mm.x_mm, db_anchor.location_mm.y_mm),
+                )
+                # Order devices nearest to DB first for clean daisy-chain arcs
+                ordered = sorted(
+                    c_devs,
+                    key=lambda d: math.hypot(
+                        d.location_mm.x_mm - db_xy[0], d.location_mm.y_mm - db_xy[1]
+                    ),
+                )
+                # Connect consecutive power/socket/shutter devices with clean curved arcs
+                if cond_layer != "E-COND-LITE" and len(ordered) >= 2:
+                    for a_dev, b_dev in zip(ordered, ordered[1:], strict=False):
+                        dist_mm = math.hypot(
+                            b_dev.location_mm.x_mm - a_dev.location_mm.x_mm,
+                            b_dev.location_mm.y_mm - a_dev.location_mm.y_mm,
+                        )
+                        if 100.0 <= dist_mm <= 6500.0:
+                            _add_dashed_curve(
+                                msp,
+                                (_s(a_dev.location_mm.x_mm), _s(a_dev.location_mm.y_mm)),
+                                (_s(b_dev.location_mm.x_mm), _s(b_dev.location_mm.y_mm)),
+                                layer=cond_layer,
+                                bulge_frac=0.14,
+                                dash_count=7,
+                            )
+                # Draw crisp Home-Run Arrow stub from first device pointing toward its DB
+                first_d = ordered[0]
+                fx, fy = _s(first_d.location_mm.x_mm), _s(first_d.location_mm.y_mm)
+                dx_db = _s(db_xy[0]) - fx
+                dy_db = _s(db_xy[1]) - fy
+                d_len = math.hypot(dx_db, dy_db)
+                ux, uy = (dx_db / d_len, dy_db / d_len) if d_len > 1e-3 else (1.0, 0.0)
+                stub = _s(520.0)
+                hx, hy = fx + ux * stub, fy + uy * stub
+                msp.add_line((fx, fy), (hx, hy), dxfattribs={"layer": cond_layer})
+                tick = _s(90.0)
+                msp.add_line(
+                    (hx, hy),
+                    (hx - ux * tick - uy * tick * 0.6, hy - uy * tick + ux * tick * 0.6),
+                    dxfattribs={"layer": cond_layer},
+                )
+                msp.add_line(
+                    (hx, hy),
+                    (hx - ux * tick + uy * tick * 0.6, hy - uy * tick - ux * tick * 0.6),
+                    dxfattribs={"layer": cond_layer},
+                )
+                if solved_c is not None and discipline != "combined":
+                    cores = 5 if solved_c.spec.is_three_phase else 3
+                    conduit_d = "25mm" if solved_c.cable_mm2 >= 4.0 else "20mm"
+                    b_tag = solved_c.spec.board_id
+                    callout = (
+                        f"->{b_tag} {rc.circuit_id}:{conduit_d} {cores}x{solved_c.cable_mm2:g}"
+                    )
+                    trunk_callout_anchors.append((hx, hy, callout, cond_layer))
+            elif rc.segments:
+                # Fallback home-run tick at DB departure if circuit had no indoor devices
+                s0 = rc.segments[0]
+                sx1, sy1 = _s(s0.start_mm.x_mm), _s(s0.start_mm.y_mm)
+                sx2, sy2 = _s(s0.end_mm.x_mm), _s(s0.end_mm.y_mm)
+                msp.add_line((sx1, sy1), (sx2, sy2), dxfattribs={"layer": cond_layer})
+
+    # 3. Placed IEC 60617 / ELV named BLOCK references (wall-rotated) + de-collided circuit tags
     if discipline == "lighting":
         active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_DEVICE_TYPES]
     elif discipline == "power":
         active_devices = [d for d in spatial.devices if d.device_type in _POWER_DEVICE_TYPES]
+    elif discipline == "elv":
+        active_devices = [d for d in spatial.devices if d.device_type in _ELV_DEVICE_TYPES]
     else:
-        active_devices = list(spatial.devices)
+        # Combined LV Coordination sheet (Lighting + Power, excluding ELV to avoid sheet clutter)
+        active_devices = [
+            d
+            for d in spatial.devices
+            if d.device_type in (_LIGHTING_DEVICE_TYPES | _POWER_DEVICE_TYPES)
+        ]
 
     # Pre-seed occupied_boxes with every device footprint so labels never print over symbols
     for dev in active_devices:
@@ -647,6 +921,42 @@ def render_electrical_layout_dxf(
             tag = "EAC-MTR H+1500"
         elif dev.device_type == DeviceType.EARTH_PIT:
             tag = "TT-EARTH-PIT"
+        elif dev.device_type == DeviceType.TELECOM_CABINET:
+            tag = "9U-RACK/ONT H+1800"
+        elif dev.device_type == DeviceType.DATA_RJ45:
+            tag = f"2xCAT6:{short_id}"
+        elif dev.device_type == DeviceType.TV_OUTLET:
+            tag = f"TV/SAT:{short_id}"
+        elif dev.device_type == DeviceType.WIFI_AP:
+            tag = f"WIFI-AP:{short_id}"
+        elif dev.device_type == DeviceType.INTERCOM_OUTDOOR:
+            tag = "V-INTERCOM-EXT"
+        elif dev.device_type == DeviceType.INTERCOM_INDOOR:
+            tag = f"V-MON:{short_id} H+1500"
+        elif dev.device_type == DeviceType.ALARM_PANEL:
+            tag = "ALARM-PANEL"
+        elif dev.device_type == DeviceType.ALARM_KEYPAD:
+            tag = "KP H+1400"
+        elif dev.device_type == DeviceType.ALARM_PIR:
+            tag = f"PIR:{short_id}"
+        elif dev.device_type == DeviceType.ALARM_SIREN:
+            tag = "SIREN H+3000"
+        elif dev.device_type == DeviceType.CCTV_CAMERA:
+            tag = f"CCTV:{short_id} IP67"
+        elif dev.device_type == DeviceType.SMOKE_DETECTOR:
+            tag = f"{dev.circuit_id or 'SD'}:SMOKE"
+        elif dev.device_type == DeviceType.HEAT_DETECTOR:
+            tag = f"{dev.circuit_id or 'HD'}:HEAT"
+        elif dev.device_type == DeviceType.KNX_KEYPAD:
+            tag = f"KNX:{short_id} H+1200"
+        elif dev.device_type == DeviceType.DIMMER_SWITCH:
+            tag = f"{dev.circuit_id or '?'}:{short_id} DIM"
+        elif dev.device_type == DeviceType.SHUTTER_SWITCH:
+            tag = f"{dev.circuit_id or '?'}:SH H+1200"
+        elif dev.device_type == DeviceType.ROOM_THERMOSTAT:
+            tag = f"TH:{short_id} H+1500"
+        elif dev.device_type == DeviceType.EV_WALLBOX:
+            tag = f"{dev.circuit_id or 'EV'}:EV-WB H+1300"
         elif dev.device_type == DeviceType.SWITCH:
             st = dev.switch_type or "1G1W"
             grp = dev.switch_group or "a"
@@ -654,7 +964,12 @@ def render_electrical_layout_dxf(
             tag = f"{dev.circuit_id or '?'}:{short_id} {st}({grp}){h_sfx}"
         elif dev.device_type == DeviceType.FAN_ISOLATOR_3P:
             tag = f"{dev.circuit_id or '?'}:3P-FAN H+2200"
-        elif dev.device_type == DeviceType.LUMINAIRE:
+        elif dev.device_type in (
+            DeviceType.LUMINAIRE,
+            DeviceType.PENDANT_LIGHT,
+            DeviceType.OUTDOOR_PIR_LIGHT,
+            DeviceType.GARDEN_BOLLARD,
+        ):
             grp_s = f"({dev.switch_group})" if dev.switch_group else ""
             ip_s = f" {dev.ip_rating}" if dev.ip_rating != "IP20" else ""
             tag = f"{dev.circuit_id or '?'}:{short_id}{grp_s}{ip_s}"
@@ -666,7 +981,7 @@ def render_electrical_layout_dxf(
             tag = f"{dev.circuit_id or '?'}:45A-CCU H+1150"
         elif dev.device_type == DeviceType.WATER_HEATER_DP_SWITCH:
             tag = f"{dev.circuit_id or '?'}:20A-DP H+1200"
-        elif dev.device_type == DeviceType.SPLIT_AC:
+        elif dev.device_type in (DeviceType.SPLIT_AC, DeviceType.VRV_INDOOR_ISOLATOR):
             tag = f"{dev.circuit_id or '?'}:{short_id} H+2200"
         elif dev.device_type == DeviceType.SOCKET_TWIN and dev.mounting_height_mm >= 1000.0:
             tag = f"{dev.circuit_id or '?'}:{short_id} H+{int(dev.mounting_height_mm)}"
@@ -682,23 +997,65 @@ def render_electrical_layout_dxf(
 
         if dev.device_type in (
             DeviceType.LUMINAIRE,
+            DeviceType.PENDANT_LIGHT,
+            DeviceType.WALL_SCONCE,
+            DeviceType.LINEAR_COVE,
+            DeviceType.OUTDOOR_PIR_LIGHT,
+            DeviceType.GARDEN_BOLLARD,
             DeviceType.MIRROR_LIGHT,
             DeviceType.EXHAUST_FAN,
         ):
             layer = "E-LITE"
             rot = 0.0 if dev.device_type != DeviceType.MIRROR_LIGHT else dev.wall_angle_deg
-        elif dev.device_type in (DeviceType.SWITCH, DeviceType.FAN_ISOLATOR_3P):
+        elif dev.device_type in (
+            DeviceType.SWITCH,
+            DeviceType.DIMMER_SWITCH,
+            DeviceType.FAN_ISOLATOR_3P,
+        ):
             layer = "E-SWIT"
             rot = dev.wall_angle_deg
-        elif dev.device_type == DeviceType.SOCKET_TWIN:
+        elif dev.device_type in (DeviceType.SOCKET_TWIN, DeviceType.KITCHEN_FCU):
             layer = "E-SOCK"
             rot = dev.wall_angle_deg
-        elif dev.device_type == DeviceType.SPLIT_AC:
+        elif dev.device_type in (
+            DeviceType.SPLIT_AC,
+            DeviceType.VRV_OUTDOOR,
+            DeviceType.VRV_INDOOR_ISOLATOR,
+            DeviceType.HEAT_PUMP_OUTDOOR,
+            DeviceType.HEAT_PUMP_HYDROBOX,
+            DeviceType.UFH_MANIFOLD,
+            DeviceType.ROOM_THERMOSTAT,
+        ):
             layer = "E-AC"
             rot = dev.wall_angle_deg
         elif dev.device_type in (DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT):
             layer = "E-EARTHING"
             rot = 0.0
+        elif dev.device_type in (
+            DeviceType.TELECOM_CABINET,
+            DeviceType.DATA_RJ45,
+            DeviceType.TV_OUTLET,
+            DeviceType.WIFI_AP,
+        ):
+            layer = "E-ELV-DATA"
+            rot = dev.wall_angle_deg
+        elif dev.device_type in (
+            DeviceType.INTERCOM_OUTDOOR,
+            DeviceType.INTERCOM_INDOOR,
+            DeviceType.ALARM_PANEL,
+            DeviceType.ALARM_PIR,
+            DeviceType.ALARM_KEYPAD,
+            DeviceType.ALARM_SIREN,
+            DeviceType.CCTV_CAMERA,
+        ):
+            layer = "E-ELV-SEC"
+            rot = dev.wall_angle_deg
+        elif dev.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
+            layer = "E-ELV-SMOKE"
+            rot = 0.0
+        elif dev.device_type == DeviceType.KNX_KEYPAD:
+            layer = "E-KNX"
+            rot = dev.wall_angle_deg
         else:
             layer = "E-APPL"
             rot = dev.wall_angle_deg
@@ -727,6 +1084,47 @@ def render_electrical_layout_dxf(
                 bulge = 0.16 if idx % 2 == 0 else -0.16
                 _add_dashed_curve(msp, p_sw, p_tgt, layer="E-SWIT-LEG", bulge_frac=bulge)
 
+    # 3b-elv. On E-103 ELV sheet, draw interlinked smoke/heat detector loop arcs & KNX bus arcs
+    if discipline == "elv":
+        smokes = [
+            d
+            for d in active_devices
+            if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR)
+        ]
+        for a_d, b_d in zip(smokes, smokes[1:], strict=False):
+            if (
+                math.hypot(
+                    b_d.location_mm.x_mm - a_d.location_mm.x_mm,
+                    b_d.location_mm.y_mm - a_d.location_mm.y_mm,
+                )
+                <= 8500.0
+            ):
+                _add_dashed_curve(
+                    msp,
+                    (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
+                    (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
+                    layer="E-ELV-SMOKE",
+                    bulge_frac=0.14,
+                    dash_count=7,
+                )
+        knx_devs = [d for d in active_devices if d.device_type == DeviceType.KNX_KEYPAD]
+        for a_d, b_d in zip(knx_devs, knx_devs[1:], strict=False):
+            if (
+                math.hypot(
+                    b_d.location_mm.x_mm - a_d.location_mm.x_mm,
+                    b_d.location_mm.y_mm - a_d.location_mm.y_mm,
+                )
+                <= 8500.0
+            ):
+                _add_dashed_curve(
+                    msp,
+                    (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
+                    (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
+                    layer="E-KNX",
+                    bulge_frac=-0.14,
+                    dash_count=7,
+                )
+
     # 3c. De-collided conduit size & wire-count callouts on discipline-specific sheets
     for cx, cy, callout, cond_layer in trunk_callout_anchors:
         lx, ly = _place_decollided_label(cx, cy, callout, _s(55.0), occupied_boxes, inv_scale)
@@ -751,7 +1149,9 @@ def render_electrical_layout_dxf(
     # 5. Exact True-Scale ISO Paper-Space Sheet(s) with Graphical Legend, Scale Bar & North Arrow
     all_rooms = result.design.building.rooms
     base_dwg_no = (
-        "E-101" if discipline == "lighting" else ("E-102" if discipline == "power" else "E-100")
+        "E-101"
+        if discipline == "lighting"
+        else ("E-102" if discipline == "power" else ("E-103" if discipline == "elv" else "E-100"))
     )
     _add_iso_paper_space_sheet(
         doc,
@@ -836,7 +1236,9 @@ def _add_iso_paper_space_sheet(
     disc_pfx = (
         "E101-LITE"
         if discipline == "lighting"
-        else ("E102-PWR" if discipline == "power" else "EAC")
+        else (
+            "E102-PWR" if discipline == "power" else ("E103-ELV" if discipline == "elv" else "EAC")
+        )
     )
     tab_prefix = f"{disc_pfx}-{floor_tag}" if floor_tag else disc_pfx
     tab_name = f"{tab_prefix}-{size_tag}-1-{scale_denom}"
@@ -886,32 +1288,41 @@ def _add_iso_paper_space_sheet(
 
     if discipline == "lighting":
         sym_items = [
-            ("E-LITE", "Luminaire (IP20/44/65)", "lum"),
-            ("E-SWIT", "Switch 1G/2G/2W (+1.2m)", "sw"),
+            ("E-LITE", "Luminaire / Pendant / PIR", "lum"),
+            ("E-SWIT", "Switch 1G/2G/2W/Dim (+1.2m)", "sw"),
             ("E-SWIT", "3P Fan Isolator (+2.2m)", "appl"),
             ("E-SWIT-LEG", "Switch Control Leg (a/b)", "line"),
-            ("E-COND-LITE", "Lighting Conduit (20mm)", "line"),
+            ("E-COND-LITE", "Lighting Home-Run Arrow", "line"),
             ("E-TITLE", "Distribution Board (+1.6m)", "box"),
         ]
     elif discipline == "power":
         sym_items = [
-            ("E-SOCK", "Twin 13A Socket (+0.45/1.15m)", "sock"),
-            ("E-AC", "20A DP A/C Isolator (+2.2m)", "ac"),
-            ("E-APPL", "45A CCU / 20A DP / Appl", "appl"),
-            ("E-COND-PWR", "Power Ring/Radial Conduit", "line"),
-            ("E-COND-DED", "Dedicated Heavy Conduit", "line"),
+            ("E-SOCK", "Twin 13A Socket / Kitchen FCU", "sock"),
+            ("E-AC", "A/C / VRV / Heat Pump / Thermo", "ac"),
+            ("E-APPL", "Shutters / CCU / EV / Pump", "appl"),
+            ("E-COND-PWR", "Power Loop & Home-Run", "line"),
+            ("E-COND-DED", "Dedicated Heavy Feeder", "line"),
             ("E-EARTHING", "EAC Meter / TT Earth Pit", "box"),
             ("E-WETZONE-EXCL", "EAC 2.5m/3.0m Socket Excl", "box"),
+        ]
+    elif discipline == "elv":
+        sym_items = [
+            ("E-ELV-DATA", "9U Rack / 2xCat6 / TV / Wi-Fi", "box"),
+            ("E-ELV-SEC", "Video Intercom (Out / In)", "appl"),
+            ("E-ELV-SEC", "Alarm Panel / PIR / Keypad", "sw"),
+            ("E-ELV-SEC", "IP67 PoE CCTV Camera", "ac"),
+            ("E-ELV-SMOKE", "BS 5839-6 Smoke / Heat Det", "lum"),
+            ("E-KNX", "KNX Scene Keypad & Bus", "line"),
         ]
     else:
         sym_items = [
             ("E-LITE", "Luminaire / Fan / Mirror", "lum"),
-            ("E-SWIT", "Switch 1G/2G/2W + 3P Fan", "sw"),
+            ("E-SWIT", "Switch 1G/2G/2W + Dimmer", "sw"),
             ("E-SOCK", "Twin 13A Socket (+0.45/1.15m)", "sock"),
-            ("E-AC", "Split A/C Isolator (+2.2m)", "ac"),
-            ("E-APPL", "45A CCU / 20A DP / Appl", "appl"),
-            ("E-COND-LITE", "Lighting Conduit & Legs", "line"),
-            ("E-COND-PWR", "Power Conduit", "line"),
+            ("E-AC", "HVAC / A/C / Heat Pump", "ac"),
+            ("E-APPL", "Shutters / CCU / EV / Plant", "appl"),
+            ("E-COND-LITE", "Lighting Home-Run & Legs", "line"),
+            ("E-COND-PWR", "Power Loops & Home-Runs", "line"),
             ("E-COND-DED", "Dedicated Feeder", "line"),
             ("E-EARTHING", "DB / EAC Meter / Earth Pit", "box"),
         ]
@@ -989,11 +1400,14 @@ def _add_iso_paper_space_sheet(
     disc_title = (
         "LIGHTING & SWITCHING"
         if discipline == "lighting"
-        else ("POWER & ACCESSORIES" if discipline == "power" else "EAC / ETEK LAYOUT")
+        else (
+            "POWER & MECHANICAL PLANT"
+            if discipline == "power"
+            else ("ELV, SECURITY & LIFE SAFETY" if discipline == "elv" else "EAC / ETEK LAYOUT")
+        )
     )
     earth_txt = (
-        f"EARTH: {result.design.earthing_system.value} "
-        f"({result.design.ze_or_ra_ohm:.1f} OHM)"
+        f"EARTH: {result.design.earthing_system.value} ({result.design.ze_or_ra_ohm:.1f} OHM)"
     )
     plot_txt = (
         f"PLOT: {meta.district[:10]} {meta.sheet_plan}/{meta.plot_no}".strip()

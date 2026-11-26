@@ -218,13 +218,13 @@ def export_load_schedule_xlsx(
     # Totals row
     totals_row = last_data_row + 1
     ws.cell(row=totals_row, column=1, value="TOTAL").font = _BOLD_FONT
-    ws.cell(row=totals_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})").font = (
-        _BOLD_FONT
-    )
+    ws.cell(
+        row=totals_row, column=6, value=f"=SUM(F{first_data_row}:F{last_data_row})"
+    ).font = _BOLD_FONT
     ws.cell(row=totals_row, column=6).number_format = "#,##0.0"
-    ws.cell(row=totals_row, column=8, value=f"=SUM(H{first_data_row}:H{last_data_row})").font = (
-        _BOLD_FONT
-    )
+    ws.cell(
+        row=totals_row, column=8, value=f"=SUM(H{first_data_row}:H{last_data_row})"
+    ).font = _BOLD_FONT
     ws.cell(row=totals_row, column=8).number_format = "#,##0.0"
     if result.eac_compliance.supply_phases == 1:
         ws.cell(
@@ -240,9 +240,9 @@ def export_load_schedule_xlsx(
 
     # 3-Phase Load Balance Formula Summary Block
     bal_hdr = totals_row + 2
-    ws.cell(row=bal_hdr, column=1, value="3-Phase Load Balance Summary (Live Formulas)").font = (
-        _BOLD_FONT
-    )
+    ws.cell(
+        row=bal_hdr, column=1, value="3-Phase Load Balance Summary (Live Formulas)"
+    ).font = _BOLD_FONT
     l1_row = bal_hdr + 1
     l2_row = bal_hdr + 2
     l3_row = bal_hdr + 3
@@ -596,26 +596,44 @@ def export_load_schedule_xlsx(
         else "None"
     )
     ev_str = (
-        f"{result.building.ev_charger_kw:g} kW"
-        if result.building.ev_charger_kw > 0
-        else "None"
+        f"{result.building.ev_charger_kw:g} kW" if result.building.ev_charger_kw > 0 else "None"
     )
     app_rows: list[tuple[str, str, str, str]] = [
-        ("A. Premises", "Building Classification", "Κατηγορία Κτιρίου",
-         result.building.building_type.value),
-        ("A. Premises", "Total Floor Area (m²)", "Συνολικό Εμβαδόν",
-         f"{result.building.total_floor_area_m2:.2f} m²"),
-        ("A. Premises", "District / Sheet / Plan / Plot", "Επαρχία / Φύλλο / Σχέδιο / Τεμάχιο",
-         "[Complete before EAC filing]"),
-        ("A. Premises", "EAC Tariff Code", "Διατίμηση ΑΗΚ",
-         "Code 10 (Commercial)"
-         if result.building.building_type.value in ("office", "shop", "workshop")
-         else "Code 01 (Domestic)"),
+        (
+            "A. Premises",
+            "Building Classification",
+            "Κατηγορία Κτιρίου",
+            result.building.building_type.value,
+        ),
+        (
+            "A. Premises",
+            "Total Floor Area (m²)",
+            "Συνολικό Εμβαδόν",
+            f"{result.building.total_floor_area_m2:.2f} m²",
+        ),
+        (
+            "A. Premises",
+            "District / Sheet / Plan / Plot",
+            "Επαρχία / Φύλλο / Σχέδιο / Τεμάχιο",
+            "[Complete before EAC filing]",
+        ),
+        (
+            "A. Premises",
+            "EAC Tariff Code",
+            "Διατίμηση ΑΗΚ",
+            "Code 10 (Commercial)"
+            if result.building.building_type.value in ("office", "shop", "workshop")
+            else "Code 01 (Domestic)",
+        ),
         ("B. Ε-ΔΔ-516", "Consulting Firm", "Μελετητικό Γραφείο ΕΤΕΚ", firm_str),
         ("B. Ε-ΔΔ-516", "Lead Engineer", "Μελετητής Ηλεκτρολόγος Μηχανικός", eng_str),
         ("B. Ε-ΔΔ-516", "ETEK Reg. No.", "Αρ. Μητρώου ΕΤΕΚ", etek_str),
-        ("B. Ε-ΔΔ-514", "Licensed Installer (Class A/B/C)", "Αδειούχος Εγκαταστάτης",
-         "[Contractor Name & HMY Licence No.]"),
+        (
+            "B. Ε-ΔΔ-514",
+            "Licensed Installer (Class A/B/C)",
+            "Αδειούχος Εγκαταστάτης",
+            "[Contractor Name & HMY Licence No.]",
+        ),
         ("C. Supply", "Requested EAC Tier", "Αιτούμενη Παροχή ΑΗΚ", eac.recommended_supply_tier),
         ("C. Supply", "Connected / Diversified kVA", "Εγκατεστημένη / Ταυτόχρονη", kva_str),
         ("C. Supply", "Peak Phase Current", "Μέγιστο Ρεύμα Φάσης", peak_str),
@@ -624,8 +642,12 @@ def export_load_schedule_xlsx(
         ("C. Supply", "Earthing & Ze/Ra", "Σύστημα Γείωσης", earth_str),
         ("D. Systems", "PV Capacity (kVA)", "Φωτοβολταϊκά (Φ/Β)", pv_str),
         ("D. Systems", "EV Charger (Sec 722)", "Φορτιστής EV", ev_str),
-        ("E. Sign-Off", "ETEK Statutory Stamp (Ε-ΔΔ-516)", "Σφραγίδα & Υπογραφή ΕΤΕΚ",
-         "REQUIRED BEFORE EAC SUBMISSION"),
+        (
+            "E. Sign-Off",
+            "ETEK Statutory Stamp (Ε-ΔΔ-516)",
+            "Σφραγίδα & Υπογραφή ΕΤΕΚ",
+            "REQUIRED BEFORE EAC SUBMISSION",
+        ),
     ]
     for app_r_idx, app_row in enumerate(app_rows, start=5):
         for app_c_idx, app_val in enumerate(app_row, start=1):
@@ -750,10 +772,7 @@ def export_load_schedule_xlsx(
             ip_val = lums[0].ip_rating
             lux_val = lums[0].target_lux or 150
             watts = round(
-                sum(
-                    (d.luminaire_wattage_w or 15.0)
-                    for d in (lums + mirrors + fans)
-                ),
+                sum((d.luminaire_wattage_w or 15.0) for d in (lums + mirrors + fans)),
                 1,
             )
         else:
@@ -810,6 +829,60 @@ def export_load_schedule_xlsx(
             lc = ws6.cell(row=r_idx, column=c_idx, value=val)
             lc.font = _BOLD_FONT if c_idx == 1 else _BODY_FONT
             lc.border = _CELL_BORDER
+
+    # CIBSE / BS EN 12464-1 Room-by-Room Lumen Method Photometric Verification
+    if result.lumen_checks:
+        p_row = len(result.building.rooms) + 7
+        ws6.cell(
+            row=p_row,
+            column=1,
+            value="CIBSE / BS EN 12464-1 LUMEN METHOD PHOTOMETRIC VERIFICATION",
+        ).font = _TITLE_FONT
+        p_hdrs = [
+            "Room ID",
+            "Room",
+            "Floor",
+            "Area (m²)",
+            "Fixture Type",
+            "Qty",
+            "W/Fix",
+            "Lumens/Fix",
+            "UF",
+            "MF",
+            "Target (lux)",
+            "Achieved (lux)",
+            "Status",
+        ]
+        p_hdr_row = p_row + 1
+        for c_idx, h_txt in enumerate(p_hdrs, start=1):
+            hc = ws6.cell(row=p_hdr_row, column=c_idx, value=h_txt)
+            hc.font = _HEADER_FONT
+            hc.fill = _NAVY_FILL
+            hc.border = _CELL_BORDER
+        for off, chk in enumerate(result.lumen_checks, start=1):
+            rr = p_hdr_row + off
+            lumen_vals: list[str | int | float] = [
+                chk.room_id,
+                chk.room_label,
+                chk.floor,
+                chk.area_m2,
+                chk.fixture_type,
+                chk.luminaire_count,
+                chk.watts_per_fixture,
+                chk.lumens_per_fixture,
+                chk.utilization_factor,
+                chk.maintenance_factor,
+                chk.target_lux,
+                chk.achieved_lux,
+                "PASS" if chk.compliant else "CHECK",
+            ]
+            for c_idx, val in enumerate(lumen_vals, start=1):
+                cell = ws6.cell(row=rr, column=c_idx, value=val)
+                cell.font = _BOLD_FONT if c_idx in (1, 13) else _BODY_FONT
+                cell.border = _CELL_BORDER
+                if c_idx == 13:
+                    cell.fill = _PASS_FILL if chk.compliant else _WARN_FILL
+
     _autosize_columns(ws6, max_width=36)
 
     wb.save(str(out_path))

@@ -8,23 +8,41 @@ from typing import Literal
 
 from cyelec.models.building import Point2D
 from cyelec.models.electrical import CircuitCategory
-from cyelec.models.spatial import DeviceType, Phase2DesignResult
+from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
 
-SvgDiscipline = Literal["combined", "lighting", "power"]
+SvgDiscipline = Literal["combined", "lighting", "power", "elv"]
 
 _LIGHTING_TYPES: frozenset[DeviceType] = frozenset(
     {
         DeviceType.LUMINAIRE,
+        DeviceType.PENDANT_LIGHT,
+        DeviceType.WALL_SCONCE,
+        DeviceType.LINEAR_COVE,
+        DeviceType.OUTDOOR_PIR_LIGHT,
+        DeviceType.GARDEN_BOLLARD,
         DeviceType.MIRROR_LIGHT,
         DeviceType.EXHAUST_FAN,
         DeviceType.SWITCH,
+        DeviceType.DIMMER_SWITCH,
         DeviceType.FAN_ISOLATOR_3P,
     }
 )
 _POWER_TYPES: frozenset[DeviceType] = frozenset(
     {
         DeviceType.SOCKET_TWIN,
+        DeviceType.KITCHEN_FCU,
         DeviceType.SPLIT_AC,
+        DeviceType.SHUTTER_SWITCH,
+        DeviceType.HEAT_PUMP_OUTDOOR,
+        DeviceType.HEAT_PUMP_HYDROBOX,
+        DeviceType.UFH_MANIFOLD,
+        DeviceType.ROOM_THERMOSTAT,
+        DeviceType.VRV_OUTDOOR,
+        DeviceType.VRV_INDOOR_ISOLATOR,
+        DeviceType.WATER_BOOSTER_PUMP,
+        DeviceType.GATE_MOTOR,
+        DeviceType.EV_WALLBOX,
+        DeviceType.POOL_SUB_DB,
         DeviceType.COOKER_CONTROL_UNIT,
         DeviceType.COOKER_OUTLET,
         DeviceType.OVEN_OUTLET,
@@ -33,6 +51,24 @@ _POWER_TYPES: frozenset[DeviceType] = frozenset(
         DeviceType.WATER_HEATER_ISOLATOR,
         DeviceType.EAC_METER_CABINET,
         DeviceType.EARTH_PIT,
+    }
+)
+_ELV_TYPES: frozenset[DeviceType] = frozenset(
+    {
+        DeviceType.TELECOM_CABINET,
+        DeviceType.DATA_RJ45,
+        DeviceType.TV_OUTLET,
+        DeviceType.WIFI_AP,
+        DeviceType.INTERCOM_OUTDOOR,
+        DeviceType.INTERCOM_INDOOR,
+        DeviceType.ALARM_PANEL,
+        DeviceType.ALARM_PIR,
+        DeviceType.ALARM_KEYPAD,
+        DeviceType.ALARM_SIREN,
+        DeviceType.CCTV_CAMERA,
+        DeviceType.SMOKE_DETECTOR,
+        DeviceType.HEAT_DETECTOR,
+        DeviceType.KNX_KEYPAD,
     }
 )
 
@@ -60,14 +96,23 @@ def render_floorplan_svg(
     miny = min(p.y_mm for p in all_pts)
     maxy = max(p.y_mm for p in all_pts)
 
-    # Expand bounds slightly if EAC Meter Cabinet / Earth Pit sit outside building envelope
-    if discipline in ("combined", "power"):
-        for dev in spatial.devices:
-            if dev.device_type in (DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT):
-                minx = min(minx, dev.location_mm.x_mm - 300.0)
-                maxx = max(maxx, dev.location_mm.x_mm + 300.0)
-                miny = min(miny, dev.location_mm.y_mm - 300.0)
-                maxy = max(maxy, dev.location_mm.y_mm + 300.0)
+    if discipline == "lighting":
+        active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_TYPES]
+    elif discipline == "power":
+        active_devices = [d for d in spatial.devices if d.device_type in _POWER_TYPES]
+    elif discipline == "elv":
+        active_devices = [d for d in spatial.devices if d.device_type in _ELV_TYPES]
+    else:
+        active_devices = [
+            d for d in spatial.devices if d.device_type in (_LIGHTING_TYPES | _POWER_TYPES)
+        ]
+
+    # Expand bounds so exterior devices (Meter, Earth Pit, CCTV, Gate, EV, Pool) fit cleanly
+    for dev in active_devices:
+        minx = min(minx, dev.location_mm.x_mm - 300.0)
+        maxx = max(maxx, dev.location_mm.x_mm + 300.0)
+        miny = min(miny, dev.location_mm.y_mm - 300.0)
+        maxy = max(maxy, dev.location_mm.y_mm + 300.0)
 
     span_x = max(1000.0, maxx - minx)
     span_y = max(1000.0, maxy - miny)
@@ -93,20 +138,18 @@ def render_floorplan_svg(
         return " ".join(f"{tx(p.x_mm):.1f},{ty(p.y_mm):.1f}" for p in pts)
 
     sheet_title = (
-        "E-101 LIGHTING &amp; SWITCHING LAYOUT"
+        "E-101 LIGHTING, PHOTOMETRICS &amp; SWITCHING LAYOUT"
         if discipline == "lighting"
         else (
-            "E-102 POWER, SOCKETS &amp; ACCESSORIES LAYOUT"
+            "E-102 POWER, SOCKETS &amp; MECHANICAL PLANT LAYOUT"
             if discipline == "power"
-            else "E-100 COMBINED ELECTRICAL LAYOUT (COORDINATION)"
+            else (
+                "E-103 ELV, SECURITY, INTERCOM &amp; LIFE SAFETY LAYOUT"
+                if discipline == "elv"
+                else "E-100 COMBINED LV ELECTRICAL LAYOUT (COORDINATION)"
+            )
         )
     )
-    if discipline == "lighting":
-        active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_TYPES]
-    elif discipline == "power":
-        active_devices = [d for d in spatial.devices if d.device_type in _POWER_TYPES]
-    else:
-        active_devices = list(spatial.devices)
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -177,7 +220,7 @@ def render_floorplan_svg(
                     'stroke-width="1.4" style="pointer-events:none;" />'
                 )
 
-    # 3. Plumbing fixtures
+    # 3. Plumbing fixtures & auto-detected architectural furniture outlines
     for room in building.rooms:
         for fixt in room.fixtures:
             parts.append(
@@ -185,6 +228,13 @@ def render_floorplan_svg(
                 'fill="#bee3f8" fill-opacity="0.6" stroke="#2b6cb0" '
                 'stroke-width="1" style="pointer-events:none;" />'
             )
+        for furn in room.furniture:
+            if len(furn.polygon_mm) >= 3:
+                parts.append(
+                    f'  <polygon points="{poly_points(furn.polygon_mm)}" '
+                    'fill="#e2e8f0" fill-opacity="0.45" stroke="#94a3b8" '
+                    'stroke-width="0.9" stroke-dasharray="3,2" style="pointer-events:none;" />'
+                )
 
     # 4. Architectural walls, windows, and doors
     for wall in building.walls:
@@ -199,7 +249,7 @@ def render_floorplan_svg(
         parts.append(
             f'  <line x1="{tx(win.start.x_mm):.1f}" y1="{ty(win.start.y_mm):.1f}" '
             f'x2="{tx(win.end.x_mm):.1f}" y2="{ty(win.end.y_mm):.1f}" '
-            'stroke="#00b5d8" stroke-width="4.2" style="pointer-events:none;" />'
+            f'stroke="#00b5d8" stroke-width="4.2" style="pointer-events:none;" />'
         )
     for door in building.doors:
         hx, hy = door.hinge.x_mm, door.hinge.y_mm
@@ -210,34 +260,186 @@ def render_floorplan_svg(
         parts.append(
             f'  <line x1="{tx(hx):.1f}" y1="{ty(hy):.1f}" '
             f'x2="{tx(lx):.1f}" y2="{ty(ly):.1f}" '
-            'stroke="#38a169" stroke-width="1.6" style="pointer-events:none;" />'
+            f'stroke="#38a169" stroke-width="1.6" style="pointer-events:none;" />'
         )
 
-    # 5. Color-Coded Discipline-Filtered NetworkX Routed Conduit Paths
+    # 5. Conduit / Circuit Representation (Cyprus Home-Run Arrows + Loop Arcs OR Full Routed)
     cat_map = {c.spec.circuit_id: c.spec.category for c in result.design.circuits}
-    for rc in spatial.routed_circuits:
-        cat = cat_map.get(rc.circuit_id)
-        is_lite = cat in (CircuitCategory.LIGHTING, CircuitCategory.EMERGENCY_LIGHTING)
-        if discipline == "lighting" and not is_lite:
-            continue
-        if discipline == "power" and is_lite:
-            continue
-        c_stroke = (
-            "#b7791f"
-            if is_lite
-            else (
-                "#0284c7"
-                if cat in (CircuitCategory.SOCKET_RING, CircuitCategory.SOCKET_RADIAL)
-                else "#7c3aed"
-            )
+    board_map = {c.spec.circuit_id: c.spec.board_id for c in result.design.circuits}
+    board_pts: dict[str, tuple[float, float]] = {
+        building.db_anchor.id: (
+            tx(building.db_anchor.location_mm.x_mm),
+            ty(building.db_anchor.location_mm.y_mm),
         )
-        for seg in rc.segments:
-            parts.append(
-                f'  <line x1="{tx(seg.start_mm.x_mm):.1f}" y1="{ty(seg.start_mm.y_mm):.1f}" '
-                f'x2="{tx(seg.end_mm.x_mm):.1f}" y2="{ty(seg.end_mm.y_mm):.1f}" '
-                f'stroke="{c_stroke}" stroke-width="1.25" stroke-opacity="0.6" '
-                'style="pointer-events:none;" />'
+    }
+    for sb in building.sub_boards:
+        board_pts[sb.board_id] = (tx(sb.location_mm.x_mm), ty(sb.location_mm.y_mm))
+
+    use_homerun = result.design.residential_brief.conduit_drafting_style == "homerun_arcs"
+
+    if discipline == "elv":
+        # E-103: Interlinked BS 5839-6 Smoke/Heat loop arcs + KNX bus daisy-chain arcs
+        smoke_devs = [
+            d
+            for d in active_devices
+            if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR)
+        ]
+        if len(smoke_devs) >= 2:
+            for a_d, b_d in zip(smoke_devs, smoke_devs[1:], strict=False):
+                ax, ay = tx(a_d.location_mm.x_mm), ty(a_d.location_mm.y_mm)
+                bx, by = tx(b_d.location_mm.x_mm), ty(b_d.location_mm.y_mm)
+                ddx, ddy = bx - ax, by - ay
+                dist = math.hypot(ddx, ddy)
+                if dist >= 3.0:
+                    cx = (ax + bx) * 0.5 - (ddy / dist) * (0.14 * dist)
+                    cy = (ay + by) * 0.5 + (ddx / dist) * (0.14 * dist)
+                    parts.append(
+                        f'  <path d="M {ax:.1f} {ay:.1f} Q {cx:.1f} {cy:.1f} {bx:.1f} {by:.1f}" '
+                        'fill="none" stroke="#dc2626" stroke-width="1.2" stroke-dasharray="5,3" '
+                        'stroke-opacity="0.8" style="pointer-events:none;" />'
+                    )
+        knx_devs = [d for d in active_devices if d.device_type == DeviceType.KNX_KEYPAD]
+        if len(knx_devs) >= 2:
+            for a_d, b_d in zip(knx_devs, knx_devs[1:], strict=False):
+                ax, ay = tx(a_d.location_mm.x_mm), ty(a_d.location_mm.y_mm)
+                bx, by = tx(b_d.location_mm.x_mm), ty(b_d.location_mm.y_mm)
+                ddx, ddy = bx - ax, by - ay
+                dist = math.hypot(ddx, ddy)
+                if dist >= 3.0:
+                    cx = (ax + bx) * 0.5 + (ddy / dist) * (0.14 * dist)
+                    cy = (ay + by) * 0.5 - (ddx / dist) * (0.14 * dist)
+                    parts.append(
+                        f'  <path d="M {ax:.1f} {ay:.1f} Q {cx:.1f} {cy:.1f} {bx:.1f} {by:.1f}" '
+                        'fill="none" stroke="#16a34a" stroke-width="1.25" stroke-dasharray="3,2" '
+                        'stroke-opacity="0.85" style="pointer-events:none;" />'
+                    )
+        # Clean star home-run ticks from Telecom Rack to active Data/WiFi endpoints
+        rack = next(
+            (d for d in active_devices if d.device_type == DeviceType.TELECOM_CABINET), None
+        )
+        if rack is not None:
+            rx, ry = tx(rack.location_mm.x_mm), ty(rack.location_mm.y_mm)
+            for ep in active_devices:
+                if ep.device_type in (DeviceType.DATA_RJ45, DeviceType.WIFI_AP):
+                    ex, ey = tx(ep.location_mm.x_mm), ty(ep.location_mm.y_mm)
+                    ddx, ddy = rx - ex, ry - ey
+                    dist = math.hypot(ddx, ddy)
+                    if dist > 20.0:
+                        ux, uy = ddx / dist, ddy / dist
+                        ax, ay = ex + ux * 22.0, ey + uy * 22.0
+                        parts.append(
+                            f'  <line x1="{ex:.1f}" y1="{ey:.1f}" x2="{ax:.1f}" y2="{ay:.1f}" '
+                            'stroke="#2563eb" stroke-width="1.0" stroke-opacity="0.65" '
+                            'style="pointer-events:none;" />'
+                        )
+    elif use_homerun:
+        # Cyprus Standard: clean loop arcs between same-circuit devices + DB home-run arrow
+        by_cid: dict[str, list[PlacedDevice]] = {}
+        for dev in active_devices:
+            if not dev.circuit_id or dev.circuit_id not in cat_map:
+                continue
+            if dev.device_type in (
+                DeviceType.SWITCH,
+                DeviceType.DIMMER_SWITCH,
+                DeviceType.FAN_ISOLATOR_3P,
+                DeviceType.EAC_METER_CABINET,
+                DeviceType.EARTH_PIT,
+            ):
+                continue
+            by_cid.setdefault(dev.circuit_id, []).append(dev)
+
+        for cid, c_devs in by_cid.items():
+            cat = cat_map.get(cid)
+            is_lite = cat in (CircuitCategory.LIGHTING, CircuitCategory.EMERGENCY_LIGHTING)
+            if discipline == "lighting" and not is_lite:
+                continue
+            if discipline == "power" and is_lite:
+                continue
+            c_stroke = (
+                "#b7791f"
+                if is_lite
+                else (
+                    "#0284c7"
+                    if cat in (CircuitCategory.SOCKET_RING, CircuitCategory.SOCKET_RADIAL)
+                    else "#7c3aed"
+                )
             )
+            db_x, db_y = board_pts.get(
+                board_map.get(cid, building.db_anchor.id),
+                board_pts[building.db_anchor.id],
+            )
+            # Sort nearest-first from DB for crisp loop chaining
+            ordered = sorted(
+                c_devs,
+                key=lambda d: math.hypot(
+                    tx(d.location_mm.x_mm) - db_x, ty(d.location_mm.y_mm) - db_y
+                ),
+            )
+            # Home-run arrow from first device toward serving DB
+            fx, fy = tx(ordered[0].location_mm.x_mm), ty(ordered[0].location_mm.y_mm)
+            ddx, ddy = db_x - fx, db_y - fy
+            dist = math.hypot(ddx, ddy)
+            if dist > 8.0:
+                ux, uy = ddx / dist, ddy / dist
+                hr_len = min(34.0, dist * 0.55)
+                hx, hy = fx + ux * hr_len, fy + uy * hr_len
+                # Arrowhead barb
+                px, py = -uy, ux
+                b1x, b1y = hx - ux * 6.0 + px * 3.0, hy - uy * 6.0 + py * 3.0
+                b2x, b2y = hx - ux * 6.0 - px * 3.0, hy - uy * 6.0 - py * 3.0
+                parts.append(
+                    f'  <line x1="{fx:.1f}" y1="{fy:.1f}" x2="{hx:.1f}" y2="{hy:.1f}" '
+                    f'stroke="{c_stroke}" stroke-width="1.35" style="pointer-events:none;" />'
+                )
+                pts_a = f"{hx:.1f},{hy:.1f} {b1x:.1f},{b1y:.1f} {b2x:.1f},{b2y:.1f}"
+                parts.append(
+                    f'  <polygon points="{pts_a}" '
+                    f'fill="{c_stroke}" style="pointer-events:none;" />'
+                )
+                parts.append(
+                    f'  <text x="{hx + px * 7:.1f}" y="{hy + py * 7:.1f}" '
+                    f'class="dev-tag" style="fill:{c_stroke};">{_esc(cid)}→DB</text>'
+                )
+            # Clean curved loop arcs between consecutive devices
+            for idx, (a_d, b_d) in enumerate(zip(ordered, ordered[1:], strict=False)):
+                ax, ay = tx(a_d.location_mm.x_mm), ty(a_d.location_mm.y_mm)
+                bx, by = tx(b_d.location_mm.x_mm), ty(b_d.location_mm.y_mm)
+                ldx, ldy = bx - ax, by - ay
+                ldist = math.hypot(ldx, ldy)
+                if ldist < 4.0:
+                    continue
+                bulge = (0.15 if idx % 2 == 0 else -0.15) * ldist
+                cx = (ax + bx) * 0.5 - (ldy / ldist) * bulge
+                cy = (ay + by) * 0.5 + (ldx / ldist) * bulge
+                parts.append(
+                    f'  <path d="M {ax:.1f} {ay:.1f} Q {cx:.1f} {cy:.1f} {bx:.1f} {by:.1f}" '
+                    f'fill="none" stroke="{c_stroke}" stroke-width="1.15" stroke-opacity="0.78" '
+                    'style="pointer-events:none;" />'
+                )
+    else:
+        for rc in spatial.routed_circuits:
+            cat = cat_map.get(rc.circuit_id)
+            is_lite = cat in (CircuitCategory.LIGHTING, CircuitCategory.EMERGENCY_LIGHTING)
+            if discipline == "lighting" and not is_lite:
+                continue
+            if discipline == "power" and is_lite:
+                continue
+            c_stroke = (
+                "#b7791f"
+                if is_lite
+                else (
+                    "#0284c7"
+                    if cat in (CircuitCategory.SOCKET_RING, CircuitCategory.SOCKET_RADIAL)
+                    else "#7c3aed"
+                )
+            )
+            for seg in rc.segments:
+                parts.append(
+                    f'  <line x1="{tx(seg.start_mm.x_mm):.1f}" y1="{ty(seg.start_mm.y_mm):.1f}" '
+                    f'x2="{tx(seg.end_mm.x_mm):.1f}" y2="{ty(seg.end_mm.y_mm):.1f}" '
+                    f'stroke="{c_stroke}" stroke-width="1.25" stroke-opacity="0.6" '
+                    'style="pointer-events:none;" />'
+                )
 
     # 5b. Curved Dashed Switch-to-Luminaire/Fan Control Arcs (Lighting & Combined)
     if discipline in ("combined", "lighting") and spatial.switch_legs:
@@ -284,7 +486,7 @@ def render_floorplan_svg(
     parts.extend(
         [
             (
-                f'  <rect data-db="true" x="{dbx - 14:.1f}" y="{dby - 8:.1f}" '
+                f'  <rect data-db="true" data-anchor="db" x="{dbx - 14:.1f}" y="{dby - 8:.1f}" '
                 'width="28" height="16" fill="#c53030" stroke="#742a2a" '
                 'stroke-width="1.5" rx="2" />'
             ),
@@ -313,12 +515,37 @@ def render_floorplan_svg(
             ]
         )
 
-    # 8. Placed Electrical Devices
+    # 8. Placed Electrical Devices (Lighting, Power, Mechanical Plant, ELV, Security, Smoke, KNX)
+    def _badge(
+        bx: float,
+        by: float,
+        text: str,
+        *,
+        fill: str,
+        stroke: str,
+        fg: str,
+        w: float = 18.0,
+        h: float = 10.0,
+        anchor: str | None = None,
+    ) -> None:
+        a_attr = f' data-anchor="{anchor}"' if anchor else ""
+        parts.append(
+            f'  <rect{a_attr} x="{bx - w / 2:.1f}" y="{by - h / 2:.1f}" '
+            f'width="{w:.1f}" height="{h:.1f}" fill="{fill}" stroke="{stroke}" '
+            'stroke-width="1.4" rx="2" />'
+        )
+        parts.append(
+            f'  <text x="{bx:.1f}" y="{by + 2.5:.1f}" text-anchor="middle" '
+            f'style="fill:{fg};font-size:5.8px;font-weight:700;pointer-events:none;">'
+            f"{_esc(text)}</text>"
+        )
+
     for dev in active_devices:
         dx = tx(dev.location_mm.x_mm)
         dy = ty(dev.location_mm.y_mm)
         cid = dev.circuit_id or "?"
-        if dev.device_type == DeviceType.LUMINAIRE:
+        dt = dev.device_type
+        if dt == DeviceType.LUMINAIRE:
             parts.append(
                 f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="6" '
                 'fill="#fefcbf" stroke="#b7791f" stroke-width="1.5" />'
@@ -336,7 +563,28 @@ def render_floorplan_svg(
                     f'  <text x="{dx + 8:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">'
                     f"{_esc(cid)}({dev.switch_group})</text>"
                 )
-        elif dev.device_type == DeviceType.MIRROR_LIGHT:
+        elif dt == DeviceType.PENDANT_LIGHT:
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="7.2" '
+                'fill="#fef08a" stroke="#a16207" stroke-width="1.6" />'
+            )
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="3.2" '
+                'fill="#f59e0b" stroke="#78350f" stroke-width="1.0" />'
+            )
+            if discipline == "lighting":
+                parts.append(
+                    f'  <text x="{dx + 9:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">PD</text>'
+                )
+        elif dt == DeviceType.OUTDOOR_PIR_LIGHT:
+            _badge(dx, dy, "PIR-L", fill="#fef3c7", stroke="#d97706", fg="#92400e", w=22.0)
+        elif dt == DeviceType.GARDEN_BOLLARD:
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="4.8" '
+                'fill="#fde68a" stroke="#b45309" stroke-width="1.4" />'
+            )
+            parts.append(f'  <text x="{dx + 6:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">BOL</text>')
+        elif dt == DeviceType.MIRROR_LIGHT:
             parts.append(
                 f'  <rect x="{dx - 6:.1f}" y="{dy - 3.5:.1f}" width="12" height="7" '
                 'fill="#fef08a" stroke="#a16207" stroke-width="1.4" rx="2" />'
@@ -344,7 +592,7 @@ def render_floorplan_svg(
             parts.append(
                 f'  <text x="{dx + 8:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">ML(b)</text>'
             )
-        elif dev.device_type == DeviceType.EXHAUST_FAN:
+        elif dt == DeviceType.EXHAUST_FAN:
             parts.append(
                 f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="6" '
                 'fill="#e0f2fe" stroke="#0369a1" stroke-width="1.5" />'
@@ -353,19 +601,25 @@ def render_floorplan_svg(
                 f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
                 'style="fill:#0369a1;font-size:6.2px;font-weight:700;">EF</text>'
             )
-        elif dev.device_type == DeviceType.SWITCH:
+        elif dt in (DeviceType.SWITCH, DeviceType.DIMMER_SWITCH):
+            fill_c = "#bbf7d0" if dt == DeviceType.SWITCH else "#d9f99d"
             parts.append(
-                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="4.2" '
-                'fill="#c6f6d5" stroke="#15803d" stroke-width="1.4" />'
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="4.4" '
+                f'fill="{fill_c}" stroke="#15803d" stroke-width="1.4" />'
             )
+            if dt == DeviceType.DIMMER_SWITCH:
+                parts.append(
+                    f'  <line x1="{dx - 4:.1f}" y1="{dy + 4:.1f}" '
+                    f'x2="{dx + 4:.1f}" y2="{dy - 4:.1f}" stroke="#15803d" stroke-width="1.3" />'
+                )
             if discipline == "lighting":
-                st = dev.switch_type or "1G1W"
+                st = dev.switch_type or ("DIM" if dt == DeviceType.DIMMER_SWITCH else "1G1W")
                 grp = dev.switch_group or "a"
                 parts.append(
                     f'  <text x="{dx + 7:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">'
                     f"{_esc(st)}({_esc(grp)})</text>"
                 )
-        elif dev.device_type == DeviceType.FAN_ISOLATOR_3P:
+        elif dt == DeviceType.FAN_ISOLATOR_3P:
             parts.append(
                 f'  <rect x="{dx - 5:.1f}" y="{dy - 5:.1f}" width="10" height="10" '
                 'fill="#dcfce7" stroke="#166534" stroke-width="1.3" />'
@@ -373,59 +627,131 @@ def render_floorplan_svg(
             parts.append(
                 f'  <text x="{dx + 7:.1f}" y="{dy + 2.5:.1f}" class="dev-tag">3P-FAN</text>'
             )
-        elif dev.device_type == DeviceType.SOCKET_TWIN:
+        elif dt == DeviceType.SOCKET_TWIN:
             parts.append(
                 f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="4.5" '
                 'fill="#e6fffa" stroke="#008080" stroke-width="1.5" />'
             )
-        elif dev.device_type == DeviceType.SPLIT_AC:
-            parts.append(
-                f'  <rect x="{dx - 9:.1f}" y="{dy - 5:.1f}" width="18" height="10" '
-                'fill="#ebf8ff" stroke="#2b6cb0" stroke-width="1.5" rx="2" />'
-            )
-            parts.append(
-                f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
-                'style="fill:#2b6cb0;font-size:6.5px;font-weight:700;">AC</text>'
-            )
+        elif dt == DeviceType.SPLIT_AC:
+            _badge(dx, dy, "AC", fill="#ebf8ff", stroke="#2b6cb0", fg="#2b6cb0", w=18.0)
             parts.append(
                 f'  <text x="{dx + 11:.1f}" y="{dy + 3:.1f}" class="dev-tag">{_esc(cid)}</text>'
             )
-        elif dev.device_type == DeviceType.COOKER_CONTROL_UNIT:
+        elif dt == DeviceType.COOKER_CONTROL_UNIT:
+            _badge(dx, dy, "CCU", fill="#fee2e2", stroke="#b91c1c", fg="#991b1b", w=18.0)
+        elif dt == DeviceType.WATER_HEATER_DP_SWITCH:
+            _badge(dx, dy, "WH", fill="#ffedd5", stroke="#c2410c", fg="#9a3412", w=16.0)
+        elif dt == DeviceType.SHUTTER_SWITCH:
+            _badge(dx, dy, "SH", fill="#e0e7ff", stroke="#4338ca", fg="#312e81", w=15.0)
+        elif dt == DeviceType.KITCHEN_FCU:
+            _badge(dx, dy, "FCU", fill="#fce7f3", stroke="#be185d", fg="#831843", w=18.0)
+        elif dt == DeviceType.ROOM_THERMOSTAT:
             parts.append(
-                f'  <rect x="{dx - 8:.1f}" y="{dy - 5:.1f}" width="16" height="10" '
-                'fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5" rx="1.5" />'
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="5.2" '
+                'fill="#fff7ed" stroke="#ea580c" stroke-width="1.4" />'
             )
             parts.append(
-                f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
-                'style="fill:#991b1b;font-size:5.8px;font-weight:700;">CCU</text>'
+                f'  <text x="{dx:.1f}" y="{dy + 2.2:.1f}" text-anchor="middle" '
+                'style="fill:#9a3412;font-size:5.8px;font-weight:700;">T</text>'
             )
-        elif dev.device_type == DeviceType.WATER_HEATER_DP_SWITCH:
-            parts.append(
-                f'  <rect x="{dx - 7:.1f}" y="{dy - 5:.1f}" width="14" height="10" '
-                'fill="#ffedd5" stroke="#c2410c" stroke-width="1.5" rx="1.5" />'
+        elif dt in (DeviceType.HEAT_PUMP_OUTDOOR, DeviceType.VRV_OUTDOOR):
+            lbl = "HP-3P" if dt == DeviceType.HEAT_PUMP_OUTDOOR else "VRV"
+            _badge(dx, dy, lbl, fill="#dbeafe", stroke="#1d4ed8", fg="#1e3a8a", w=26.0, h=13.0)
+        elif dt in (
+            DeviceType.HEAT_PUMP_HYDROBOX,
+            DeviceType.UFH_MANIFOLD,
+            DeviceType.VRV_INDOOR_ISOLATOR,
+        ):
+            lbl = (
+                "HYDRO"
+                if dt == DeviceType.HEAT_PUMP_HYDROBOX
+                else ("UFH" if dt == DeviceType.UFH_MANIFOLD else "FCU-AC")
             )
-            parts.append(
-                f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
-                'style="fill:#9a3412;font-size:5.8px;font-weight:700;">DP</text>'
+            _badge(dx, dy, lbl, fill="#e0f2fe", stroke="#0284c7", fg="#075985", w=24.0, h=11.0)
+        elif dt == DeviceType.WATER_BOOSTER_PUMP:
+            _badge(dx, dy, "WP", fill="#cffafe", stroke="#0891b2", fg="#155e75", w=18.0)
+        elif dt == DeviceType.GATE_MOTOR:
+            _badge(dx, dy, "GATE", fill="#f3e8ff", stroke="#7e22ce", fg="#581c87", w=22.0)
+        elif dt == DeviceType.EV_WALLBOX:
+            _badge(dx, dy, "EV", fill="#dcfce7", stroke="#15803d", fg="#14532d", w=22.0, h=12.0)
+        elif dt == DeviceType.POOL_SUB_DB:
+            _badge(dx, dy, "POOL", fill="#bae6fd", stroke="#0369a1", fg="#0c4a6e", w=24.0, h=12.0)
+        elif dt == DeviceType.EAC_METER_CABINET:
+            _badge(
+                dx,
+                dy,
+                "EAC-M",
+                fill="#dbeafe",
+                stroke="#1e40af",
+                fg="#1e3a8a",
+                w=26.0,
+                h=14.0,
+                anchor="meter",
             )
-        elif dev.device_type == DeviceType.EAC_METER_CABINET:
+        elif dt == DeviceType.EARTH_PIT:
             parts.append(
-                f'  <rect x="{dx - 13:.1f}" y="{dy - 7:.1f}" width="26" height="14" '
-                'fill="#dbeafe" stroke="#1e40af" stroke-width="1.6" rx="2" />'
-            )
-            parts.append(
-                f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
-                'style="fill:#1e3a8a;font-size:6.4px;font-weight:700;">EAC-M</text>'
-            )
-        elif dev.device_type == DeviceType.EARTH_PIT:
-            parts.append(
-                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="6.5" '
+                f'  <circle data-anchor="earth_pit" cx="{dx:.1f}" cy="{dy:.1f}" r="6.5" '
                 'fill="#dcfce7" stroke="#15803d" stroke-width="1.6" />'
             )
             parts.append(
                 f'  <text x="{dx:.1f}" y="{dy + 2.5:.1f}" text-anchor="middle" '
-                'style="fill:#14532d;font-size:6.2px;font-weight:700;">TT</text>'
+                'style="fill:#14532d;font-size:6.2px;font-weight:700;pointer-events:none;">TT</text>'
             )
+        elif dt == DeviceType.TELECOM_CABINET:
+            _badge(
+                dx,
+                dy,
+                "9U-IT",
+                fill="#dbeafe",
+                stroke="#1d4ed8",
+                fg="#1e3a8a",
+                w=26.0,
+                h=14.0,
+                anchor="telecom",
+            )
+        elif dt == DeviceType.DATA_RJ45:
+            _badge(dx, dy, "RJ45", fill="#eff6ff", stroke="#2563eb", fg="#1d4ed8", w=20.0)
+        elif dt == DeviceType.TV_OUTLET:
+            _badge(dx, dy, "TV", fill="#f0fdf4", stroke="#16a34a", fg="#166534", w=16.0)
+        elif dt == DeviceType.WIFI_AP:
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="6.0" '
+                'fill="#e0f2fe" stroke="#0284c7" stroke-width="1.5" />'
+            )
+            parts.append(
+                f'  <text x="{dx:.1f}" y="{dy + 2.2:.1f}" text-anchor="middle" '
+                'style="fill:#0369a1;font-size:5.6px;font-weight:700;">AP</text>'
+            )
+        elif dt in (DeviceType.INTERCOM_OUTDOOR, DeviceType.INTERCOM_INDOOR):
+            lbl = "V-OUT" if dt == DeviceType.INTERCOM_OUTDOOR else "V-MON"
+            _badge(dx, dy, lbl, fill="#eef2ff", stroke="#4f46e5", fg="#3730a3", w=24.0)
+        elif dt in (
+            DeviceType.ALARM_PANEL,
+            DeviceType.ALARM_KEYPAD,
+            DeviceType.ALARM_PIR,
+            DeviceType.ALARM_SIREN,
+        ):
+            lbl_map = {
+                DeviceType.ALARM_PANEL: "ALM",
+                DeviceType.ALARM_KEYPAD: "KP",
+                DeviceType.ALARM_PIR: "PIR",
+                DeviceType.ALARM_SIREN: "SIR",
+            }
+            _badge(dx, dy, lbl_map[dt], fill="#fef2f2", stroke="#dc2626", fg="#991b1b", w=18.0)
+        elif dt == DeviceType.CCTV_CAMERA:
+            _badge(dx, dy, "CAM", fill="#f1f5f9", stroke="#334155", fg="#0f172a", w=20.0)
+        elif dt in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
+            lbl = "SD" if dt == DeviceType.SMOKE_DETECTOR else "HD"
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="5.6" '
+                'fill="#fee2e2" stroke="#dc2626" stroke-width="1.5" />'
+            )
+            parts.append(
+                f'  <text x="{dx:.1f}" y="{dy + 2.2:.1f}" text-anchor="middle" '
+                f'style="fill:#991b1b;font-size:5.8px;font-weight:700;">{lbl}</text>'
+            )
+        elif dt == DeviceType.KNX_KEYPAD:
+            _badge(dx, dy, "KNX", fill="#dcfce7", stroke="#15803d", fg="#14532d", w=19.0)
         else:
             parts.append(
                 f'  <rect x="{dx - 5.5:.1f}" y="{dy - 5.5:.1f}" width="11" height="11" '
@@ -442,38 +768,51 @@ def render_floorplan_svg(
         legend_items = [
             ("#c53030", "DB / MDB Distribution Board"),
             ("#fefcbf", "Ceiling Luminaire (IP20/44/65)"),
-            ("#fef08a", "IP44 Vanity Mirror Light (+2.0m)"),
+            ("#fef08a", "Dining Pendant / IP44 Mirror"),
+            ("#fef3c7", "IP65 Outdoor PIR / Bollard"),
             ("#e0f2fe", "Bathroom Exhaust Fan (+2.4m)"),
-            ("#c6f6d5", "Switch 1G/2G/2W (+1.2m)"),
+            ("#bbf7d0", "Switch 1G/2G/2W/Int/Dimmer"),
             ("#dcfce7", "3P Fan Isolator (+2.2m)"),
             ("#16a34a", "Dashed Switch Leg (a / b)"),
-            ("#b7791f", "Lighting Conduit (Ø20 PVC)"),
+            ("#b7791f", "Lighting Home-Run & Loops"),
         ]
     elif discipline == "power":
         legend_items = [
             ("#c53030", "DB / MDB Distribution Board"),
             ("#e6fffa", "Twin 13A Socket (+0.45/1.15m)"),
-            ("#ebf8ff", "20A DP Split A/C (+2.2m)"),
-            ("#fee2e2", "45A Cooker Control (+1.15m)"),
-            ("#ffedd5", "20A DP Water Heater (+1.2m)"),
-            ("#faf5ff", "Dedicated Appliance (+0.45m)"),
-            ("#dbeafe", "EAC Meter Cabinet (Verify Site)"),
-            ("#dcfce7", "TT Earth Rod Pit (Ø16×1.2m)"),
-            ("#0284c7", "Power Ring/Radial Conduit"),
-            ("#7c3aed", "Dedicated Heavy Conduit"),
+            ("#ebf8ff", "HVAC (Split A/C / HP / VRV)"),
+            ("#e0e7ff", "Electric Shutter Switch (+1.2m)"),
+            ("#fce7f3", "Kitchen FCU / 45A CCU / WH DP"),
+            ("#cffafe", "Water Pumps / Gate / EV / Pool"),
+            ("#dbeafe", "EAC Meter Cabinet (Relocatable)"),
+            ("#dcfce7", "TT Earth Pit (Relocatable)"),
+            ("#0284c7", "Power Home-Run & Loops"),
+            ("#7c3aed", "Dedicated Heavy Circuits"),
             ("#fbb6ce", f"EAC Socket Excl ({eac.bathroom_socket_exclusion_m:.1f} m)"),
+        ]
+    elif discipline == "elv":
+        legend_items = [
+            ("#dbeafe", "9U Telecom Rack (Cyta Fiber)"),
+            ("#eff6ff", "2xCat6 RJ45 Data (+0.45m)"),
+            ("#f0fdf4", "TV / SAT Coax Outlet (+0.45m)"),
+            ("#e0f2fe", "Ceiling PoE Wi-Fi 6 AP"),
+            ("#eef2ff", "Video Intercom Out / Monitor"),
+            ("#fef2f2", "EN 50131 Alarm / Keypad / PIR"),
+            ("#f1f5f9", "IP67 PoE CCTV Camera (+2.8m)"),
+            ("#fee2e2", "BS 5839-6 Smoke / Heat Loop"),
+            ("#dcfce7", "KNX Smart Bus Keypad (Opt.)"),
         ]
     else:
         legend_items = [
-            ("#c53030", "DB1 Distribution Board"),
-            ("#fefcbf", "Ceiling Luminaire / Mirror"),
-            ("#c6f6d5", "Switch (1G/2G/2W) + 3P Fan"),
-            ("#16a34a", "Dashed Switch Legs (a / b)"),
-            ("#e6fffa", "Twin 13A Socket (+0.45/1.15m)"),
-            ("#ebf8ff", "Split A/C Isolator (+2.2m)"),
-            ("#fee2e2", "45A CCU / 20A DP / Appl"),
-            ("#dbeafe", "EAC Meter Box / TT Earth Pit"),
-            ("#0284c7", "Power / Lighting Conduits"),
+            ("#c53030", "DB1 / MDB Distribution Board"),
+            ("#fefcbf", "Luminaires / Pendant / PIR"),
+            ("#bbf7d0", "Switches / Dimmers / 3P Fan"),
+            ("#e6fffa", "Twin 13A Sockets (+0.45/1.15m)"),
+            ("#ebf8ff", "HVAC / Shutters / FCUs / Pumps"),
+            ("#dbeafe", "EAC Meter / 9U Telecom Rack"),
+            ("#fee2e2", "BS 5839-6 Smoke / Alarm / CCTV"),
+            ("#dcfce7", "TT Earth Pit / EV / KNX"),
+            ("#0284c7", "Cyprus Home-Run & Loop Arcs"),
             ("#feb2b2", "Sec 701 Zone 0 / Zone 1"),
             ("#fbb6ce", f"EAC Socket Excl ({eac.bathroom_socket_exclusion_m:.1f} m)"),
         ]
@@ -500,13 +839,22 @@ def render_floorplan_svg(
 
     # Compact Standard Mounting Heights box below Legend
     my = ly + leg_h + 12
-    mh_lines = [
-        "Sockets: +450 mm (Kitchen +1150)",
-        "Switches: +1200 mm (Bed 2W +750)",
-        "A/C & 3P Fan Isol: +2200 mm",
-        "CCU: +1150 | WH DP: +1200 mm",
-        "DB Top: +1600 | Mirror: +2000",
-    ]
+    if discipline == "elv":
+        mh_lines = [
+            "Data RJ45 / TV: +450 mm (TV +1200)",
+            "Intercom / Keypad / KNX: +1450 mm",
+            "Alarm PIR: +2400 | CCTV: +2800 mm",
+            "Smoke/Heat & Wi-Fi AP: Ceiling",
+            "9U Telecom Rack: +1600 mm (FFL)",
+        ]
+    else:
+        mh_lines = [
+            "Sockets: +450 mm (Kitchen +1150)",
+            "Switches/Shutters: +1200 (Bed +750)",
+            "A/C & 3P Fan Isol: +2200 mm",
+            "CCU: +1150 | WH DP / T-Stat: +1200",
+            "DB Top: +1600 | Mirror: +2000",
+        ]
     parts.append(
         f'  <rect x="{lx:.0f}" y="{my:.0f}" width="214" height="{26 + len(mh_lines) * 16}" '
         'rx="4" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.1" />'

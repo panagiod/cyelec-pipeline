@@ -494,6 +494,97 @@ def render_etek_workbench_html(
         Save Firm Branding &amp; VAT Defaults
       </button>
 
+      <details id="briefBox" style="margin-top:10px;border:1px solid #93c5fd;border-radius:6px;
+               padding:8px 10px;background:#eff6ff;">
+        <summary style="font-size:11.5px;font-weight:700;color:#1e3a8a;cursor:pointer;">
+          3b. 60-Sec Cyprus Engineering Brief (HVAC / ELV / Site / KNX)
+        </summary>
+        <label for="briefHvac">HVAC Plant System</label>
+        <select id="briefHvac">
+          <option value="split_ac">Split A/C Units (20A DP Isolators)</option>
+          <option value="heat_pump_ufh">Air-to-Water Heat Pump (3P) + UFH Manifolds</option>
+          <option value="vrv">VRV / VRF Central (3P) + Indoor FCUs</option>
+        </select>
+        <div class="row2">
+          <div>
+            <label for="briefEvKw">EV Wallbox (Sec. 722)</label>
+            <select id="briefEvKw">
+              <option value="">Auto / Model</option>
+              <option value="0">None (0 kW)</option>
+              <option value="7.4">7.4 kW (1P 32A)</option>
+              <option value="11">11 kW (3P 16A)</option>
+              <option value="22">22 kW (3P 32A)</option>
+            </select>
+          </div>
+          <div>
+            <label for="briefConduitStyle">CAD Conduit Style</label>
+            <select id="briefConduitStyle">
+              <option value="homerun_arcs">Cyprus Home-Run Arrows</option>
+              <option value="full_routed">Full Routed Conduits</option>
+            </select>
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="briefEarthing">Site Earthing</label>
+            <select id="briefEarthing">
+              <option value="foundation_ring">Foundation / Ring Earth</option>
+              <option value="rod_pit">Copper Rod Pit (Ø16)</option>
+            </select>
+          </div>
+          <div>
+            <label for="briefHeightM">Building Height (m)</label>
+            <input id="briefHeightM" type="number" step="0.5" min="3" max="40" value="7.5" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="briefPlotW">Plot Width (m)</label>
+            <input id="briefPlotW" type="number" step="1" min="6" max="150" value="18" />
+          </div>
+          <div>
+            <label for="briefPlotL">Plot Length (m)</label>
+            <input id="briefPlotL" type="number" step="1" min="6" max="150" value="24" />
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+          <input id="briefShutters" type="checkbox" checked style="width:auto;" />
+          <span>Motorized Electric Shutters</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefElv" type="checkbox" checked style="width:auto;" />
+          <span>ELV Pack (9U Rack, Cat6, TV, Wi-Fi, Intercom, Alarm, CCTV)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefSmoke" type="checkbox" checked style="width:auto;" />
+          <span>BS 5839-6 Grade D1 Interlinked Smoke/Heat</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefKitchenFcus" type="checkbox" checked style="width:auto;" />
+          <span>Kitchen Hood / Fridge / Microwave FCUs</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefPumps" type="checkbox" checked style="width:auto;" />
+          <span>Water Booster &amp; Hot Water Recirc Pumps</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefGate" type="checkbox" checked style="width:auto;" />
+          <span>Sliding Yard Gate / Garage Motor</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefSite" type="checkbox" checked style="width:auto;" />
+          <span>Site Trenching, Garden Bollards &amp; IEC 62305-2 LPS</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefPool" type="checkbox" style="width:auto;" />
+          <span>Swimming Pool Plant Sub-DB (BS 7671 Sec. 702)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefKnx" type="checkbox" style="width:auto;" />
+          <span>Smart Home KNX Bus Automation &amp; Keypads</span>
+        </label>
+      </details>
+
       <details id="eacMetaBox" style="margin-top:10px;border:1px solid #cbd5e0;border-radius:6px;
                padding:8px 10px;background:#f8fafc;">
         <summary style="font-size:11.5px;font-weight:700;color:#1b365d;cursor:pointer;">
@@ -556,10 +647,16 @@ def render_etek_workbench_html(
             Circuits &amp; Pass-2 Overrides
           </button>
           <button class="tab" onclick="openTab('tabFloorplan', this)">
-            Drawing Set (E-100 / E-101 / E-102)
+            Drawing Set (E-100..E-103)
+          </button>
+          <button class="tab" onclick="openTab('tabSite', this)">
+            Site &amp; Earthing (E-104)
           </button>
           <button class="tab" onclick="openTab('tabSld', this)">
             SLD (E-201)
+          </button>
+          <button class="tab" onclick="openTab('tabRiser', this)">
+            Riser &amp; DIN-Rail DB (E-202)
           </button>
           <button class="tab" onclick="openTab('tabDetails', this)">
             Details &amp; Notes (E-301)
@@ -600,10 +697,19 @@ def render_etek_workbench_html(
             <button id="btnSheetCombined" class="btn btn-primary btn-sm"
               onclick="selectDrawingSheet('combined')">E-100 Combined</button>
             <button id="btnSheetLighting" class="btn btn-secondary btn-sm"
-              onclick="selectDrawingSheet('lighting')">E-101 Lighting &amp; Switching</button>
+              onclick="selectDrawingSheet('lighting')">E-101 Lighting</button>
             <button id="btnSheetPower" class="btn btn-secondary btn-sm"
-              onclick="selectDrawingSheet('power')">E-102 Power &amp; Accessories</button>
-            <span style="margin-left:8px;">|</span>
+              onclick="selectDrawingSheet('power')">E-102 Power &amp; Plant</button>
+            <button id="btnSheetElv" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('elv')">E-103 ELV &amp; Security</button>
+            <span style="margin-left:6px;">|</span>
+            <select id="anchorTargetSel" style="width:138px;" title="Select key anchor to relocate"
+              onchange="updateAnchorBtnLabel()">
+              <option value="db">Anchor: DB1 / MDB</option>
+              <option value="meter">Anchor: EAC Meter</option>
+              <option value="earth_pit">Anchor: TT Earth Pit</option>
+              <option value="telecom">Anchor: 9U Telecom</option>
+            </select>
             <button id="btnDbMode" class="btn btn-secondary btn-sm" onclick="toggleDbMode()">
               Relocate DB1 on Floorplan
             </button>
@@ -621,8 +727,20 @@ def render_etek_workbench_html(
           <div id="floorplanSvg" class="svg-box">Run a solve to render floorplan overlay.</div>
         </div>
 
+        <div id="tabSite" class="tab-pane">
+          <div id="siteSvg" class="svg-box">
+            Run a solve to render E-104 Site Works, Underground Trenching, Earthing &amp; LPS.
+          </div>
+        </div>
+
         <div id="tabSld" class="tab-pane">
           <div id="sldSvg" class="svg-box">Run a solve to render Single-Line Diagram.</div>
+        </div>
+
+        <div id="tabRiser" class="tab-pane">
+          <div id="riserSvg" class="svg-box">
+            Run a solve to render E-202 Vertical Riser Diagram &amp; 18mm DIN-Rail DB Elevation.
+          </div>
         </div>
 
         <div id="tabDetails" class="tab-pane">
@@ -779,6 +897,9 @@ def render_etek_workbench_html(
     const circuitOverrides = {{}};
     const roomTypeOverrides = {{}};
     let dbLocationOverride = null;
+    let meterLocationOverride = null;
+    let earthPitLocationOverride = null;
+    let telecomLocationOverride = null;
     let dbRelocateMode = false;
     let selectedRoomId = null;
     const layerRoleChoices = {{}};
@@ -799,20 +920,35 @@ def render_etek_workbench_html(
       btn.classList.add('active');
     }}
 
+    function updateAnchorBtnLabel() {{
+      if (dbRelocateMode) return;
+      const sel = document.getElementById('anchorTargetSel');
+      const lbl = sel ? sel.options[sel.selectedIndex].text.replace('Anchor: ', '') : 'DB1';
+      const shortLbl = lbl.startsWith('DB1') ? 'DB1' : lbl;
+      const btn = document.getElementById('btnDbMode');
+      if (btn) btn.textContent = `Relocate ${{shortLbl}} on Floorplan`;
+    }}
+
     function toggleDbMode() {{
       dbRelocateMode = !dbRelocateMode;
       const btn = document.getElementById('btnDbMode');
       const box = document.getElementById('floorplanSvg');
+      const sel = document.getElementById('anchorTargetSel');
+      const lbl = sel ? sel.options[sel.selectedIndex].text.replace('Anchor: ', '') : 'DB1';
+      const shortLbl = lbl.startsWith('DB1') ? 'DB1' : lbl;
       btn.className = dbRelocateMode ? 'btn btn-active btn-sm' : 'btn btn-secondary btn-sm';
       btn.textContent = dbRelocateMode
-        ? 'Click Floorplan to Place DB1 (Cancel)'
-        : 'Relocate DB1 on Floorplan';
+        ? `Click Floorplan to Place ${{shortLbl}} (Cancel)`
+        : `Relocate ${{shortLbl}} on Floorplan`;
       box.classList.toggle('db-mode', dbRelocateMode);
     }}
 
     function resetVisualOverrides() {{
       Object.keys(roomTypeOverrides).forEach(k => delete roomTypeOverrides[k]);
       dbLocationOverride = null;
+      meterLocationOverride = null;
+      earthPitLocationOverride = null;
+      telecomLocationOverride = null;
       selectedRoomId = null;
       document.getElementById('roomEditBox').style.display = 'none';
       if (dbRelocateMode) toggleDbMode();
@@ -851,6 +987,27 @@ def render_etek_workbench_html(
         circuit_overrides: circuitOverrides,
         room_type_overrides: roomTypeOverrides
       }};
+      const briefEvRaw = document.getElementById('briefEvKw').value;
+      ov.residential_brief = {{
+        hvac_mode: document.getElementById('briefHvac').value,
+        conduit_drafting_style: document.getElementById('briefConduitStyle').value,
+        earthing_electrode_type: document.getElementById('briefEarthing').value,
+        building_height_m: parseFloat(document.getElementById('briefHeightM').value || '7.5'),
+        plot_width_m: parseFloat(document.getElementById('briefPlotW').value || '18'),
+        plot_length_m: parseFloat(document.getElementById('briefPlotL').value || '24'),
+        include_electric_shutters: document.getElementById('briefShutters').checked,
+        include_elv: document.getElementById('briefElv').checked,
+        include_smoke_detectors: document.getElementById('briefSmoke').checked,
+        include_kitchen_fcus: document.getElementById('briefKitchenFcus').checked,
+        include_water_pumps: document.getElementById('briefPumps').checked,
+        include_gate_motor: document.getElementById('briefGate').checked,
+        include_site_works: document.getElementById('briefSite').checked,
+        include_pool: document.getElementById('briefPool').checked,
+        include_knx: document.getElementById('briefKnx').checked,
+      }};
+      if (briefEvRaw !== '') {{
+        ov.residential_brief.ev_charger_kw = parseFloat(briefEvRaw);
+      }}
       const vatRate = parseFloat(document.getElementById('vatRateSel').value || '0.19');
       if (Math.abs(vatRate - 0.19) > 1e-6) {{
         ov.boq_rate_overrides = {{ vat_rate: vatRate }};
@@ -862,6 +1019,9 @@ def render_etek_workbench_html(
       const pv = document.getElementById('pvKva').value;
       if (pv) ov.pv_capacity_kva = parseFloat(pv);
       if (dbLocationOverride) ov.db_location_override_mm = dbLocationOverride;
+      if (meterLocationOverride) ov.meter_location_override_mm = meterLocationOverride;
+      if (earthPitLocationOverride) ov.earth_pit_location_override_mm = earthPitLocationOverride;
+      if (telecomLocationOverride) ov.telecom_location_override_mm = telecomLocationOverride;
 
       const firm = document.getElementById('firmName').value.trim();
       const eng = document.getElementById('engName').value.trim();
@@ -914,7 +1074,8 @@ def render_etek_workbench_html(
     }}
 
     function selectDrawingSheet(sheetKey) {{
-      const key = (sheetKey === 'lighting' || sheetKey === 'power') ? sheetKey : 'combined';
+      const valid = ['combined', 'lighting', 'power', 'elv'];
+      const key = valid.includes(sheetKey) ? sheetKey : 'combined';
       window._cyelecActiveSheet = key;
       const sheets = window._cyelecSheets || {{}};
       document.getElementById('floorplanSvg').innerHTML =
@@ -923,6 +1084,7 @@ def render_etek_workbench_html(
         combined: 'btnSheetCombined',
         lighting: 'btnSheetLighting',
         power: 'btnSheetPower',
+        elv: 'btnSheetElv',
       }};
       Object.entries(btnMap).forEach(([k, id]) => {{
         const el = document.getElementById(id);
@@ -1036,9 +1198,14 @@ def render_etek_workbench_html(
         combined: data.floorplan_svg || '',
         lighting: data.lighting_svg || data.floorplan_svg || '',
         power: data.power_svg || data.floorplan_svg || '',
+        elv: data.elv_svg || data.floorplan_svg || '',
       }};
       selectDrawingSheet(window._cyelecActiveSheet || 'combined');
+      document.getElementById('siteSvg').innerHTML =
+        data.site_svg || 'E-104 Site & Earthing sheet unavailable.';
       document.getElementById('sldSvg').innerHTML = data.sld_svg || '';
+      document.getElementById('riserSvg').innerHTML =
+        data.riser_svg || 'E-202 Riser & DIN-Rail DB sheet unavailable.';
       document.getElementById('detailsSvg').innerHTML =
         data.details_svg || 'Details sheet unavailable.';
 
@@ -1101,7 +1268,7 @@ def render_etek_workbench_html(
       }}
     }});
 
-    // Delegated click listener for Interactive Visual Floorplan (Room Reclass & DB1 Relocation)
+    // Delegated click listener for Interactive Visual Floorplan (Room Reclass & Anchor Relocation)
     document.getElementById('floorplanSvg').addEventListener('click', (ev) => {{
       const svg = document.querySelector('#floorplanSvg svg');
       if (!svg) return;
@@ -1119,7 +1286,12 @@ def render_etek_workbench_html(
         const padT = parseFloat(svg.dataset.padTop || '56');
         const xMm = Math.round(minx + (svgPt.x - padL) / scale);
         const yMm = Math.round(maxy - (svgPt.y - padT) / scale);
-        dbLocationOverride = {{ x_mm: xMm, y_mm: yMm }};
+        const target = (document.getElementById('anchorTargetSel') || {{ value: 'db' }}).value;
+        const ptMm = {{ x_mm: xMm, y_mm: yMm }};
+        if (target === 'meter') meterLocationOverride = ptMm;
+        else if (target === 'earth_pit') earthPitLocationOverride = ptMm;
+        else if (target === 'telecom') telecomLocationOverride = ptMm;
+        else dbLocationOverride = ptMm;
         toggleDbMode();
         runSolve();
         return;

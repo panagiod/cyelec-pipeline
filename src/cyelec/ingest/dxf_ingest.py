@@ -34,6 +34,7 @@ from cyelec.models.building import (
     DxfLayerInfo,
     DxfLayerMapping,
     FloorUnderlayRef,
+    FurnitureItem,
     PlumbingFixture,
     Point2D,
     Room,
@@ -45,12 +46,46 @@ from cyelec.models.building import (
 from cyelec.models.electrical import ReviewFlag, ReviewSeverity
 from cyelec.standards_loader import StandardsBundle, load_standards, normalize_label
 
+_FurnitureKind = Literal[
+    "bed",
+    "tv",
+    "sofa",
+    "wardrobe",
+    "dining_table",
+    "kitchen_counter",
+    "stove",
+    "fridge",
+]
+
+_FURNITURE_TOKENS: tuple[tuple[_FurnitureKind, tuple[str, ...]], ...] = (
+    ("bed", ("BED", "KING", "QUEEN", "ΚΡΕΒΑΤ")),
+    ("tv", ("TV", "TELEVISION", "MEDIA", "ΤΗΛΕΟΡ")),
+    ("sofa", ("SOFA", "COUCH", "LOUNGE_SEAT", "ΚΑΝΑΠ")),
+    ("wardrobe", ("WARDROBE", "CLOSET", "CUPBOARD", "ΝΤΟΥΛΑΠ")),
+    ("dining_table", ("DINING", "TABLE", "ΤΡΑΠΕΖ")),
+    ("stove", ("STOVE", "COOKER", "COOKTOP", "CKTOP", "HOB", "RANGE", "ΚΟΥΖΙΝΑ_ΕΣΤ")),
+    ("fridge", ("FRIDGE", "REFRIG", "SNGREF", "DBLREF", "FREEZER", "ΨΥΓΕΙ")),
+    ("kitchen_counter", ("COUNTER", "ISLAND", "WORKTOP", "CABINET", "ΠΑΓΚ")),
+)
+
+
+def _classify_furniture_hint(layer: str, block_hint: str | None) -> _FurnitureKind | None:
+    """Detect architectural furniture/joinery blocks from block name or furniture layer."""
+    combined = f"{layer} {block_hint or ''}".upper()
+    if not combined.strip():
+        return None
+    for fkind, tokens in _FURNITURE_TOKENS:
+        if any(tok in combined for tok in tokens):
+            return fkind
+    return None
+
+
 _INSUNITS_TO_MM: dict[int, float] = {
-    1: 25.4,     # Inches
-    2: 304.8,    # Feet
-    4: 1.0,      # Millimeters
-    5: 10.0,     # Centimeters
-    6: 1000.0,   # Meters
+    1: 25.4,  # Inches
+    2: 304.8,  # Feet
+    4: 1.0,  # Millimeters
+    5: 10.0,  # Centimeters
+    6: 1000.0,  # Meters
 }
 
 _ROOM_LAYER_TOKENS = ("A-ROOM", "ROOM", "SPACE", "AREA", "ZONE")
@@ -124,9 +159,7 @@ def _iter_resolved_entities(
     for ent in entities:
         raw_layer = str(ent.dxf.layer)
         eff_layer = (
-            parent_layer
-            if (parent_layer is not None and raw_layer in ("0", ""))
-            else raw_layer
+            parent_layer if (parent_layer is not None and raw_layer in ("0", "")) else raw_layer
         )
         if isinstance(ent, Insert) and depth < max_depth:
             bname = str(ent.dxf.name)
@@ -176,10 +209,7 @@ def _flatten_spline_xy(entity: Spline, scale: float) -> list[tuple[float, float]
         dist = max(0.02, 50.0 / max(scale, 1e-6))
         return [(float(v.x) * scale, float(v.y) * scale) for v in entity.flattening(dist)]
     except Exception:
-        return [
-            (float(p[0]) * scale, float(p[1]) * scale)
-            for p in entity.control_points
-        ]
+        return [(float(p[0]) * scale, float(p[1]) * scale) for p in entity.control_points]
 
 
 def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, float]] | None:
@@ -248,10 +278,7 @@ def _infer_unit_scale(
         declared_scale = _INSUNITS_TO_MM[insunits]
         # Sanity check: real architectural buildings span >= 3000 mm (3.0 m).
         # AutoCAD files often leave $INSUNITS=4 (mm) even when drawn in inches, cm, or metres.
-        if (
-            declared_scale == 1.0
-            and 0.0 < raw_extents_max < 2500.0
-        ):
+        if declared_scale == 1.0 and 0.0 < raw_extents_max < 2500.0:
             if raw_extents_max < 100.0:
                 scale, guessed = 1000.0, "metres"
             elif 18.0 <= median_arc <= 42.0:
@@ -426,7 +453,7 @@ def _polygonize_rooms_from_walls(
     for p0, p1 in window_lines:
         if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
             lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
-    for p0, p1 in (door_leaves or []):
+    for p0, p1 in door_leaves or []:
         if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 10.0:
             lines.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
     # Seal doorway wall openings along both start and end rays of each swing arc
@@ -460,9 +487,7 @@ def _polygonize_rooms_from_walls(
         bridged = _extract_wall_cavities(lines, buffer_mm=480.0, subtract_thin_mm=80.0)
         raw_area = sum(p.area for p in raw_polys)
         bridged_area = sum(p.area for p in bridged)
-        if len(bridged) > len(raw_polys) and (
-            raw_area <= 0.0 or bridged_area >= 0.70 * raw_area
-        ):
+        if len(bridged) > len(raw_polys) and (raw_area <= 0.0 or bridged_area >= 0.70 * raw_area):
             raw_polys = bridged
             if flags is not None:
                 flags.append(
@@ -587,6 +612,7 @@ def ingest_dxf(
     text_labels: list[tuple[str, Point, str]] = []
     fixture_polys: list[tuple[Polygon, str | None]] = []
     fixture_texts: list[tuple[str, Point]] = []
+    furniture_polys: list[tuple[Polygon, _FurnitureKind]] = []
     wall_lines: list[tuple[Point2D, Point2D]] = []
     layer0_lines: list[tuple[Point2D, Point2D]] = []
     door_arcs: list[tuple[Point2D, float, float, float]] = []
@@ -762,6 +788,16 @@ def ingest_dxf(
                 if txt is not None:
                     fixture_texts.append((txt[0], Point(txt[1])))
 
+        # Architectural furniture & joinery blocks (BED/SOFA/TV/WARDROBE/DINING/STOVE/FRIDGE)
+        elif (furn_kind := _classify_furniture_hint(layer, block_hint)) is not None:
+            coords = _extract_poly_coords(ent, scale)
+            if coords is not None:
+                furn_poly = Polygon(coords)
+                if not furn_poly.is_valid:
+                    furn_poly = furn_poly.buffer(0.0)
+                if isinstance(furn_poly, Polygon) and 80_000.0 <= furn_poly.area <= 15_000_000.0:
+                    furniture_polys.append((furn_poly, furn_kind))
+
         # Layer "0" fallback lines & 90-deg door arcs (used only when dedicated layers are absent)
         elif layer == "0" and not block_hint:
             if dtype == "LINE":
@@ -850,8 +886,7 @@ def ingest_dxf(
             if cand.area < 1_000_000.0:
                 continue
             overlaps_existing = any(
-                (cand.intersection(ex).area / max(cand.area, 1.0)) >= 0.25
-                for ex in room_raw_polys
+                (cand.intersection(ex).area / max(cand.area, 1.0)) >= 0.25 for ex in room_raw_polys
             )
             if not overlaps_existing:
                 room_raw_polys.append(cand)
@@ -926,10 +961,7 @@ def ingest_dxf(
                 }
                 area_m2_est = float(poly.area) / 1_000_000.0
 
-                if (
-                    RoomType.KITCHEN in matched_types
-                    and RoomType.LIVING_ROOM in matched_types
-                ):
+                if RoomType.KITCHEN in matched_types and RoomType.LIVING_ROOM in matched_types:
                     best_label = " / ".join(
                         dict.fromkeys(
                             c[0]
@@ -948,10 +980,13 @@ def ingest_dxf(
                     best_label, best_cls = next(
                         c for c in candidates if c[1].normalized_type == RoomType.UTILITY
                     )
-                elif area_m2_est > 12.0 and (
-                    RoomType.MASTER_BEDROOM in matched_types or RoomType.BEDROOM in matched_types
-                ) and (
-                    RoomType.ENSUITE in matched_types or RoomType.BATHROOM in matched_types
+                elif (
+                    area_m2_est > 12.0
+                    and (
+                        RoomType.MASTER_BEDROOM in matched_types
+                        or RoomType.BEDROOM in matched_types
+                    )
+                    and (RoomType.ENSUITE in matched_types or RoomType.BATHROOM in matched_types)
                 ):
                     pref = (
                         RoomType.MASTER_BEDROOM
@@ -1007,8 +1042,7 @@ def ingest_dxf(
         rt = tmpl_std.rooms[cls_res.normalized_type]
         ring_coords = list(poly.exterior.coords)[:-1]
         poly_pts = [
-            Point2D(x_mm=round(float(x), 2), y_mm=round(float(y), 2))
-            for x, y in ring_coords
+            Point2D(x_mm=round(float(x), 2), y_mm=round(float(y), 2)) for x, y in ring_coords
         ]
         area_m2 = round(float(poly.area) / 1_000_000.0, 4)
 
@@ -1119,6 +1153,30 @@ def ingest_dxf(
         if ftype in ("bathtub", "shower_tray") and not room_obj.is_wet_room:
             room_obj.is_wet_room = True
 
+    # Attach detected furniture/joinery items for furniture-aware electrical placement
+    for furn_idx, (furn_poly, furn_kind) in enumerate(furniture_polys, start=1):
+        target_rid = _find_containing_room(
+            furn_poly.centroid, room_poly_pairs, max_fallback_dist_mm=300.0
+        )
+        if target_rid is None:
+            continue
+        room_obj = rooms_by_id[target_rid]
+        fc = list(furn_poly.exterior.coords)[:-1]
+        if len(fc) < 3:
+            continue
+        cent = furn_poly.centroid
+        room_obj.furniture.append(
+            FurnitureItem(
+                id=f"FURN-{furn_idx}",
+                room_id=target_rid,
+                furniture_type=furn_kind,
+                polygon_mm=[
+                    Point2D(x_mm=round(float(x), 2), y_mm=round(float(y), 2)) for x, y in fc
+                ],
+                centroid_mm=Point2D(x_mm=round(float(cent.x), 2), y_mm=round(float(cent.y), 2)),
+            )
+        )
+
     # Build WallSegments (exact exterior perimeter via room-union boundary)
     outer_ring = unary_union(room_raw_polys).boundary
 
@@ -1141,7 +1199,7 @@ def ingest_dxf(
     # Build DoorOpenings from DXF swing arcs + matching leaf lines
     doors: list[DoorOpening] = []
     for d_idx, (center, radius, start_ang, end_ang) in enumerate(door_arcs, start=1):
-        mid_rad = math.radians(((start_ang + ((end_ang - start_ang) % 360.0) / 2.0)) % 360.0)
+        mid_rad = math.radians((start_ang + ((end_ang - start_ang) % 360.0) / 2.0) % 360.0)
         probe = Point(
             center.x_mm + 0.5 * radius * math.cos(mid_rad),
             center.y_mm + 0.5 * radius * math.sin(mid_rad),
@@ -1343,6 +1401,16 @@ def ingest_multi_floor_dxf(
                 )
                 for fx in r.fixtures
             ]
+            shifted_furn = [
+                FurnitureItem(
+                    id=f"{floor}-{fn.id}",
+                    room_id=new_rid,
+                    furniture_type=fn.furniture_type,
+                    polygon_mm=[_shift_point(p, dx) for p in fn.polygon_mm],
+                    centroid_mm=_shift_point(fn.centroid_mm, dx),
+                )
+                for fn in r.furniture
+            ]
             combined_rooms.append(
                 r.model_copy(
                     update={
@@ -1351,6 +1419,7 @@ def ingest_multi_floor_dxf(
                         "raw_label": f"{r.raw_label} ({floor})",
                         "polygon_mm": [_shift_point(p, dx) for p in r.polygon_mm],
                         "fixtures": shifted_fixts,
+                        "furniture": shifted_furn,
                     }
                 )
             )

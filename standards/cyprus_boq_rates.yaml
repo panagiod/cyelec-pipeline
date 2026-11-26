@@ -66,3 +66,35 @@ accessories_eur:
   water_heater_dp_switch_20a: 32.00
   main_equipotential_bonding_10mm: 120.00
   pv_ac_isolator_meter_kit: 240.00
+  # Stage 5: Turnkey Residential ELV, Plant, Site, KNX & Testing Rates (Cyprus 2026 EUR)
+  dimmer_switch: 48.00
+  outdoor_pir_light_ip65: 68.00
+  pendant_light_point: 55.00
+  shutter_switch_dp: 34.00
+  kitchen_fcu_13a: 32.00
+  room_thermostat_point: 58.00
+  heat_pump_3p_isolator_kit: 185.00
+  vrv_3p_isolator_kit: 195.00
+  water_pump_isolator_kit: 72.00
+  gate_motor_supply_kit: 110.00
+  pool_sub_db_sec702_kit: 680.00
+  telecom_cabinet_9u_patch: 390.00
+  cat6_dual_rj45_point: 68.00
+  tv_coax_point: 42.00
+  wifi_poe_ap_drop: 55.00
+  video_intercom_kit_outdoor_indoor: 440.00
+  video_intercom_extra_monitor: 165.00
+  intruder_alarm_panel_keypad_siren: 520.00
+  intruder_alarm_pir_point: 58.00
+  cctv_poe_camera_point: 145.00
+  smoke_heat_detector_grade_d1: 52.00
+  foundation_ring_earthing_kit: 420.00
+  lps_class4_external_kit: 2450.00
+  underground_trench_eac_duct_per_m: 48.00
+  underground_telecom_duct_per_m: 18.00
+  garden_bollard_ip65_point: 95.00
+  knx_psu_640ma_din: 240.00
+  knx_actuator_8ch_din: 340.00
+  knx_scene_keypad: 145.00
+  testing_commissioning_hmy58_asbuilt: 450.00
+

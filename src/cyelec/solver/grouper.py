@@ -12,6 +12,7 @@ from cyelec.models.electrical import (
     CircuitSpec,
     CircuitTopology,
     DesignOverrides,
+    ResidentialSystemsBrief,
     ReviewFlag,
     ReviewSeverity,
 )
@@ -279,9 +280,7 @@ def _generate_board_circuits(
                     design_current_ib_a=ib,
                     nominal_voltage_v=u0,
                     is_three_phase=False,
-                    length_m=_estimate_ring_length_m(
-                        db, chunk, defaults.vertical_drop_allowance_m
-                    ),
+                    length_m=_estimate_ring_length_m(db, chunk, defaults.vertical_drop_allowance_m),
                     installation_method=method,
                     ambient_temp_c=_resolve_ambient_c(chunk, standards, overrides),
                     grouping_count=1,
@@ -317,9 +316,7 @@ def _generate_board_circuits(
                     design_current_ib_a=ib,
                     nominal_voltage_v=u0,
                     is_three_phase=False,
-                    length_m=_estimate_ring_length_m(
-                        db, chunk, defaults.vertical_drop_allowance_m
-                    ),
+                    length_m=_estimate_ring_length_m(db, chunk, defaults.vertical_drop_allowance_m),
                     installation_method=method,
                     ambient_temp_c=_resolve_ambient_c(chunk, standards, overrides),
                     grouping_count=1,
@@ -332,44 +329,97 @@ def _generate_board_circuits(
                 )
             )
 
-    # 3. Dedicated Cyprus Split A/C Radials (Curve C, 0.85 summer diversity)
-    for room in rooms:
-        rt = tmpl_std.rooms[room.normalized_type]
-        if not rt.has_split_ac or rt.ac_electrical_w <= 0.0:
-            continue
-        conn_w = rt.ac_electrical_w
-        div_w = round(conn_w * defaults.split_ac_diversity, 1)
-        pf = defaults.split_ac_power_factor
-        ib = round(div_w / (u0 * pf), 2)
-        circuits.append(
-            CircuitSpec(
-                circuit_id=_next_id(),
-                board_id=board_id,
-                description=f"{floor_prefix}Split A/C Unit - {room.raw_label}",
-                category=CircuitCategory.SPLIT_AC,
-                topology=CircuitTopology.RADIAL,
-                room_ids=[room.id],
-                connected_load_w=conn_w,
-                diversity_factor=defaults.split_ac_diversity,
-                diversified_load_w=div_w,
-                power_factor=pf,
-                design_current_ib_a=ib,
-                nominal_voltage_v=u0,
-                is_three_phase=False,
-                length_m=_estimate_radial_length_m(
-                    db, [room], defaults.vertical_drop_allowance_m
-                ),
-                installation_method=method,
-                ambient_temp_c=_resolve_ambient_c([room], standards, overrides),
-                grouping_count=1,
-                preferred_curve=BreakerCurve.C,
-                min_breaker_in_a=16,
-                min_cable_mm2=2.5,
-                rcd_protected=True,
-                rcd_idn_ma=rcd_idn,
-                vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+    # 3. Dedicated Cyprus Split A/C Radials (Curve C, 0.85 diversity — when hvac_mode=split_ac)
+    brief = (
+        overrides.residential_brief
+        if (overrides is not None and overrides.residential_brief is not None)
+        else ResidentialSystemsBrief()
+    )
+    if is_commercial or brief.hvac_mode == "split_ac":
+        for room in rooms:
+            rt = tmpl_std.rooms[room.normalized_type]
+            if not rt.has_split_ac or rt.ac_electrical_w <= 0.0:
+                continue
+            conn_w = rt.ac_electrical_w
+            div_w = round(conn_w * defaults.split_ac_diversity, 1)
+            pf = defaults.split_ac_power_factor
+            ib = round(div_w / (u0 * pf), 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=board_id,
+                    description=f"{floor_prefix}Split A/C Unit - {room.raw_label}",
+                    category=CircuitCategory.SPLIT_AC,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[room.id],
+                    connected_load_w=conn_w,
+                    diversity_factor=defaults.split_ac_diversity,
+                    diversified_load_w=div_w,
+                    power_factor=pf,
+                    design_current_ib_a=ib,
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        db, [room], defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
             )
-        )
+
+    # 3b. Motorized Window Shutters per floor (residential Cyprus standard)
+    if (not is_commercial) and brief.include_electric_shutters:
+        shutter_rooms = [
+            r
+            for r in rooms
+            if r.normalized_type
+            in (
+                RoomType.LIVING_ROOM,
+                RoomType.KITCHEN_LIVING,
+                RoomType.MASTER_BEDROOM,
+                RoomType.BEDROOM,
+                RoomType.KITCHEN,
+            )
+        ]
+        if shutter_rooms:
+            sh_w = round(min(1200.0, max(450.0, 150.0 * len(shutter_rooms))), 1)
+            sh_div = round(sh_w * 0.30, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=board_id,
+                    description=f"{floor_prefix}Motorized Window Shutters / Blinds",
+                    category=CircuitCategory.SHUTTERS,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[r.id for r in shutter_rooms],
+                    connected_load_w=sh_w,
+                    diversity_factor=0.30,
+                    diversified_load_w=sh_div,
+                    power_factor=0.90,
+                    design_current_ib_a=round(sh_div / (u0 * 0.90), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        db, shutter_rooms, defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c(shutter_rooms, standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=10,
+                    min_cable_mm2=1.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
 
     # 4. Dedicated Appliances (Cooker, Oven, Dishwasher, Washer, Solar WH, UPS, 3P Plant/Lift)
     for room in rooms:
@@ -436,8 +486,7 @@ def _generate_board_circuits(
                     circuit_id=_next_id(),
                     board_id=board_id,
                     description=(
-                        f"{floor_prefix}Kitchenette Water Boiler / Coffee Radial "
-                        f"({room.raw_label})"
+                        f"{floor_prefix}Kitchenette Water Boiler / Coffee Radial ({room.raw_label})"
                     ),
                     category=CircuitCategory.APPLIANCE,
                     topology=CircuitTopology.RADIAL,
@@ -637,10 +686,395 @@ def generate_circuits(
             )
         )
 
+    # 4c. Stage 5 Turnkey Cyprus Residential Plant, Life Safety, ELV, Site & KNX Circuits
+    brief = (
+        overrides.residential_brief
+        if (overrides is not None and overrides.residential_brief is not None)
+        else ResidentialSystemsBrief()
+    )
+    ul = eac_std.system_nominal.ul_v
+    is_house = building.building_type == BuildingType.INDEPENDENT_HOUSE
+    primary_room = building.rooms[0]
+    utility_room = next(
+        (
+            r
+            for r in building.rooms
+            if r.normalized_type in (RoomType.UTILITY, RoomType.PLANT_ROOM, RoomType.CORRIDOR)
+        ),
+        primary_room,
+    )
+    outdoor_ambient = (
+        overrides.ambient_temp_c
+        if (overrides is not None and overrides.ambient_temp_c is not None)
+        else eac_std.ambient_defaults_c.roof_outdoor_c
+    )
+
+    if not is_commercial:
+        # Central 3P Air-to-Water Heat Pump + Underfloor Heating
+        if brief.hvac_mode == "heat_pump_ufh":
+            hp_w = round(brief.heat_pump_kw * 1000.0, 1)
+            hp_div = round(hp_w * 0.90, 1)
+            hp_ib = round(hp_div / (math.sqrt(3.0) * ul * 0.90), 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description=(
+                        f"Air-to-Water Heat Pump 3P Outdoor Unit ({brief.heat_pump_kw:g} kWe)"
+                    ),
+                    category=CircuitCategory.HEAT_PUMP,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=hp_w,
+                    diversity_factor=0.90,
+                    diversified_load_w=hp_div,
+                    power_factor=0.90,
+                    design_current_ib_a=hp_ib,
+                    nominal_voltage_v=ul,
+                    is_three_phase=True,
+                    length_m=18.0,
+                    installation_method=method,
+                    ambient_temp_c=outdoor_ambient,
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+            ufh_w = 1800.0
+            ufh_div = round(ufh_w * 0.80, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="Heat Pump Hydrobox, UFH Manifolds & Room Thermostats",
+                    category=CircuitCategory.HEAT_PUMP,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=ufh_w,
+                    diversity_factor=0.80,
+                    diversified_load_w=ufh_div,
+                    power_factor=0.95,
+                    design_current_ib_a=round(ufh_div / (u0 * 0.95), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        primary_db, [utility_room], defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([utility_room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+        elif brief.hvac_mode == "vrv":
+            vrv_w = round(brief.vrv_outdoor_kw * 1000.0, 1)
+            vrv_div = round(vrv_w * 0.85, 1)
+            vrv_ib = round(vrv_div / (math.sqrt(3.0) * ul * 0.90), 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description=f"VRV / VRF 3P Outdoor Condenser ({brief.vrv_outdoor_kw:g} kWe)",
+                    category=CircuitCategory.HVAC_3P,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=vrv_w,
+                    diversity_factor=0.85,
+                    diversified_load_w=vrv_div,
+                    power_factor=0.90,
+                    design_current_ib_a=vrv_ib,
+                    nominal_voltage_v=ul,
+                    is_three_phase=True,
+                    length_m=20.0,
+                    installation_method=method,
+                    ambient_temp_c=outdoor_ambient,
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=20,
+                    min_cable_mm2=4.0,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+            fcu_rooms = [
+                r for r in building.rooms if tmpl_std.rooms[r.normalized_type].has_split_ac
+            ] or [primary_room]
+            fcu_w = round(max(400.0, 120.0 * len(fcu_rooms)), 1)
+            fcu_div = round(fcu_w * 0.85, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="VRV Concealed Indoor Fan-Coil Units & Controllers",
+                    category=CircuitCategory.SPLIT_AC,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[r.id for r in fcu_rooms],
+                    connected_load_w=fcu_w,
+                    diversity_factor=0.85,
+                    diversified_load_w=fcu_div,
+                    power_factor=0.92,
+                    design_current_ib_a=round(fcu_div / (u0 * 0.92), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        primary_db, fcu_rooms, defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c(fcu_rooms, standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=10,
+                    min_cable_mm2=1.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
+        # Water Pressure Booster & Hot-Water Recirculation Pumps
+        if brief.include_water_pumps:
+            wp_w = 750.0
+            wp_div = round(wp_w * 0.50, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="Water Pressure Booster & Hot-Water Recirculation Pumps",
+                    category=CircuitCategory.WATER_PUMP,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=wp_w,
+                    diversity_factor=0.50,
+                    diversified_load_w=wp_div,
+                    power_factor=0.88,
+                    design_current_ib_a=round(wp_div / (u0 * 0.88), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        primary_db, [utility_room], defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([utility_room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
+        # Sliding Yard Gate / Electric Garage Door Motor (houses)
+        if brief.include_gate_motor and is_house:
+            gt_w = 500.0
+            gt_div = round(gt_w * 0.30, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="Sliding Yard Gate / Garage Door Motor & Photocells",
+                    category=CircuitCategory.GATE_GARAGE,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[primary_room.id],
+                    connected_load_w=gt_w,
+                    diversity_factor=0.30,
+                    diversified_load_w=gt_div,
+                    power_factor=0.85,
+                    design_current_ib_a=round(gt_div / (u0 * 0.85), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=max(15.0, brief.street_setback_m + 10.0),
+                    installation_method=method,
+                    ambient_temp_c=outdoor_ambient,
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=10,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
+        # BS 5839-6 Grade D1 Interlinked Residential Smoke & Kitchen Heat Detectors
+        if brief.include_smoke_detectors:
+            smk_w = 120.0
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="Interlinked Smoke & Kitchen Heat Detectors (BS 5839-6 Grade D1)",
+                    category=CircuitCategory.SMOKE_DETECTION,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[r.id for r in building.rooms[:6]],
+                    connected_load_w=smk_w,
+                    diversity_factor=1.0,
+                    diversified_load_w=smk_w,
+                    power_factor=0.95,
+                    design_current_ib_a=round(smk_w / (u0 * 0.95), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=_estimate_radial_length_m(
+                        primary_db, building.rooms[:4], defaults.vertical_drop_allowance_m
+                    ),
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([primary_room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=6,
+                    min_cable_mm2=1.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.lighting,
+                )
+            )
+
+        # ELV / Telecom Rack, Fiber ONT, PoE Switch, Intercom, Alarm & CCTV Power Spur
+        if brief.include_elv:
+            elv_w = 350.0
+            elv_div = round(elv_w * 0.80, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="ELV Telecom Rack, PoE Switch, Intercom, Alarm & CCTV Spur",
+                    category=CircuitCategory.ELV_POWER,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=elv_w,
+                    diversity_factor=0.80,
+                    diversified_load_w=elv_div,
+                    power_factor=0.95,
+                    design_current_ib_a=round(elv_div / (u0 * 0.95), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=10.0,
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([utility_room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=16,
+                    min_cable_mm2=2.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
+        # External Garden & Perimeter Lighting (Photocell + Astro Timer, houses)
+        if brief.include_site_works and is_house:
+            grd_w = 400.0
+            grd_div = round(grd_w * 0.80, 1)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="External Garden & Perimeter Lighting (Photocell / Astro Timer)",
+                    category=CircuitCategory.LIGHTING,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[primary_room.id],
+                    connected_load_w=grd_w,
+                    diversity_factor=0.80,
+                    diversified_load_w=grd_div,
+                    power_factor=0.95,
+                    design_current_ib_a=round(grd_div / (u0 * 0.95), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=max(20.0, brief.plot_length_m),
+                    installation_method=method,
+                    ambient_temp_c=outdoor_ambient,
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=10,
+                    min_cable_mm2=1.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.lighting,
+                )
+            )
+
+        # Optional Swimming Pool Sub-DB Feeder (BS 7671 Section 702)
+        if brief.include_pool:
+            pool_w = 4500.0
+            pool_div = round(pool_w * 0.80, 1)
+            pool_ib = round(pool_div / (math.sqrt(3.0) * ul * 0.88), 2)
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="Swimming Pool Sub-DB Feeder (BS 7671 Sec. 702, Pump + SELV 12V)",
+                    category=CircuitCategory.POOL,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[primary_room.id],
+                    connected_load_w=pool_w,
+                    diversity_factor=0.80,
+                    diversified_load_w=pool_div,
+                    power_factor=0.88,
+                    design_current_ib_a=pool_ib,
+                    nominal_voltage_v=ul,
+                    is_three_phase=True,
+                    length_m=max(22.0, brief.plot_length_m * 0.85),
+                    installation_method=method,
+                    ambient_temp_c=outdoor_ambient,
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.C,
+                    min_breaker_in_a=20,
+                    min_cable_mm2=4.0,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
+        # Optional Smart Home KNX Bus Power Supply (640mA) & DALI Dimming Gateway
+        if brief.include_knx:
+            knx_w = 200.0
+            circuits.append(
+                CircuitSpec(
+                    circuit_id=_next_id(),
+                    board_id=primary_board_id,
+                    description="KNX Bus Power Supply (640mA), Actuators & DALI Gateway",
+                    category=CircuitCategory.KNX_BUS,
+                    topology=CircuitTopology.RADIAL,
+                    room_ids=[utility_room.id],
+                    connected_load_w=knx_w,
+                    diversity_factor=1.0,
+                    diversified_load_w=knx_w,
+                    power_factor=0.95,
+                    design_current_ib_a=round(knx_w / (u0 * 0.95), 2),
+                    nominal_voltage_v=u0,
+                    is_three_phase=False,
+                    length_m=8.0,
+                    installation_method=method,
+                    ambient_temp_c=_resolve_ambient_c([utility_room], standards, overrides),
+                    grouping_count=1,
+                    preferred_curve=BreakerCurve.B,
+                    min_breaker_in_a=10,
+                    min_cable_mm2=1.5,
+                    rcd_protected=True,
+                    rcd_idn_ma=rcd_idn,
+                    vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+                )
+            )
+
     # 5. Optional Dedicated EV Charger (BS 7671 Section 722, Mode 3)
-    if building.ev_charger_kw > 0.0:
-        ev_w = round(building.ev_charger_kw * 1000.0, 1)
-        is_3p_ev = building.ev_charger_kw > 7.4
+    effective_ev_kw = (
+        brief.ev_charger_kw if brief.ev_charger_kw is not None else building.ev_charger_kw
+    )
+    if effective_ev_kw > 0.0:
+        ev_w = round(effective_ev_kw * 1000.0, 1)
+        is_3p_ev = effective_ev_kw > 7.4
         ev_v = eac_std.system_nominal.ul_v if is_3p_ev else u0
         ev_ib = round(
             ev_w / (math.sqrt(3.0) * ev_v) if is_3p_ev else ev_w / ev_v,
@@ -655,7 +1089,7 @@ def generate_circuits(
             CircuitSpec(
                 circuit_id=_next_id(),
                 board_id=primary_board_id,
-                description=f"EV Charger Mode 3 ({building.ev_charger_kw:g} kW)",
+                description=f"EV Charger Mode 3 ({effective_ev_kw:g} kW)",
                 category=CircuitCategory.EV_CHARGER,
                 topology=CircuitTopology.RADIAL,
                 room_ids=[building.rooms[0].id],
@@ -878,4 +1312,3 @@ def split_oversized_routed_circuits(
             used_ids.add(cid)
             out.append(s.model_copy(update={"circuit_id": cid}))
     return out, flags, True
-

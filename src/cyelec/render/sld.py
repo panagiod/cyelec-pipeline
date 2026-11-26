@@ -1000,7 +1000,7 @@ def _add_sld_paper_space_sheet(
     sheet_h: float,
 ) -> None:
     """Create a print-ready ISO A3 or A1 Paper-Space layout tab for single_line_diagram.dxf."""
-    use_a1 = len(result.circuits) > 18 or bool(result.sub_mains)
+    use_a1 = len(result.circuits) > 24 or bool(result.sub_mains)
     paper_w, paper_h = (841.0, 594.0) if use_a1 else (420.0, 297.0)
     tab_name = "EAC-SLD-A1" if use_a1 else "EAC-SLD-A3"
 

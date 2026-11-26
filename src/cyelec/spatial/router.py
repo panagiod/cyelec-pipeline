@@ -152,11 +152,36 @@ def build_conduit_graph(
             graph, _node_key(wall.start), _node_key(wall.end), penalty=1.0, kind="wall"
         )
 
-    # 3. Attach DB1 and every placed electrical device cleanly onto the routing graph
+    # 3. Attach DB1 and every LV powered indoor electrical device cleanly onto the routing graph
+    _NON_ROUTED_TYPES = frozenset(
+        {
+            DeviceType.EAC_METER_CABINET,
+            DeviceType.EARTH_PIT,
+            DeviceType.TELECOM_CABINET,
+            DeviceType.DATA_RJ45,
+            DeviceType.TV_OUTLET,
+            DeviceType.WIFI_AP,
+            DeviceType.INTERCOM_OUTDOOR,
+            DeviceType.INTERCOM_INDOOR,
+            DeviceType.ALARM_PANEL,
+            DeviceType.ALARM_PIR,
+            DeviceType.ALARM_KEYPAD,
+            DeviceType.ALARM_SIREN,
+            DeviceType.CCTV_CAMERA,
+            DeviceType.KNX_KEYPAD,
+            DeviceType.GARDEN_BOLLARD,
+            DeviceType.HEAT_PUMP_OUTDOOR,
+            DeviceType.VRV_OUTDOOR,
+            DeviceType.GATE_MOTOR,
+            DeviceType.EV_WALLBOX,
+            DeviceType.POOL_SUB_DB,
+            DeviceType.OUTDOOR_PIR_LIGHT,
+        }
+    )
     db_node = _attach_node_to_graph(graph, building.db_anchor.location_mm, kind="db")
     device_nodes: dict[str, tuple[int, int]] = {}
     for dev in devices:
-        if dev.device_type in (DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT):
+        if dev.device_type in _NON_ROUTED_TYPES:
             continue
         device_nodes[dev.device_id] = _attach_node_to_graph(graph, dev.location_mm, kind="device")
 
@@ -192,24 +217,32 @@ def assign_devices_to_circuits(
     circuits: list[CircuitSpec],
     devices: list[PlacedDevice],
 ) -> tuple[list[PlacedDevice], dict[str, list[PlacedDevice]]]:
-    """Deterministically bind each placed device to its supplying CircuitSpec."""
+    """Deterministically bind each placed device to its supplying CircuitSpec or ELV bus."""
     updated_devices: list[PlacedDevice] = []
     by_circuit: dict[str, list[PlacedDevice]] = {c.circuit_id: [] for c in circuits}
 
     lighting_by_room: dict[str, str] = {}
     socket_by_room: dict[str, str] = {}
     ac_by_room: dict[str, str] = {}
+    shutter_by_room: dict[str, str] = {}
     app_by_category_room: dict[tuple[str, str], str] = {}
     app_by_category: dict[str, str] = {}
+    first_by_category: dict[CircuitCategory, str] = {}
+    garden_light_cid: str | None = None
 
     for c in circuits:
+        first_by_category.setdefault(c.category, c.circuit_id)
+        if c.category == CircuitCategory.LIGHTING and "garden" in c.description.lower():
+            garden_light_cid = c.circuit_id
         for rid in c.room_ids:
-            if c.category == CircuitCategory.LIGHTING:
+            if c.category == CircuitCategory.LIGHTING and "garden" not in c.description.lower():
                 lighting_by_room[rid] = c.circuit_id
             elif c.category in (CircuitCategory.SOCKET_RING, CircuitCategory.SOCKET_RADIAL):
                 socket_by_room[rid] = c.circuit_id
             elif c.category == CircuitCategory.SPLIT_AC:
                 ac_by_room[rid] = c.circuit_id
+            elif c.category == CircuitCategory.SHUTTERS:
+                shutter_by_room[rid] = c.circuit_id
             elif c.category in (
                 CircuitCategory.COOKER,
                 CircuitCategory.OVEN,
@@ -243,16 +276,86 @@ def assign_devices_to_circuits(
         cid: str | None = None
         if dev.device_type in (
             DeviceType.LUMINAIRE,
+            DeviceType.PENDANT_LIGHT,
+            DeviceType.WALL_SCONCE,
+            DeviceType.LINEAR_COVE,
             DeviceType.MIRROR_LIGHT,
             DeviceType.EXHAUST_FAN,
             DeviceType.SWITCH,
+            DeviceType.DIMMER_SWITCH,
             DeviceType.FAN_ISOLATOR_3P,
         ):
-            cid = lighting_by_room.get(dev.room_id)
-        elif dev.device_type == DeviceType.SOCKET_TWIN:
-            cid = socket_by_room.get(dev.room_id)
-        elif dev.device_type == DeviceType.SPLIT_AC:
-            cid = ac_by_room.get(dev.room_id)
+            cid = lighting_by_room.get(dev.room_id) or first_by_category.get(
+                CircuitCategory.LIGHTING
+            )
+        elif dev.device_type in (DeviceType.OUTDOOR_PIR_LIGHT, DeviceType.GARDEN_BOLLARD):
+            cid = (
+                garden_light_cid
+                or lighting_by_room.get(dev.room_id)
+                or first_by_category.get(CircuitCategory.LIGHTING)
+                or "SITE-LIGHT"
+            )
+        elif dev.device_type in (DeviceType.SOCKET_TWIN, DeviceType.KITCHEN_FCU):
+            cid = socket_by_room.get(dev.room_id) or first_by_category.get(
+                CircuitCategory.SOCKET_RING
+            )
+        elif dev.device_type in (DeviceType.SPLIT_AC, DeviceType.VRV_INDOOR_ISOLATOR):
+            cid = ac_by_room.get(dev.room_id) or first_by_category.get(CircuitCategory.SPLIT_AC)
+        elif dev.device_type == DeviceType.SHUTTER_SWITCH:
+            cid = shutter_by_room.get(dev.room_id) or first_by_category.get(
+                CircuitCategory.SHUTTERS
+            )
+        elif dev.device_type in (
+            DeviceType.HEAT_PUMP_OUTDOOR,
+            DeviceType.HEAT_PUMP_HYDROBOX,
+            DeviceType.UFH_MANIFOLD,
+        ):
+            cid = first_by_category.get(CircuitCategory.HEAT_PUMP)
+        elif dev.device_type == DeviceType.VRV_OUTDOOR:
+            cid = first_by_category.get(CircuitCategory.HVAC_3P) or first_by_category.get(
+                CircuitCategory.SPLIT_AC
+            )
+        elif dev.device_type == DeviceType.ROOM_THERMOSTAT:
+            cid = (
+                first_by_category.get(CircuitCategory.HEAT_PUMP)
+                or first_by_category.get(CircuitCategory.SPLIT_AC)
+                or "HVAC-CTRL"
+            )
+        elif dev.device_type == DeviceType.WATER_BOOSTER_PUMP:
+            cid = first_by_category.get(CircuitCategory.WATER_PUMP)
+        elif dev.device_type == DeviceType.GATE_MOTOR:
+            cid = first_by_category.get(CircuitCategory.GATE_GARAGE)
+        elif dev.device_type == DeviceType.EV_WALLBOX:
+            cid = first_by_category.get(CircuitCategory.EV_CHARGER)
+        elif dev.device_type == DeviceType.POOL_SUB_DB:
+            cid = first_by_category.get(CircuitCategory.POOL)
+        elif dev.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
+            cid = (
+                first_by_category.get(CircuitCategory.SMOKE_DETECTION)
+                or first_by_category.get(CircuitCategory.FIRE_ALARM)
+                or "ELV-SMOKE"
+            )
+        elif dev.device_type == DeviceType.TELECOM_CABINET:
+            cid = first_by_category.get(CircuitCategory.ELV_POWER) or "ELV-RACK"
+        elif dev.device_type == DeviceType.DATA_RJ45:
+            cid = "ELV-DATA"
+        elif dev.device_type == DeviceType.TV_OUTLET:
+            cid = "ELV-TV"
+        elif dev.device_type == DeviceType.WIFI_AP:
+            cid = "ELV-WIFI"
+        elif dev.device_type in (DeviceType.INTERCOM_OUTDOOR, DeviceType.INTERCOM_INDOOR):
+            cid = "ELV-INTERCOM"
+        elif dev.device_type in (
+            DeviceType.ALARM_PANEL,
+            DeviceType.ALARM_PIR,
+            DeviceType.ALARM_KEYPAD,
+            DeviceType.ALARM_SIREN,
+        ):
+            cid = "ELV-ALARM"
+        elif dev.device_type == DeviceType.CCTV_CAMERA:
+            cid = "ELV-CCTV"
+        elif dev.device_type == DeviceType.KNX_KEYPAD:
+            cid = first_by_category.get(CircuitCategory.KNX_BUS) or "KNX-BUS"
         elif dev.device_type in (DeviceType.COOKER_OUTLET, DeviceType.COOKER_CONTROL_UNIT):
             cid = app_by_category_room.get(("cooker", dev.room_id)) or app_by_category.get("cooker")
         elif dev.device_type == DeviceType.OVEN_OUTLET:
@@ -340,14 +443,37 @@ def route_circuits(
     edge_circuit_counts: Counter[str] = Counter()
     raw_routes: list[tuple[str, list[str], list[ConduitSegment], float, float]] = []
 
+    board_floor_map: dict[str, str] = {sb.board_id: sb.floor for sb in building.sub_boards}
+    if building.sub_boards and building.db_anchor.id not in board_floor_map:
+        board_floor_map[building.db_anchor.id] = building.sub_boards[0].floor
+
     for spec in circuits:
         origin_node = sub_board_nodes.get(spec.board_id, db_node)
         c_devs = by_circuit.get(spec.circuit_id, [])
-        target_nodes = [device_nodes[d.device_id] for d in c_devs if d.device_id in device_nodes]
+        board_floor = board_floor_map.get(spec.board_id)
+        if board_floor is not None:
+            same_floor_devs = [
+                d
+                for d in c_devs
+                if d.room_id not in rooms_by_id or rooms_by_id[d.room_id].floor == board_floor
+            ]
+            off_floor_count = len(c_devs) - len(same_floor_devs)
+        else:
+            same_floor_devs = c_devs
+            off_floor_count = 0
+
+        target_nodes = [
+            device_nodes[d.device_id] for d in same_floor_devs if d.device_id in device_nodes
+        ]
 
         if not target_nodes:
-            # Fallback to target room centroid if no explicit devices bound
-            fallback_rooms = [rooms_by_id[rid] for rid in spec.room_ids if rid in rooms_by_id]
+            # Fallback to target room centroid on the same floor if no explicit devices bound
+            fallback_rooms = [
+                rooms_by_id[rid]
+                for rid in spec.room_ids
+                if rid in rooms_by_id
+                and (board_floor is None or rooms_by_id[rid].floor == board_floor)
+            ]
             target_nodes = [
                 _attach_node_to_graph(graph, r.centroid_mm(), kind="fallback")
                 for r in fallback_rooms
@@ -390,6 +516,8 @@ def route_circuits(
         )
         riser_count = 2 if spec.topology == CircuitTopology.RING_FINAL else 1
         vertical_m = riser_count * max(0.5, (ceiling_mm - db_mounting_height_mm) / 1000.0)
+        if off_floor_count > 0:
+            vertical_m += 3.5 + 1.5 * min(off_floor_count, 4)
         for dev in c_devs:
             if dev.device_type == DeviceType.LUMINAIRE:
                 vertical_m += 0.25  # Ceiling rose tail

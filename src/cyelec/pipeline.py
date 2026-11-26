@@ -22,6 +22,7 @@ from cyelec.models.electrical import (
     PhaseAssignment,
     PhaseBalanceResult,
     ReportLanguage,
+    ResidentialSystemsBrief,
     ReviewFlag,
     ReviewSeverity,
     RunProvenance,
@@ -41,6 +42,11 @@ from cyelec.solver.boq import generate_boq
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circuits
+from cyelec.solver.residential_engineering import (
+    compute_din_rail_layouts,
+    compute_lightning_risk_iec62305,
+    compute_room_lumen_checks,
+)
 from cyelec.solver.submain import finalize_submain_cumulative_vd, solve_submain
 from cyelec.spatial.placement import build_switch_legs, place_electrical_devices
 from cyelec.spatial.router import route_circuits
@@ -100,17 +106,28 @@ def run_phase1_pipeline(
         if (overrides is not None and overrides.ze_or_ra_ohm is not None)
         else eac_rules.earthing.default_ze_or_ra_ohm[earthing_system]
     )
+    residential_brief = (
+        overrides.residential_brief
+        if (overrides is not None and overrides.residential_brief is not None)
+        else ResidentialSystemsBrief()
+    )
     pv_kva: float = (
         overrides.pv_capacity_kva
         if (overrides is not None and overrides.pv_capacity_kva is not None)
         else building.pv_capacity_kva
     )
-
-    effective_building = (
-        building.model_copy(update={"pv_capacity_kva": pv_kva})
-        if pv_kva != building.pv_capacity_kva
-        else building
+    ev_kw: float = (
+        residential_brief.ev_charger_kw
+        if residential_brief.ev_charger_kw is not None
+        else building.ev_charger_kw
     )
+
+    b_updates: dict[str, object] = {}
+    if pv_kva != building.pv_capacity_kva:
+        b_updates["pv_capacity_kva"] = pv_kva
+    if ev_kw != building.ev_charger_kw:
+        b_updates["ev_charger_kw"] = ev_kw
+    effective_building = building.model_copy(update=b_updates) if b_updates else building
 
     # 1. Deterministic circuit grouping (reusing Phase 2 specs when precomputed)
     raw_specs = (
@@ -129,8 +146,7 @@ def run_phase1_pipeline(
     # Pre-apply per-circuit overrides (e.g., diversity/fixed_phase/length) before MILP balancing
     circuit_overrides = overrides.circuit_overrides if overrides is not None else {}
     effective_specs = [
-        _apply_circuit_override(spec, circuit_overrides.get(spec.circuit_id))
-        for spec in raw_specs
+        _apply_circuit_override(spec, circuit_overrides.get(spec.circuit_id)) for spec in raw_specs
     ]
 
     # 2. Exact MILP 3-phase balancing (when supply is 3-phase)
@@ -209,9 +225,7 @@ def run_phase1_pipeline(
         if prelim is None:
             continue
         board_solved = [c for c in solved_circuits if c.spec.board_id == sb.board_id]
-        solved_sub_mains.append(
-            finalize_submain_cumulative_vd(prelim, board_solved, standards)
-        )
+        solved_sub_mains.append(finalize_submain_cumulative_vd(prelim, board_solved, standards))
 
     # 4. Cyprus EAC supply & escalation checks
     eac_compliance = evaluate_eac_compliance(
@@ -249,6 +263,13 @@ def run_phase1_pipeline(
         review_flags.extend(sm.flags)
     for circ in solved_circuits:
         review_flags.extend(circ.flags)
+
+    lightning_risk = None
+    if residential_brief.include_site_works:
+        lightning_risk, lps_flags = compute_lightning_risk_iec62305(
+            effective_building, residential_brief
+        )
+        review_flags.extend(lps_flags)
 
     has_blockers = any(f.severity == ReviewSeverity.BLOCKER for f in review_flags)
 
@@ -289,14 +310,16 @@ def run_phase1_pipeline(
         eac_compliance=eac_compliance,
         report_language=report_language,
         branding=branding,
-        include_tt_main_rcd_s=(
-            overrides.include_tt_main_rcd_s if overrides is not None else True
-        ),
+        include_tt_main_rcd_s=(overrides.include_tt_main_rcd_s if overrides is not None else True),
         eac_metadata=overrides.eac_metadata if overrides is not None else None,
+        residential_brief=residential_brief,
+        lightning_risk=lightning_risk,
         review_flags=review_flags,
         has_blockers=has_blockers,
         etek_signoff_required=True,
     )
+    din_rail_boards = compute_din_rail_layouts(result)
+    result = result.model_copy(update={"din_rail_boards": din_rail_boards})
     boq = generate_boq(
         result,
         standards,
@@ -311,7 +334,7 @@ def _apply_building_overrides(
     overrides: DesignOverrides | None,
     standards: StandardsBundle,
 ) -> tuple[BuildingModel, list[ReviewFlag]]:
-    """Apply Pass-2 room-type and DB-location overrides before spatial & electrical solving."""
+    """Apply Pass-2 room-type and DB/anchor overrides before spatial & electrical solving."""
     if overrides is None:
         return building, []
 
@@ -368,6 +391,24 @@ def _apply_building_overrides(
                 ),
             )
         )
+
+    for anchor_name, loc_ov in (
+        ("EAC Meter Cabinet", overrides.meter_location_override_mm),
+        ("TT Earth Pit", overrides.earth_pit_location_override_mm),
+        ("9U Telecom Cabinet", overrides.telecom_location_override_mm),
+    ):
+        if loc_ov is not None:
+            flags.append(
+                ReviewFlag(
+                    code="ANCHOR_LOCATION_OVERRIDDEN",
+                    severity=ReviewSeverity.INFO,
+                    category="geometry",
+                    message=(
+                        f"{anchor_name} relocated by engineer override to "
+                        f"({loc_ov.x_mm:.0f}, {loc_ov.y_mm:.0f} mm)."
+                    ),
+                )
+            )
 
     return updated, flags
 
@@ -462,15 +503,30 @@ def run_phase2_pipeline(
                 )
             )
 
-    # 3. Deterministic valid-wall electrical accessory placement
-    placed_devices, placement_flags = place_electrical_devices(building, wet_zones, standards)
+    # 3. Deterministic valid-wall electrical accessory placement (with Stage 5 Brief & anchors)
+    residential_brief = (
+        overrides.residential_brief
+        if (overrides is not None and overrides.residential_brief is not None)
+        else ResidentialSystemsBrief()
+    )
+    placed_devices, placement_flags = place_electrical_devices(
+        building,
+        wet_zones,
+        standards,
+        brief=residential_brief,
+        meter_override=overrides.meter_location_override_mm if overrides is not None else None,
+        earth_pit_override=(
+            overrides.earth_pit_location_override_mm if overrides is not None else None
+        ),
+        telecom_override=(
+            overrides.telecom_location_override_mm if overrides is not None else None
+        ),
+    )
     spatial_flags.extend(placement_flags)
 
     # 4. Generate circuit list, route on NetworkX conduit graph, and auto-split over-long loops
     specs = generate_circuits(building, standards, overrides=overrides)
-    bound_devices, routed_circuits, routing_flags = route_circuits(
-        building, specs, placed_devices
-    )
+    bound_devices, routed_circuits, routing_flags = route_circuits(building, specs, placed_devices)
     routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
 
     for _ in range(2):
@@ -486,6 +542,10 @@ def run_phase2_pipeline(
         routed_lengths_m = {rc.circuit_id: rc.total_routed_length_m for rc in routed_circuits}
 
     spatial_flags.extend(routing_flags)
+
+    # 4a. CIBSE / BS EN 12464-1 Lumen Method room photometric verification
+    lumen_checks, lux_flags = compute_room_lumen_checks(building, bound_devices)
+    spatial_flags.extend(lux_flags)
 
     # 4b. BS 7671 Table 4C1 corridor conduit grouping check / optional trunking Cg propagation
     trunk_counts = {rc.circuit_id: rc.max_parallel_circuits_on_trunk for rc in routed_circuits}
@@ -561,6 +621,7 @@ def run_phase2_pipeline(
     )
 
     # Refresh BOQ with exact placed spatial accessory counts & custom/tender rate settings
+    design = design.model_copy(update={"lumen_checks": lumen_checks})
     refreshed_boq = generate_boq(
         design,
         standards,
@@ -633,7 +694,7 @@ def export_phase3_deliverables(
     export_pdf: bool = False,
     source_dxf_path: Path | None = None,
 ) -> dict[str, Path]:
-    """Write complete EAC & Construction LV Pack: E-101/E-102/E-201/E-301 DXF/SVG/PDF + forms."""
+    """Write complete Turnkey Cyprus EAC & Tender Pack: E-100..E-301 DXF/SVG/PDF + 10-sec BOQ."""
     from cyelec.render.details_dxf import export_details_notes
     from cyelec.render.eac_forms import export_eac_application_form
     from cyelec.render.eac_pack import (
@@ -644,10 +705,13 @@ def export_phase3_deliverables(
     from cyelec.render.layout_dxf import export_electrical_layout_dxf as export_disc_dxf
     from cyelec.render.pdf_export import export_html_to_pdf, export_svg_sheet_to_pdf
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
+    from cyelec.render.riser_dxf import export_riser_and_db_deliverables
+    from cyelec.render.site_plan_dxf import export_site_plan_deliverables
     from cyelec.render.sld import export_sld_deliverables
+    from cyelec.render.tender_boq_xlsx import export_tender_boq_10section_xlsx
 
     # If the source was a real .dwg file on disk and no pre-converted DXF path was supplied,
-    # convert it once inside a scoped temp directory so E-100/E-101/E-102 keep the real underlay.
+    # convert it once inside a scoped temp directory so E-100..E-103 keep the real underlay.
     dwg_ctx: tempfile.TemporaryDirectory[str] | None = None
     resolved_dxf = source_dxf_path
     if resolved_dxf is None:
@@ -670,7 +734,7 @@ def export_phase3_deliverables(
         eac_form_outputs = export_eac_application_form(result, out_dir, export_pdf=export_pdf)
         outputs.update(eac_form_outputs)
 
-        # Discipline-separated DXFs: E-101 Lighting & Switching, E-102 Power & Accessories
+        # Discipline-separated DXFs: E-101 Lighting, E-102 Power & Plant, E-103 ELV & Security
         e101_dxf = export_disc_dxf(
             result,
             out_dir / "E101_lighting_layout.dxf",
@@ -683,13 +747,20 @@ def export_phase3_deliverables(
             source_dxf_path=resolved_dxf,
             discipline="power",
         )
+        e103_dxf = export_disc_dxf(
+            result,
+            out_dir / "E103_elv_layout.dxf",
+            source_dxf_path=resolved_dxf,
+            discipline="elv",
+        )
         outputs["e101_lighting_dxf"] = e101_dxf
         outputs["e102_power_dxf"] = e102_dxf
+        outputs["e103_elv_dxf"] = e103_dxf
     finally:
         if dwg_ctx is not None:
             dwg_ctx.cleanup()
 
-    # Vector SVG Sheets: E-101 Lighting, E-102 Power, and Combined Coordination Overlay
+    # Vector SVG Sheets: E-101 Lighting, E-102 Power, E-103 ELV, and E-100 Combined
     e101_svg_path = out_dir / "E101_lighting_layout.svg"
     e101_svg_path.write_text(render_floorplan_svg(result, discipline="lighting"), encoding="utf-8")
     outputs["e101_lighting_svg"] = e101_svg_path
@@ -698,10 +769,18 @@ def export_phase3_deliverables(
     e102_svg_path.write_text(render_floorplan_svg(result, discipline="power"), encoding="utf-8")
     outputs["e102_power_svg"] = e102_svg_path
 
+    e103_svg_path = out_dir / "E103_elv_layout.svg"
+    e103_svg_path.write_text(render_floorplan_svg(result, discipline="elv"), encoding="utf-8")
+    outputs["e103_elv_svg"] = e103_svg_path
+
     floorplan_svg_path = out_dir / "floorplan_overlay.svg"
     floorplan_svg_text = render_floorplan_svg(result, discipline="combined")
     floorplan_svg_path.write_text(floorplan_svg_text, encoding="utf-8")
     outputs["floorplan_svg"] = floorplan_svg_path
+
+    # E-104 Site Works, Underground Trenching, Earthing & IEC 62305-2 LPS
+    site_out = export_site_plan_deliverables(result, out_dir)
+    outputs.update(site_out)
 
     # E-201 Single-Line Diagram (plus backward-compatible single_line_diagram.* copies)
     sld_svg_path = out_dir / "single_line_diagram.svg"
@@ -721,9 +800,18 @@ def export_phase3_deliverables(
     outputs["e201_sld_dxf"] = e201_dxf_path
     outputs["sld_qet"] = qet_path
 
+    # E-202 Vertical Riser Diagram & Physical 18mm DIN-Rail DB Elevation + Selectivity
+    riser_out = export_riser_and_db_deliverables(result, out_dir)
+    outputs.update(riser_out)
+
     # E-301 Construction Details, Earthing/Meter/Wet-Zone Sections & General Notes
     details_out = export_details_notes(result, out_dir)
     outputs.update(details_out)
+
+    # Full 10-Section Cyprus Tender BOQ (Summary + Engineer Priced Estimate + Blank Contractor)
+    tender_boq_path = out_dir / "tender_boq_10section.xlsx"
+    export_tender_boq_10section_xlsx(result.design, tender_boq_path)
+    outputs["tender_boq_xlsx"] = tender_boq_path
 
     if run_qet_subprocess:
         qet_status = render_qet_via_subprocess(qet_path, out_dir / "qet_render", fmt="svg")
@@ -753,7 +841,10 @@ def export_phase3_deliverables(
         for key, src_svg, out_name in (
             ("e101_lighting_pdf", e101_svg_path, "E101_lighting_layout.pdf"),
             ("e102_power_pdf", e102_svg_path, "E102_power_layout.pdf"),
+            ("e103_elv_pdf", e103_svg_path, "E103_elv_layout.pdf"),
+            ("e104_site_pdf", site_out["e104_site_svg"], "E104_site_earthing_plan.pdf"),
             ("e201_sld_pdf", e201_svg_path, "E201_single_line_diagram.pdf"),
+            ("e202_riser_pdf", riser_out["e202_riser_svg"], "E202_riser_and_db_layout.pdf"),
             ("e301_details_pdf", details_out["e301_details_svg"], "E301_details_notes.pdf"),
         ):
             pdf_p, _ = export_svg_sheet_to_pdf(src_svg, out_dir / out_name)

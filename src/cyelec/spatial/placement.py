@@ -17,9 +17,10 @@ from cyelec.models.building import (
     RoomType,
     WindowOpening,
 )
-from cyelec.models.electrical import ReviewFlag, ReviewSeverity
+from cyelec.models.electrical import ResidentialSystemsBrief, ReviewFlag, ReviewSeverity
 from cyelec.models.spatial import DeviceType, PlacedDevice, RoomWetZones, SwitchLeg
 from cyelec.solver.grouper import is_commercial_building
+from cyelec.spatial.stage5_placement import place_stage5_residential_systems
 from cyelec.spatial.wet_zones import classify_point_wet_zone
 from cyelec.standards_loader import StandardsBundle
 
@@ -80,9 +81,9 @@ def _door_forbidden_geometry(door: DoorOpening) -> BaseGeometry:
 
 
 def _window_forbidden_geometry(win: WindowOpening) -> BaseGeometry:
-    return LineString(
-        [(win.start.x_mm, win.start.y_mm), (win.end.x_mm, win.end.y_mm)]
-    ).buffer(WINDOW_CLEARANCE_MM)
+    return LineString([(win.start.x_mm, win.start.y_mm), (win.end.x_mm, win.end.y_mm)]).buffer(
+        WINDOW_CLEARANCE_MM
+    )
 
 
 def _trim_ends(line: LineString, trim_mm: float) -> LineString | None:
@@ -114,13 +115,16 @@ def compute_valid_wall_segments(
 ) -> list[_WallSegmentCandidate]:
     """Compute valid interior wall segments for placing wall-mounted accessories in a room."""
     pts = room.polygon_mm
-    forbidden_parts: list[BaseGeometry] = [
-        _door_forbidden_geometry(d) for d in doors
-    ]
+    forbidden_parts: list[BaseGeometry] = [_door_forbidden_geometry(d) for d in doors]
     forbidden_parts.extend(_window_forbidden_geometry(w) for w in windows)
     if exclude_wet_zones and wet_zone is not None:
         for ring in wet_zone.socket_exclusion_polygons_mm:
             forbidden_parts.append(Polygon([(p.x_mm, p.y_mm) for p in ring]).buffer(20.0))
+    for furn in room.furniture:
+        if furn.furniture_type == "wardrobe" and len(furn.polygon_mm) >= 3:
+            forbidden_parts.append(
+                Polygon([(p.x_mm, p.y_mm) for p in furn.polygon_mm]).buffer(220.0)
+            )
 
     forbidden = unary_union(forbidden_parts) if forbidden_parts else Polygon()
 
@@ -281,8 +285,14 @@ def place_electrical_devices(
     building: BuildingModel,
     wet_zones: list[RoomWetZones],
     standards: StandardsBundle,
+    *,
+    brief: ResidentialSystemsBrief | None = None,
+    meter_override: Point2D | None = None,
+    earth_pit_override: Point2D | None = None,
+    telecom_override: Point2D | None = None,
 ) -> tuple[list[PlacedDevice], list[ReviewFlag]]:
-    """Deterministically place luminaires, switches, sockets, A/C units, and dedicated outlets."""
+    """Deterministically place luminaires, switches, sockets, A/C, ELV, plant & site markers."""
+    active_brief = brief or ResidentialSystemsBrief()
     tmpl_std = standards.room_templates
     wz_by_room = {w.room_id: w for w in wet_zones}
 
@@ -294,9 +304,11 @@ def place_electrical_devices(
     flags: list[ReviewFlag] = []
     counters: dict[str, int] = {
         "L": 0,
+        "PD": 0,
         "ML": 0,
         "EF": 0,
         "SW": 0,
+        "DIM": 0,
         "FI": 0,
         "S": 0,
         "AC": 0,
@@ -335,7 +347,7 @@ def place_electrical_devices(
         ]
         room_windows = [w for w in building.windows if w.room_id == room.id]
 
-        # Valid walls strictly excluding doors, swings, windows, and Section 701 exclusion zones
+        # Valid walls strictly excluding doors, swings, windows, wardrobes & Sec. 701 wet zones
         valid_walls = compute_valid_wall_segments(
             room,
             doors=building.doors,  # check all doors touching this room's boundary
@@ -345,8 +357,13 @@ def place_electrical_devices(
             exclude_wet_zones=True,
         )
 
-        # 1. Ceiling Luminaires (+ room lux/wattage & multi-zone switch grouping)
-        lum_pts = _place_ceiling_luminaires(room, max(1, rt.min_lighting_points))
+        # 1. Ceiling Luminaires (+ Lumen Method sizing, fixture types & dining pendant snapping)
+        min_lums_by_lux = max(
+            1,
+            int(math.ceil((target_lux * room.area_m2) / max(lum_w * 105.0 * 0.65 * 0.80, 100.0))),
+        )
+        req_lum_count = min(12, max(1, rt.min_lighting_points, min_lums_by_lux))
+        lum_pts = _place_ceiling_luminaires(room, req_lum_count)
         is_large_split = (
             room.area_m2 >= 22.0
             and len(lum_pts) >= 2
@@ -367,10 +384,19 @@ def place_electrical_devices(
             zone = classify_point_wet_zone(lpt, room_wz)
             if room.is_outdoor:
                 ip = "IP65"
+                fix_type = "IP65 LED Outdoor Bulkhead"
             elif zone in ("zone_0", "zone_1", "zone_2") or room.is_wet_room:
                 ip = "IP44"
+                fix_type = "IP44 Recessed LED Downlight"
+            elif room.normalized_type in (RoomType.OPEN_OFFICE, RoomType.RETAIL_FLOOR):
+                ip = "IP20"
+                fix_type = "600x600 LED Panel (UGR<19)"
+            elif room.normalized_type in (RoomType.KITCHEN, RoomType.UTILITY):
+                ip = "IP20"
+                fix_type = "4000K Recessed LED Downlight"
             else:
                 ip = "IP20"
+                fix_type = "3000K Recessed LED Downlight"
 
             grp = "b" if (is_large_split and idx > split_idx) else "a"
             lid = _next_dev("L")
@@ -391,6 +417,33 @@ def place_electrical_devices(
                     ip_rating=ip,
                     switch_group=grp,
                     luminaire_wattage_w=lum_w,
+                    luminaire_fixture_type=fix_type,
+                    lumens=int(round(lum_w * 105.0)),
+                    target_lux=target_lux,
+                )
+            )
+
+        # Furniture-aware Feature Pendant snapped over detected dining table
+        dining_furn = next(
+            (fn for fn in room.furniture if fn.furniture_type == "dining_table"), None
+        )
+        if dining_furn is not None:
+            pid = _next_dev("PD")
+            room_lum_ids.append(pid)
+            room_lum_group_b.append(pid)
+            devices.append(
+                PlacedDevice(
+                    device_id=pid,
+                    room_id=room.id,
+                    device_type=DeviceType.PENDANT_LIGHT,
+                    label=f"Dining Feature Pendant ({room.raw_label})",
+                    location_mm=dining_furn.centroid_mm,
+                    mounting_height_mm=room.ceiling_height_mm,
+                    ip_rating="IP20",
+                    switch_group="b",
+                    luminaire_wattage_w=18.0,
+                    luminaire_fixture_type="3000K Feature Pendant",
+                    lumens=1900,
                     target_lux=target_lux,
                 )
             )
@@ -452,9 +505,7 @@ def place_electrical_devices(
 
         is_master_bed = room.normalized_type == RoomType.MASTER_BEDROOM or (
             room.normalized_type == RoomType.BEDROOM
-            and any(
-                tok in room.raw_label.lower() for tok in ("master", "κυριο", "κύριο", "main")
-            )
+            and any(tok in room.raw_label.lower() for tok in ("master", "κυριο", "κύριο", "main"))
         )
         rminx, rminy, rmaxx, rmaxy = rpoly.bounds
         room_span_mm = max(rmaxx - rminx, rmaxy - rminy)
@@ -464,8 +515,8 @@ def place_electrical_devices(
         ) and (room_span_mm >= 3500.0 or len(room_doors) >= 2)
 
         if room.is_wet_room:
-            ctrl_ids = room_lum_group_a + ([fan_id] if fan_id else []) + (
-                [mirror_id] if mirror_id else []
+            ctrl_ids = (
+                room_lum_group_a + ([fan_id] if fan_id else []) + ([mirror_id] if mirror_id else [])
             )
             devices.append(
                 PlacedDevice(
@@ -503,12 +554,22 @@ def place_electrical_devices(
                     )
                 )
         elif is_large_split:
+            is_dimmable_living = room.normalized_type in (
+                RoomType.LIVING_ROOM,
+                RoomType.KITCHEN_LIVING,
+            )
             devices.append(
                 PlacedDevice(
-                    device_id=_next_dev("SW"),
+                    device_id=_next_dev("DIM" if is_dimmable_living else "SW"),
                     room_id=room.id,
-                    device_type=DeviceType.SWITCH,
-                    label=f"2G1W Zone Switch ({room.raw_label})",
+                    device_type=(
+                        DeviceType.DIMMER_SWITCH if is_dimmable_living else DeviceType.SWITCH
+                    ),
+                    label=(
+                        f"2G1W LED Dimmer/Zone Switch ({room.raw_label})"
+                        if is_dimmable_living
+                        else f"2G1W Zone Switch ({room.raw_label})"
+                    ),
                     location_mm=sw_pt,
                     mounting_height_mm=1200.0,
                     wall_angle_deg=sw_ang,
@@ -518,6 +579,32 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
+            # Add 3-way intermediate / secondary entry switch in large rooms (>=30 m² or >=3 doors)
+            if (room.area_m2 >= 30.0 or len(room_doors) >= 3) and valid_walls:
+                far_cand = max(
+                    valid_walls,
+                    key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
+                        c.line.interpolate(0.5, normalized=True)
+                    ),
+                )
+                far_pt = far_cand.line.interpolate(0.5, normalized=True)
+                devices.append(
+                    PlacedDevice(
+                        device_id=_next_dev("SW"),
+                        room_id=room.id,
+                        device_type=DeviceType.SWITCH,
+                        label=f"1G-INT 3-Way Intermediate Switch ({room.raw_label})",
+                        location_mm=Point2D(
+                            x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1)
+                        ),
+                        mounting_height_mm=1200.0,
+                        wall_angle_deg=far_cand.angle_deg,
+                        ip_rating=sw_ip,
+                        switch_group="a",
+                        switch_type="1G2W",
+                        controlled_device_ids=room_lum_group_a or room_lum_ids,
+                    )
+                )
         elif is_two_way_circulation or is_master_bed:
             # Primary 2-way switch at room entry door
             devices.append(
@@ -535,8 +622,15 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
-            # Secondary 2-way switch at far end of corridor/stairs OR bedside wall in master bed
-            if valid_walls:
+            # Secondary 2-way switch snapped to detected bed headboard wall or far wall
+            bed_furn = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
+            if is_master_bed and bed_furn is not None:
+                proj = nearest_points(
+                    rpoly.exterior, Point(bed_furn.centroid_mm.x_mm, bed_furn.centroid_mm.y_mm)
+                )[0]
+                sw2_loc = Point2D(x_mm=round(float(proj.x), 1), y_mm=round(float(proj.y), 1))
+                sw2_ang = sw_ang
+            elif valid_walls:
                 far_cand = max(
                     valid_walls,
                     key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
@@ -568,13 +662,38 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
+            if is_two_way_circulation and len(room_doors) >= 3 and len(valid_walls) >= 2:
+                mid_cand = valid_walls[len(valid_walls) // 2]
+                mid_pt = mid_cand.line.interpolate(0.5, normalized=True)
+                devices.append(
+                    PlacedDevice(
+                        device_id=_next_dev("SW"),
+                        room_id=room.id,
+                        device_type=DeviceType.SWITCH,
+                        label=f"1G-INT 3-Way Intermediate Switch ({room.raw_label})",
+                        location_mm=Point2D(
+                            x_mm=round(float(mid_pt.x), 1), y_mm=round(float(mid_pt.y), 1)
+                        ),
+                        mounting_height_mm=1200.0,
+                        wall_angle_deg=mid_cand.angle_deg,
+                        ip_rating=sw_ip,
+                        switch_group="a",
+                        switch_type="1G2W",
+                        controlled_device_ids=room_lum_ids,
+                    )
+                )
         else:
+            use_dimmer = room.normalized_type == RoomType.LIVING_ROOM
             devices.append(
                 PlacedDevice(
-                    device_id=_next_dev("SW"),
+                    device_id=_next_dev("DIM" if use_dimmer else "SW"),
                     room_id=room.id,
-                    device_type=DeviceType.SWITCH,
-                    label=f"1G1W Light Switch ({room.raw_label})",
+                    device_type=DeviceType.DIMMER_SWITCH if use_dimmer else DeviceType.SWITCH,
+                    label=(
+                        f"1G-DIM LED Dimmer Switch ({room.raw_label})"
+                        if use_dimmer
+                        else f"1G1W Light Switch ({room.raw_label})"
+                    ),
                     location_mm=sw_pt,
                     mounting_height_mm=1200.0,
                     wall_angle_deg=sw_ang,
@@ -585,20 +704,40 @@ def place_electrical_devices(
                 )
             )
 
-        # 3. Twin 13A Socket Outlets (never placed in wet-zone socket exclusion!)
+        # 3. Twin 13A Socket Outlets (furniture-aware bedside snapping; never in wet-zone excl.)
         if rt.socket_count_default > 0 and rt.socket_group != "none":
-            sock_pts = _place_points_along_candidates(valid_walls, rt.socket_count_default)
+            bed_furn_s = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
+            furn_sock_pts: list[tuple[Point2D, float]] = []
+            if bed_furn_s is not None and room.normalized_type in (
+                RoomType.MASTER_BEDROOM,
+                RoomType.BEDROOM,
+            ):
+                proj = nearest_points(
+                    rpoly.exterior,
+                    Point(bed_furn_s.centroid_mm.x_mm, bed_furn_s.centroid_mm.y_mm),
+                )[0]
+                bwall = Point2D(x_mm=round(float(proj.x), 1), y_mm=round(float(proj.y), 1))
+                furn_sock_pts.append((_offset_along_wall(bwall, sw_ang, -950.0), sw_ang))
+                furn_sock_pts.append((_offset_along_wall(bwall, sw_ang, 950.0), sw_ang))
+
+            rem_count = max(0, rt.socket_count_default - len(furn_sock_pts))
+            sock_pts = furn_sock_pts + _place_points_along_candidates(valid_walls, rem_count)
             mount_h = 1150.0 if room.normalized_type.value in ("kitchen", "utility") else 450.0
             sock_ip = "IP65" if room.is_outdoor else "IP20"
             for idx, (spt, sang) in enumerate(sock_pts, start=1):
+                is_bedside = idx <= len(furn_sock_pts)
                 devices.append(
                     PlacedDevice(
                         device_id=_next_dev("S"),
                         room_id=room.id,
                         device_type=DeviceType.SOCKET_TWIN,
-                        label=f"Twin 13A Socket {idx} ({room.raw_label})",
+                        label=(
+                            f"Bedside Twin 13A Socket {idx} ({room.raw_label})"
+                            if is_bedside
+                            else f"Twin 13A Socket {idx} ({room.raw_label})"
+                        ),
                         location_mm=spt,
-                        mounting_height_mm=mount_h,
+                        mounting_height_mm=650.0 if is_bedside else mount_h,
                         wall_angle_deg=sang,
                         ip_rating=sock_ip,
                     )
@@ -617,8 +756,12 @@ def place_electrical_devices(
                     )
                 )
 
-        # 4. Split A/C Unit & Isolator (prefer exterior valid wall for short refrigerant run)
-        if rt.has_split_ac and rt.ac_electrical_w > 0.0:
+        # 4. Split A/C Unit & Isolator (only when commercial OR residential hvac_mode == split_ac)
+        if (
+            rt.has_split_ac
+            and rt.ac_electrical_w > 0.0
+            and (is_commercial_building(building) or active_brief.hvac_mode == "split_ac")
+        ):
             ext_walls = [c for c in valid_walls if c.is_exterior]
             ac_pool = ext_walls if ext_walls else valid_walls
             if ac_pool:
@@ -753,13 +896,21 @@ def place_electrical_devices(
         out_dy = float(ext_pt.y) - float(site_centroid.y)
         out_norm = max(math.hypot(out_dx, out_dy), 1.0)
         ux, uy = out_dx / out_norm, out_dy / out_norm
-        mtr_loc = Point2D(
-            x_mm=round(float(ext_pt.x) + ux * 180.0, 1),
-            y_mm=round(float(ext_pt.y) + uy * 180.0, 1),
+        mtr_loc = (
+            Point2D(x_mm=round(meter_override.x_mm, 1), y_mm=round(meter_override.y_mm, 1))
+            if meter_override is not None
+            else Point2D(
+                x_mm=round(float(ext_pt.x) + ux * 180.0, 1),
+                y_mm=round(float(ext_pt.y) + uy * 180.0, 1),
+            )
         )
-        pit_loc = Point2D(
-            x_mm=round(float(ext_pt.x) + ux * 700.0 - uy * 350.0, 1),
-            y_mm=round(float(ext_pt.y) + uy * 700.0 + ux * 350.0, 1),
+        pit_loc = (
+            Point2D(x_mm=round(earth_pit_override.x_mm, 1), y_mm=round(earth_pit_override.y_mm, 1))
+            if earth_pit_override is not None
+            else Point2D(
+                x_mm=round(float(ext_pt.x) + ux * 700.0 - uy * 350.0, 1),
+                y_mm=round(float(ext_pt.y) + uy * 700.0 + ux * 350.0, 1),
+            )
         )
         devices.append(
             PlacedDevice(
@@ -798,6 +949,16 @@ def place_electrical_devices(
             )
         )
 
+    # 7. Stage 5 Residential Systems (ELV, Security, Smoke/Heat, Shutters, Plant, KNX, Site)
+    s5_devs, s5_flags = place_stage5_residential_systems(
+        building,
+        devices,
+        active_brief,
+        telecom_override=telecom_override,
+    )
+    devices.extend(s5_devs)
+    flags.extend(s5_flags)
+
     return devices, flags
 
 
@@ -805,7 +966,11 @@ def build_switch_legs(devices: list[PlacedDevice]) -> list[SwitchLeg]:
     """Build deterministic SwitchLeg control links from circuit-bound switches & fan isolators."""
     legs: list[SwitchLeg] = []
     for dev in devices:
-        if dev.device_type not in (DeviceType.SWITCH, DeviceType.FAN_ISOLATOR_3P):
+        if dev.device_type not in (
+            DeviceType.SWITCH,
+            DeviceType.DIMMER_SWITCH,
+            DeviceType.FAN_ISOLATOR_3P,
+        ):
             continue
         if not dev.controlled_device_ids:
             continue

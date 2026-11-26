@@ -65,6 +65,14 @@ class CircuitCategory(StrEnum):
     PV = "pv"
     UPS_SERVER = "ups_server"
     LIFT = "lift"
+    SHUTTERS = "shutters"
+    HEAT_PUMP = "heat_pump"
+    WATER_PUMP = "water_pump"
+    GATE_GARAGE = "gate_garage"
+    POOL = "pool"
+    ELV_POWER = "elv_power"
+    KNX_BUS = "knx_bus"
+    SMOKE_DETECTION = "smoke_detection"
     OTHER = "other"
 
 
@@ -192,6 +200,99 @@ class EacProjectMetadata(BaseModel):
     contractor_hmy_reg: str = ""
 
 
+class ResidentialSystemsBrief(BaseModel):
+    """60-Second Cyprus Residential Engineering Brief driving turnkey LV/ELV/Plant/Site pack."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hvac_mode: Literal["split_ac", "vrv", "heat_pump_ufh"] = "split_ac"
+    heat_pump_kw: float = Field(default=4.5, gt=0.0, le=30.0)
+    vrv_outdoor_kw: float = Field(default=5.5, gt=0.0, le=40.0)
+    include_electric_shutters: bool = True
+    include_kitchen_fcus: bool = True
+    include_water_pumps: bool = True
+    include_gate_motor: bool = True
+    include_elv: bool = True
+    include_smoke_detectors: bool = True
+    include_pool: bool = False
+    include_site_works: bool = True
+    earthing_electrode_type: Literal["rod_pit", "foundation_ring"] = "foundation_ring"
+    building_height_m: float = Field(default=7.5, gt=2.0, le=50.0)
+    lightning_flash_density_ng: float = Field(default=1.5, gt=0.0, le=20.0)
+    include_knx: bool = False
+    ev_charger_kw: float | None = Field(default=None, ge=0.0, le=22.0)
+    plot_length_m: float = Field(default=24.0, gt=5.0, le=200.0)
+    plot_width_m: float = Field(default=18.0, gt=5.0, le=200.0)
+    street_setback_m: float = Field(default=6.0, gt=1.0, le=60.0)
+    conduit_drafting_style: Literal["homerun_arcs", "full_routed"] = "homerun_arcs"
+
+
+class RoomLumenCheck(BaseModel):
+    """CIBSE / BS EN 12464-1 Lumen Method room photometric verification record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    room_id: str
+    room_label: str
+    floor: str = "GF"
+    area_m2: float = Field(gt=0.0)
+    fixture_type: str
+    luminaire_count: int = Field(ge=1)
+    watts_per_fixture: float = Field(gt=0.0)
+    lumens_per_fixture: int = Field(gt=0)
+    target_lux: int = Field(gt=0)
+    achieved_lux: float = Field(ge=0.0)
+    utilization_factor: float = Field(gt=0.0, le=1.0)
+    maintenance_factor: float = Field(gt=0.0, le=1.0)
+    compliant: bool
+
+
+class DinRailRow(BaseModel):
+    """Single horizontal DIN rail inside a physical distribution board enclosure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_no: int = Field(ge=1)
+    modules_used: int = Field(ge=0)
+    modules_capacity: int = Field(ge=12)
+    items: list[str] = Field(default_factory=list)
+
+
+class DinRailBoardLayout(BaseModel):
+    """Physical 18 mm DIN-rail module schedule, enclosure sizing & selectivity cascade."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: str
+    floor: str
+    total_modules_used: int = Field(ge=0)
+    spare_modules: int = Field(ge=0)
+    total_modules_capacity: int = Field(ge=12)
+    spare_pct: float = Field(ge=0.0)
+    enclosure_spec: str
+    rows: list[DinRailRow] = Field(default_factory=list)
+    incoming_ipf_ka: float = Field(gt=0.0)
+    min_device_icu_ka: float = Field(gt=0.0)
+    selectivity_pass: bool = True
+    selectivity_note: str = ""
+
+
+class LightningRiskAssessment(BaseModel):
+    """IEC 62305-2 simplified residential lightning risk assessment summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ng_flashes_km2_yr: float
+    collection_area_ad_m2: float
+    nd_events_per_yr: float
+    tolerable_rt: float = 1e-5
+    risk_r1: float
+    lps_required: bool
+    recommended_lps_class: str
+    spd_requirement: str
+    standard_ref: str = "IEC 62305-2 / CYS EN 62305-2"
+
+
 class DesignOverrides(BaseModel):
     """Structured stateless engineer overrides accepted by every pipeline run."""
 
@@ -206,6 +307,10 @@ class DesignOverrides(BaseModel):
     circuit_overrides: dict[str, CircuitOverride] = Field(default_factory=dict)
     room_type_overrides: dict[str, RoomType] = Field(default_factory=dict)
     db_location_override_mm: Point2D | None = None
+    meter_location_override_mm: Point2D | None = None
+    earth_pit_location_override_mm: Point2D | None = None
+    telecom_location_override_mm: Point2D | None = None
+    residential_brief: ResidentialSystemsBrief | None = None
     report_language: ReportLanguage = ReportLanguage.EN
     branding: TenantBranding | None = None
     boq_rate_overrides: BoqRateOverrides | None = None
@@ -405,6 +510,10 @@ class ElectricalDesignResult(BaseModel):
     branding: TenantBranding | None = None
     include_tt_main_rcd_s: bool = True
     eac_metadata: EacProjectMetadata | None = None
+    residential_brief: ResidentialSystemsBrief = Field(default_factory=ResidentialSystemsBrief)
+    lumen_checks: list[RoomLumenCheck] = Field(default_factory=list)
+    din_rail_boards: list[DinRailBoardLayout] = Field(default_factory=list)
+    lightning_risk: LightningRiskAssessment | None = None
     review_flags: list[ReviewFlag] = Field(default_factory=list)
     has_blockers: bool
     etek_signoff_required: bool = True
