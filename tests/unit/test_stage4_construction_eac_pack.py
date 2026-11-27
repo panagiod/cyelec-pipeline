@@ -269,7 +269,7 @@ def test_w3_eac_sld_incoming_earthing_bonding_rcd_toggle_and_pv_branch(
     assert "MAIN RCD 100mA TYPE-S" not in svg_no_rcd
     assert "TT INSULATED TAIL ENTRY" in svg_no_rcd
 
-    # PV + EV Villa includes full PV AC Isolator & EAC PV Generation Meter branch
+    # PV + EV Villa includes official March 2026 EAC PVS-S-1.2 Bidirectional Meter & R1/R2 branch
     villa_bldg = generate_benchmark_dxf(BenchmarkTemplate.VILLA_PV_EV)
     p2_villa = run_phase2_pipeline(villa_bldg)
     svg_villa = render_sld_svg(p2_villa.design)
@@ -278,13 +278,14 @@ def test_w3_eac_sld_incoming_earthing_bonding_rcd_toggle_and_pv_branch(
     dxf_villa_txt = " ".join(str(t.dxf.text) for t in dxf_villa.modelspace().query("TEXT"))
 
     for token in (
-        "PV INVERTER",
-        "LOCKABLE ROTARY AC ISOLATOR",
-        "EAC PV GENERATION METER",
+        "HYBRID PV INVERTER",
+        "EAC BIDIRECTIONAL METER",
+        "EAC R1 CURTAILMENT + R2 ZERO-EXPORT RX",
+        "LOCKABLE AC ISOLATOR + BIDIRECTIONAL RCBO",
     ):
         assert token in svg_villa
-    assert "PV INVERTER" in dxf_villa_txt
-    assert "AC ISOLATOR + PV GEN METER" in dxf_villa_txt
+    assert "HYBRID PV" in dxf_villa_txt
+    assert "EAC R1/R2 RX + AC ISOLATOR + BIDIR RCBO" in dxf_villa_txt
 
 
 # ---------------------------------------------------------------------------

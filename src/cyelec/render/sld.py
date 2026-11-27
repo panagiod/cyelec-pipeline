@@ -59,14 +59,10 @@ def _split_sld_label(description: str, max_line: int = 16) -> tuple[str, str]:
     """Split verbose circuit descriptions into two readable SLD lines preserving room identity."""
     if " - " in description:
         left, right = description.split(" - ", 1)
-        if "/" in right:
-            right = right.split("/")[-1].strip()
         return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
     if "(" in description and description.endswith(")"):
         left, right = description.rsplit("(", 1)
         right = right.rstrip(")")
-        if "/" in right:
-            right = right.split("/")[-1].strip()
         return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
     return _truncate(description, max_line), ""
 
@@ -141,9 +137,9 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     # ------------------------------------------------------------------
     # 1. EAC Supply Incomer -> Meter -> Tails -> Isolator -> [100mA Type-S] -> Busbar
     # ------------------------------------------------------------------
-    meter_y = 104
-    iso_y = 186
-    rcd_s_y = 258
+    meter_y = 110
+    iso_y = 190
+    rcd_s_y = 260
     poles_label = "4P" if eac.supply_phases == 3 else "2P"
     supply_wire_label = (
         "3P+N+PE 400/230V 50Hz" if eac.supply_phases == 3 else "1P+N+PE 230V 50Hz"
@@ -153,6 +149,9 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         result.earthing_system == EarthingSystem.TT and result.include_tt_main_rcd_s
     )
     spare_ways = max(2, math.ceil(len(circuits) * 0.2))
+    has_pv = result.building.pv_capacity_kva > 0.0
+    meter_hdr = "EAC BIDIRECTIONAL METER" if has_pv else "EAC kWh METER"
+    meter_w = 196 if has_pv else 156
     ct_note = " [CT METERING >100A/ph]" if eac.ct_metering_required else ""
     sub_note = (
         " [SUBSTATION CONSULTATION REQ]"
@@ -164,28 +163,29 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         [
             # EAC service feeder line
             (
-                f'  <line x1="{cx_incomer}" y1="72" x2="{cx_incomer}" y2="{meter_y - 22}" '
+                f'  <line x1="{cx_incomer}" y1="68" x2="{cx_incomer}" y2="{meter_y - 22}" '
                 'stroke="#1b365d" stroke-width="3" />'
             ),
             (
-                f'  <text x="{cx_incomer + 12}" y="82" class="lbl">'
+                f'  <text x="{cx_incomer + 12}" y="79" class="lbl">'
                 f"EAC SERVICE CUT-OUT ({_esc(supply_wire_label)})</text>"
             ),
-            # kWh Meter box
+            # kWh / Bidirectional Smart Meter box
             (
-                f'  <rect x="{cx_incomer - 76}" y="{meter_y - 22}" width="152" height="44" '
-                'rx="4" fill="#ebf8ff" stroke="#1b365d" stroke-width="1.8" />'
+                f'  <rect x="{cx_incomer - meter_w // 2}" y="{meter_y - 22}" width="{meter_w}" '
+                'height="44" rx="4" fill="#ebf8ff" stroke="#1b365d" stroke-width="1.8" />'
             ),
             (
                 f'  <text x="{cx_incomer}" y="{meter_y - 3}" text-anchor="middle" '
-                'class="hdr">EAC kWh METER</text>'
+                f'class="hdr">{meter_hdr}</text>'
             ),
             (
                 f'  <text x="{cx_incomer}" y="{meter_y + 13}" text-anchor="middle" class="sm">'
-                f"{_esc(eac.recommended_supply_tier)}</text>"
+                f"{_esc(eac.recommended_supply_tier)}"
+                f"{' · Smart' if has_pv else ''}</text>"
             ),
             (
-                f'  <text x="{cx_incomer + 86}" y="{meter_y + 3}" class="xs">'
+                f'  <text x="{cx_incomer + meter_w // 2 + 10}" y="{meter_y + 3}" class="xs">'
                 f"{_esc((ct_note + sub_note).strip())}</text>"
             ),
             # Meter Tails -> Main Isolator
@@ -248,20 +248,20 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             "TT INSULATED TAIL ENTRY — ALL-RCBO NON-COMBUSTIBLE DB</text>"
         )
 
-    # Surge Protection Device (Type 1+2 when LPS required, else Type 2 40kA) off incomer
+    # Surge Protection Device (HMY 58.18-1 parameters: Type, Iimp, In, Up, Uc) off incomer
     spd_x = cx_incomer - 245
     spd_y = iso_y + 62
     spd_title = "SPD TYPE 1+2 (12.5kA)" if lps_req else "SPD TYPE 2 (40kA)"
-    spd_sub1 = "10/350µs + 40kA · Up≤1.5kV" if lps_req else "32A MCB Back-Up · Up≤1.5kV"
-    spd_sub2 = "IEC 62305-2 + Reg 443.4" if lps_req else "BS 7671 Reg 443.4"
+    spd_sub1 = "Iimp 10/350µs · Up≤1.5kV · Uc=275V" if lps_req else "In 20kA · Up≤1.5kV · Uc=275V"
+    spd_sub2 = "IEC 62305-2 + HMY 58.18-1" if lps_req else "BS 7671 Reg 443.4 + HMY 58.18-1"
     parts.extend(
         [
             (
-                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 76}" y2="{spd_y}" '
+                f'  <line x1="{cx_incomer}" y1="{spd_y}" x2="{spd_x + 86}" y2="{spd_y}" '
                 'stroke="#4a5568" stroke-width="1.6" stroke-dasharray="5,3" />'
             ),
             (
-                f'  <rect x="{spd_x - 76}" y="{spd_y - 22}" width="152" height="44" '
+                f'  <rect x="{spd_x - 86}" y="{spd_y - 22}" width="172" height="44" '
                 'rx="3" fill="#fffaf0" stroke="#c05621" stroke-width="1.5" />'
             ),
             (
@@ -307,7 +307,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             ),
             (
                 f'  <text x="{earth_x}" y="{earth_y + 4}" text-anchor="middle" class="xs">'
-                "10mm² Main Bonding: Water / Gas / Steel</text>"
+                "10mm² Main Bonding (≤0.5Ω): Water/Gas/Steel</text>"
             ),
             # Classic IEC 60617 earth symbol
             (
@@ -329,55 +329,67 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         ]
     )
 
-    # Optional PV Net-Metering / Net-Billing AC Branch (right of incomer) when PV > 0
-    if result.building.pv_capacity_kva > 0.0:
-        pv_x = bus_x1 - 150
+    # Official March 2026 EAC DRG. PVS-S-1.2 Hybrid PV + Storage + R1/R2 Ripple-Control Branch
+    if has_pv:
+        pv_x = bus_x1 - 175
         pv_kva = result.building.pv_capacity_kva
         pv_ph = "3P" if (eac.supply_phases == 3 and pv_kva > 4.2) else "1P"
         parts.extend(
             [
                 (
-                    f'  <rect x="{pv_x - 115}" y="90" width="230" height="44" rx="4" '
+                    f'  <rect x="{pv_x - 148}" y="76" width="296" height="46" rx="4" '
                     'fill="#ecfdf5" stroke="#059669" stroke-width="1.6" />'
                 ),
                 (
-                    f'  <text x="{pv_x}" y="108" text-anchor="middle" class="hdr">'
-                    f"PV INVERTER {pv_kva:g} kVA ({pv_ph})</text>"
+                    f'  <text x="{pv_x}" y="94" text-anchor="middle" class="hdr">'
+                    f"HYBRID PV INVERTER {pv_kva:g} kVA ({pv_ph})</text>"
                 ),
                 (
-                    f'  <text x="{pv_x}" y="123" text-anchor="middle" class="xs">'
-                    "EN 50549-1 Anti-Islanding · EAC Net-Metering</text>"
+                    f'  <text x="{pv_x}" y="108" text-anchor="middle" class="xs">'
+                    "EN 50549-1 NS Prot. · DC SPD &amp; DC Load-Break</text>"
                 ),
                 (
-                    f'  <line x1="{pv_x}" y1="134" x2="{pv_x}" y2="160" '
+                    f'  <text x="{pv_x}" y="118" text-anchor="middle" class="xs">'
+                    "Battery Storage Ready (EAC PVS-S-1.2 / 2026)</text>"
+                ),
+                (
+                    f'  <line x1="{pv_x}" y1="122" x2="{pv_x}" y2="144" '
                     'stroke="#059669" stroke-width="2.2" />'
                 ),
                 (
-                    f'  <rect x="{pv_x - 102}" y="160" width="204" height="32" rx="3" '
-                    'fill="#f0fdf4" stroke="#047857" stroke-width="1.4" />'
+                    f'  <rect x="{pv_x - 148}" y="144" width="296" height="46" rx="3" '
+                    'fill="#fef3c7" stroke="#d97706" stroke-width="1.4" />'
                 ),
                 (
-                    f'  <text x="{pv_x}" y="179" text-anchor="middle" class="sm">'
-                    "LOCKABLE ROTARY AC ISOLATOR</text>"
+                    f'  <text x="{pv_x}" y="161" text-anchor="middle" class="lbl">'
+                    "EAC R1 CURTAILMENT + R2 ZERO-EXPORT RX</text>"
                 ),
                 (
-                    f'  <line x1="{pv_x}" y1="192" x2="{pv_x}" y2="216" '
+                    f'  <text x="{pv_x}" y="174" text-anchor="middle" class="xs">'
+                    "2P RCBO + 2×1.5mm²+E → Sealable Contactor Box</text>"
+                ),
+                (
+                    f'  <text x="{pv_x}" y="185" text-anchor="middle" class="xs">'
+                    "CT Direction Sensor on Main Load Feeder</text>"
+                ),
+                (
+                    f'  <line x1="{pv_x}" y1="190" x2="{pv_x}" y2="212" '
                     'stroke="#059669" stroke-width="2.2" />'
                 ),
                 (
-                    f'  <rect x="{pv_x - 102}" y="216" width="204" height="34" rx="3" '
+                    f'  <rect x="{pv_x - 148}" y="212" width="296" height="42" rx="3" '
                     'fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.4" />'
                 ),
                 (
-                    f'  <text x="{pv_x}" y="231" text-anchor="middle" class="lbl">'
-                    "EAC PV GENERATION METER</text>"
+                    f'  <text x="{pv_x}" y="229" text-anchor="middle" class="lbl">'
+                    "LOCKABLE AC ISOLATOR + BIDIRECTIONAL RCBO</text>"
                 ),
                 (
                     f'  <text x="{pv_x}" y="244" text-anchor="middle" class="xs">'
-                    "Dedicated Type A/B 30mA RCBO → Busbar</text>"
+                    "Dedicated Type A/B 30mA RCBO → Busbar (EAC 2026)</text>"
                 ),
                 (
-                    f'  <line x1="{pv_x}" y1="250" x2="{pv_x}" y2="{bus_y}" '
+                    f'  <line x1="{pv_x}" y1="254" x2="{pv_x}" y2="{bus_y}" '
                     'stroke="#059669" stroke-width="2.4" />'
                 ),
             ]
@@ -874,7 +886,7 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         dxfattribs={"layer": "E-SLD-DEV"},
     )
     spd_dxf_l1 = "SPD TYPE 1+2 (12.5kA 10/350)" if lps_req else "SPD TYPE 2 (40kA) + 32A MCB"
-    spd_dxf_l2 = "IEC 62305-2 + REG 443.4" if lps_req else "BS 7671 REG 443.4 (Up<=1.5kV)"
+    spd_dxf_l2 = "In 20kA Up<=1.5kV Uc=275V HMY 58.18-1"
     msp.add_text(
         spd_dxf_l1,
         dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
@@ -903,41 +915,41 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         dxfattribs={"layer": "E-SLD-EARTH", "height": 165.0},
     ).set_placement((ex - 1200.0, ey + 600.0))
 
-    # Optional PV Net-Metering AC Branch on right of incomer
+    # Official 2026 EAC PVS-S-1.2 Hybrid PV + Storage + R1/R2 Curtailment Branch on right
     if result.building.pv_capacity_kva > 0.0:
         pv_x = bus_x1 - 2400.0
         pv_kva = result.building.pv_capacity_kva
         msp.add_lwpolyline(
             [
-                (pv_x - 1700.0, bus_y + 3200.0),
-                (pv_x + 1700.0, bus_y + 3200.0),
-                (pv_x + 1700.0, bus_y + 4200.0),
-                (pv_x - 1700.0, bus_y + 4200.0),
+                (pv_x - 1800.0, bus_y + 3200.0),
+                (pv_x + 1800.0, bus_y + 3200.0),
+                (pv_x + 1800.0, bus_y + 4200.0),
+                (pv_x - 1800.0, bus_y + 4200.0),
             ],
             close=True,
             dxfattribs={"layer": "E-SLD-EARTH"},
         )
         msp.add_text(
-            f"PV INVERTER {pv_kva:g} kVA (EN 50549-1)",
-            dxfattribs={"layer": "E-SLD-TEXT", "height": 175.0},
-        ).set_placement((pv_x - 1550.0, bus_y + 3600.0))
+            f"HYBRID PV {pv_kva:g} kVA (EN 50549-1 / STORAGE)",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 155.0},
+        ).set_placement((pv_x - 1680.0, bus_y + 3600.0))
         msp.add_line(
             (pv_x, bus_y + 3200.0), (pv_x, bus_y + 2200.0), dxfattribs={"layer": "E-SLD-EARTH"}
         )
         msp.add_lwpolyline(
             [
-                (pv_x - 1700.0, bus_y + 1300.0),
-                (pv_x + 1700.0, bus_y + 1300.0),
-                (pv_x + 1700.0, bus_y + 2200.0),
-                (pv_x - 1700.0, bus_y + 2200.0),
+                (pv_x - 1800.0, bus_y + 1300.0),
+                (pv_x + 1800.0, bus_y + 1300.0),
+                (pv_x + 1800.0, bus_y + 2200.0),
+                (pv_x - 1800.0, bus_y + 2200.0),
             ],
             close=True,
             dxfattribs={"layer": "E-SLD-DEV"},
         )
         msp.add_text(
-            "AC ISOLATOR + PV GEN METER",
-            dxfattribs={"layer": "E-SLD-TEXT", "height": 170.0},
-        ).set_placement((pv_x - 1550.0, bus_y + 1680.0))
+            "EAC R1/R2 RX + AC ISOLATOR + BIDIR RCBO",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 150.0},
+        ).set_placement((pv_x - 1680.0, bus_y + 1680.0))
         msp.add_line((pv_x, bus_y + 1300.0), (pv_x, bus_y), dxfattribs={"layer": "E-SLD-EARTH"})
 
     # 20% Spare Ways annotation at right end of main busbar

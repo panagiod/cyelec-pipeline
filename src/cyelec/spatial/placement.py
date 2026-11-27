@@ -212,13 +212,55 @@ def _place_ceiling_luminaires(room: Room, count: int) -> list[Point2D]:
     return pts
 
 
+def _snap_to_room_edge(
+    room: Room,
+    target: Point2D,
+    *,
+    inset_margin_mm: float = 200.0,
+) -> tuple[Point2D, float, LineString]:
+    """Project a point onto the closest room polygon edge and return (point, edge_angle, edge)."""
+    pts = room.polygon_mm
+    n = len(pts)
+    tp = Point(target.x_mm, target.y_mm)
+    best_dist = float("inf")
+    best_edge = LineString([(pts[0].x_mm, pts[0].y_mm), (pts[1 % n].x_mm, pts[1 % n].y_mm)])
+    best_ang = 0.0
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        edge = LineString([(a.x_mm, a.y_mm), (b.x_mm, b.y_mm)])
+        if edge.length < 50.0:
+            continue
+        d = float(edge.distance(tp))
+        if d < best_dist:
+            best_dist = d
+            best_edge = edge
+            best_ang = round(math.degrees(math.atan2(b.y_mm - a.y_mm, b.x_mm - a.x_mm)) % 360.0, 1)
+    proj_d = float(best_edge.project(tp))
+    lo_d = min(inset_margin_mm, best_edge.length * 0.45)
+    hi_d = max(best_edge.length - inset_margin_mm, best_edge.length * 0.55)
+    clamped_d = min(max(proj_d, lo_d), hi_d)
+    snapped = best_edge.interpolate(clamped_d)
+    pt = Point2D(x_mm=round(float(snapped.x), 1), y_mm=round(float(snapped.y), 1))
+    return pt, best_ang, best_edge
+
+
+def _has_separated_doors(room_doors: list[DoorOpening], min_sep_mm: float = 1800.0) -> bool:
+    """Return True when a room has >= 2 doorways separated by at least min_sep_mm."""
+    for i, d1 in enumerate(room_doors):
+        for d2 in room_doors[i + 1 :]:
+            dist_mm = math.hypot(d1.hinge.x_mm - d2.hinge.x_mm, d1.hinge.y_mm - d2.hinge.y_mm)
+            if dist_mm >= min_sep_mm:
+                return True
+    return False
+
+
 def _place_room_switch(
     room: Room,
     room_doors: list[DoorOpening],
     valid_walls: list[_WallSegmentCandidate],
     wet_zone: RoomWetZones | None,
 ) -> tuple[Point2D, float]:
-    """Place light switch on latch side of entry door (outside wet rooms per Section 701)."""
+    """Place light switch on latch side of entry door (outside wet rooms; indoors for verandas)."""
     poly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
     boundary = poly.exterior
 
@@ -231,8 +273,8 @@ def _place_room_switch(
         sx = hx + dist * math.cos(rad)
         sy = hy + dist * math.sin(rad)
 
-        # For wet rooms, offset 120 mm outward across the door wall (corridor side)
-        if room.is_wet_room:
+        # For wet rooms & outdoor verandas with a doorway, offset 120 mm outward (indoor/corridor)
+        if room.is_wet_room or room.is_outdoor:
             nx, ny = -math.sin(rad), math.cos(rad)
             cand_a = Point(sx + 120.0 * nx, sy + 120.0 * ny)
             cand_b = Point(sx - 120.0 * nx, sy - 120.0 * ny)
@@ -480,13 +522,22 @@ def place_electrical_devices(
                 )
             )
 
-        # 2. Room Light Switch(es) with deterministic 1G1W / 2G1W / 1G2W (2-way) control mapping
+        # 2. Room Light Switch(es) with deterministic 1G1W / 2G1W / 1G2W (2-way αλέ-ρετούρ)
         sw_pt, sw_ang = _place_room_switch(room, room_doors, valid_walls, room_wz)
-        sw_ip = "IP65" if room.is_outdoor else "IP20"
+        sw_ip = (
+            "IP20"
+            if (room.is_outdoor and room_doors)
+            else ("IP65" if room.is_outdoor else "IP20")
+        )
 
+        bed_furn = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
         is_master_bed = room.normalized_type == RoomType.MASTER_BEDROOM or (
             room.normalized_type == RoomType.BEDROOM
             and any(tok in room.raw_label.lower() for tok in ("master", "κυριο", "κύριο", "main"))
+        )
+        # Cyprus MOEC practice: bedrooms with beds (or master bedrooms) get 2-way αλέ-ρετούρ
+        is_two_way_bedroom = is_master_bed or (
+            room.normalized_type == RoomType.BEDROOM and bed_furn is not None
         )
         rminx, rminy, rmaxx, rmaxy = rpoly.bounds
         room_span_mm = max(rmaxx - rminx, rmaxy - rminy)
@@ -494,6 +545,11 @@ def place_electrical_devices(
             RoomType.CORRIDOR,
             RoomType.STAIRWELL,
         ) and (room_span_mm >= 3500.0 or len(room_doors) >= 2)
+        is_two_way_multi_entry = (
+            room.normalized_type
+            in (RoomType.KITCHEN, RoomType.LIVING_ROOM, RoomType.KITCHEN_LIVING)
+            and _has_separated_doors(room_doors, min_sep_mm=1800.0)
+        )
 
         if room.is_wet_room:
             ctrl_ids = (
@@ -560,8 +616,11 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
-            # Add 3-way intermediate / secondary entry switch in large rooms (>=30 m² or >=3 doors)
-            if (room.area_m2 >= 30.0 or len(room_doors) >= 3) and valid_walls:
+            # Add secondary 2-way (αλέ-ρετούρ) switch in large/multi-entry open rooms
+            need_far_sw = (
+                room.area_m2 >= 30.0 or len(room_doors) >= 3 or is_two_way_multi_entry
+            )
+            if need_far_sw and valid_walls:
                 far_cand = max(
                     valid_walls,
                     key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
@@ -574,7 +633,7 @@ def place_electrical_devices(
                         device_id=_next_dev("SW"),
                         room_id=room.id,
                         device_type=DeviceType.SWITCH,
-                        label=f"1G-INT 3-Way Intermediate Switch ({room.raw_label})",
+                        label=f"1G2W Secondary 2-Way Switch ({room.raw_label})",
                         location_mm=Point2D(
                             x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1)
                         ),
@@ -586,8 +645,8 @@ def place_electrical_devices(
                         controlled_device_ids=room_lum_group_a or room_lum_ids,
                     )
                 )
-        elif is_two_way_circulation or is_master_bed:
-            # Primary 2-way switch at room entry door
+        elif is_two_way_circulation or is_two_way_bedroom or is_two_way_multi_entry:
+            # Primary 2-way (αλέ-ρετούρ) switch at room entry door
             devices.append(
                 PlacedDevice(
                     device_id=_next_dev("SW"),
@@ -603,14 +662,17 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
-            # Secondary 2-way switch snapped to detected bed headboard wall or far wall
-            bed_furn = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
-            if is_master_bed and bed_furn is not None:
-                proj = nearest_points(
-                    rpoly.exterior, Point(bed_furn.centroid_mm.x_mm, bed_furn.centroid_mm.y_mm)
-                )[0]
-                sw2_loc = Point2D(x_mm=round(float(proj.x), 1), y_mm=round(float(proj.y), 1))
-                sw2_ang = sw_ang
+            # Secondary 2-way switch snapped to bed headboard wall, second doorway, or far wall
+            if is_two_way_bedroom and bed_furn is not None:
+                sw2_loc, sw2_ang, _bed_edge = _snap_to_room_edge(room, bed_furn.centroid_mm)
+            elif is_two_way_multi_entry and len(room_doors) >= 2:
+                far_door = max(
+                    room_doors[1:],
+                    key=lambda d: math.hypot(
+                        d.hinge.x_mm - sw_pt.x_mm, d.hinge.y_mm - sw_pt.y_mm
+                    ),
+                )
+                sw2_loc, sw2_ang = _place_room_switch(room, [far_door], valid_walls, room_wz)
             elif valid_walls:
                 far_cand = max(
                     valid_walls,
@@ -631,11 +693,11 @@ def place_electrical_devices(
                     device_type=DeviceType.SWITCH,
                     label=(
                         f"1G2W Bedside Switch ({room.raw_label})"
-                        if is_master_bed
+                        if is_two_way_bedroom
                         else f"1G2W Far-End Switch ({room.raw_label})"
                     ),
                     location_mm=sw2_loc,
-                    mounting_height_mm=750.0 if is_master_bed else 1200.0,
+                    mounting_height_mm=750.0 if is_two_way_bedroom else 1200.0,
                     wall_angle_deg=sw2_ang,
                     ip_rating=sw_ip,
                     switch_group="a",
@@ -687,19 +749,25 @@ def place_electrical_devices(
 
         # 3. Twin 13A Socket Outlets (furniture-aware bedside snapping; never in wet-zone excl.)
         if rt.socket_count_default > 0 and rt.socket_group != "none":
-            bed_furn_s = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
+            bed_furn_s = bed_furn
             furn_sock_pts: list[tuple[Point2D, float]] = []
             if bed_furn_s is not None and room.normalized_type in (
                 RoomType.MASTER_BEDROOM,
                 RoomType.BEDROOM,
             ):
-                proj = nearest_points(
-                    rpoly.exterior,
-                    Point(bed_furn_s.centroid_mm.x_mm, bed_furn_s.centroid_mm.y_mm),
-                )[0]
-                bwall = Point2D(x_mm=round(float(proj.x), 1), y_mm=round(float(proj.y), 1))
-                furn_sock_pts.append((_offset_along_wall(bwall, sw_ang, -950.0), sw_ang))
-                furn_sock_pts.append((_offset_along_wall(bwall, sw_ang, 950.0), sw_ang))
+                bwall, bed_ang, bed_edge = _snap_to_room_edge(room, bed_furn_s.centroid_mm)
+                b_proj = float(bed_edge.project(Point(bwall.x_mm, bwall.y_mm)))
+                left_pt = bed_edge.interpolate(max(220.0, b_proj - 950.0))
+                right_pt = bed_edge.interpolate(min(bed_edge.length - 220.0, b_proj + 950.0))
+                if left_pt.distance(right_pt) >= 500.0:
+                    l_p2d = Point2D(
+                        x_mm=round(float(left_pt.x), 1), y_mm=round(float(left_pt.y), 1)
+                    )
+                    r_p2d = Point2D(
+                        x_mm=round(float(right_pt.x), 1), y_mm=round(float(right_pt.y), 1)
+                    )
+                    furn_sock_pts.append((l_p2d, bed_ang))
+                    furn_sock_pts.append((r_p2d, bed_ang))
 
             rem_count = max(0, rt.socket_count_default - len(furn_sock_pts))
             sock_pts = furn_sock_pts + _place_points_along_candidates(valid_walls, rem_count)

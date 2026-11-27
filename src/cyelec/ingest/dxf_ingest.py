@@ -6,6 +6,7 @@ import hashlib
 import math
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,7 @@ from ezdxf.entities.polyline import Polyline
 from ezdxf.entities.spline import Spline
 from ezdxf.entities.text import Text
 from ezdxf.filemanagement import readfile as read_dxf
+from shapely import set_precision
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import polygonize, snap, unary_union
 
@@ -67,6 +69,12 @@ _FURNITURE_TOKENS: tuple[tuple[_FurnitureKind, tuple[str, ...]], ...] = (
     ("fridge", ("FRIDGE", "REFRIG", "SNGREF", "DBLREF", "FREEZER", "ΨΥΓΕΙ")),
     ("kitchen_counter", ("COUNTER", "ISLAND", "WORKTOP", "CABINET", "ΠΑΓΚ")),
 )
+
+# Short Cyprus/Greek architectural appliance callout letters (Ψ=fridge, ΠΛ=washer/dishwasher)
+_APPLIANCE_CALLOUT_TOKENS: frozenset[str] = frozenset(
+    {"ψ", "πλ", "θ", "η/σ", "wm", "dw", "w/m", "d/w"}
+)
+_FRIDGE_CALLOUT_TOKENS: frozenset[str] = frozenset({"ψ", "ψυγ", "fr"})
 
 
 def _classify_furniture_hint(layer: str, block_hint: str | None) -> _FurnitureKind | None:
@@ -405,10 +413,11 @@ def _extract_wall_cavities(
     if not lines:
         return []
     merged_lines = unary_union(lines)
-    wall_band = merged_lines.buffer(buffer_mm, join_style="mitre")
+    jstyle = "bevel" if len(lines) > 250 else "mitre"
+    wall_band = merged_lines.buffer(buffer_mm, quad_segs=2, join_style=jstyle)
     wall_thin = (
-        merged_lines.buffer(subtract_thin_mm, join_style="mitre")
-        if subtract_thin_mm > 0.0
+        merged_lines.buffer(subtract_thin_mm, quad_segs=2, join_style=jstyle)
+        if subtract_thin_mm > 0.0 and len(lines) <= 600
         else None
     )
     geoms = list(wall_band.geoms) if hasattr(wall_band, "geoms") else [wall_band]
@@ -418,7 +427,7 @@ def _extract_wall_cavities(
             continue
         for interior in geom.interiors:
             hole = Polygon(interior)
-            expanded = hole.buffer(max(10.0, buffer_mm - 20.0), join_style="mitre")
+            expanded = hole.buffer(max(10.0, buffer_mm - 20.0), quad_segs=2, join_style=jstyle)
             if wall_thin is not None:
                 expanded = expanded.difference(wall_thin)
                 if hasattr(expanded, "geoms"):
@@ -467,15 +476,43 @@ def _polygonize_rooms_from_walls(
     if not lines:
         return []
 
+    # Guard against dense raw PDF-to-DXF vector clouds (>600 segments) where O(V^2) GEOS snap stalls
+    dense_raw = len(lines) > 600
+    if dense_raw:
+        orig_count = len(lines)
+        long_lines = [ln for ln in lines if ln.length >= 150.0]
+        if len(long_lines) >= 30:
+            lines = long_lines
+        if len(lines) > 1200:
+            lines.sort(key=lambda ln: ln.length, reverse=True)
+            lines = lines[:1200]
+        if flags is not None and len(lines) < orig_count:
+            flags.append(
+                ReviewFlag(
+                    code="RAW_DENSE_GEOMETRY_SIMPLIFIED",
+                    severity=ReviewSeverity.WARNING,
+                    category="geometry",
+                    message=(
+                        f"Dense unlayered CAD/PDF vector input ({orig_count} segments) filtered "
+                        f"to {len(lines)} structural wall candidates (>=150 mm) to prevent "
+                        "polygonization timeout. Prefer clean layered AutoCAD DXF/DWG input."
+                    ),
+                )
+            )
+
     merged = unary_union(lines)
-    # Snap tiny drafting tolerances (<= 80 mm) so nearly touching wall corners close cleanly
-    snapped = snap(merged, merged, 80.0)
-    noded = unary_union(snapped)
+    if dense_raw:
+        # O(N log N) fixed-precision grid noding instead of O(V^2) GEOS snap
+        noded = unary_union(set_precision(merged, 25.0))
+    else:
+        # Snap tiny drafting tolerances (<= 80 mm) so nearly touching wall corners close cleanly
+        snapped = snap(merged, merged, 80.0)
+        noded = unary_union(snapped)
 
     raw_polys = [
         p for p in polygonize(noded) if isinstance(p, Polygon) and 1_200_000.0 <= p.area <= 5e8
     ]
-    if len(raw_polys) < 2:
+    if len(raw_polys) < 2 and len(lines) <= 800:
         cavities = _extract_wall_cavities(lines, buffer_mm=140.0)
         if len(cavities) > len(raw_polys):
             raw_polys = cavities
@@ -483,7 +520,7 @@ def _polygonize_rooms_from_walls(
     # Morphological doorway-gap closing (<= 960 mm door openings) when drawing has no door
     # geometry OR walls severely under-segmented due to open/unbridged interior doorways.
     has_doors = bool(door_arcs or door_leaves)
-    if (not has_doors) or (len(raw_polys) <= 3 and len(wall_lines) >= 20):
+    if len(lines) <= 800 and ((not has_doors) or (len(raw_polys) <= 3 and len(wall_lines) >= 20)):
         bridged = _extract_wall_cavities(lines, buffer_mm=480.0, subtract_thin_mm=80.0)
         raw_area = sum(p.area for p in raw_polys)
         bridged_area = sum(p.area for p in bridged)
@@ -505,6 +542,11 @@ def _polygonize_rooms_from_walls(
 
     if not raw_polys:
         return []
+
+    # Guard against O(P^2) containment checks on uncleaned raw PDF/hatch vector dumps
+    if len(raw_polys) > 150:
+        raw_polys.sort(key=lambda p: p.area, reverse=True)
+        raw_polys = raw_polys[:150]
 
     # Drop any outer shell polygon that encloses 2+ smaller interior rooms
     filtered: list[Polygon] = []
@@ -610,9 +652,12 @@ def ingest_dxf(
 
     room_raw_polys: list[Polygon] = []
     text_labels: list[tuple[str, Point, str]] = []
+    leader_arrows: list[tuple[Point, Point]] = []
     fixture_polys: list[tuple[Polygon, str | None]] = []
     fixture_texts: list[tuple[str, Point]] = []
     furniture_polys: list[tuple[Polygon, _FurnitureKind]] = []
+    untyped_furniture_polys: list[Polygon] = []
+    furniture_texts: list[tuple[str, Point]] = []
     wall_lines: list[tuple[Point2D, Point2D]] = []
     layer0_lines: list[tuple[Point2D, Point2D]] = []
     door_arcs: list[tuple[Point2D, float, float, float]] = []
@@ -659,6 +704,36 @@ def ingest_dxf(
     for ent, layer, block_hint in resolved_entities:
         dtype = ent.dxftype()
         hint_up = (block_hint or "").upper()
+        layer_up = layer.upper()
+
+        # DXF LEADER / MULTILEADER arrows pointing external room labels into narrow polygons
+        if dtype == "LEADER":
+            verts = list(getattr(ent, "vertices", []) or [])
+            if len(verts) >= 2:
+                tip_v, tail_v = verts[0], verts[-1]
+                leader_arrows.append(
+                    (
+                        Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale),
+                        Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale),
+                    )
+                )
+            continue
+        if dtype == "MULTILEADER":
+            ctx = getattr(ent, "context", None)
+            mtext_obj = getattr(ctx, "mtext", None) if ctx is not None else None
+            ml_text = str(getattr(mtext_obj, "default_content", "") or "").strip()
+            for ld in getattr(ctx, "leaders", []) or []:
+                for line in getattr(ld, "lines", []) or []:
+                    verts = list(getattr(line, "vertices", []) or [])
+                    if verts:
+                        tip_v = verts[0]
+                        tail_v = getattr(ld, "last_leader_point", None) or verts[-1]
+                        tip_pt = Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale)
+                        tail_pt = Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale)
+                        leader_arrows.append((tip_pt, tail_pt))
+                        if ml_text:
+                            text_labels.append((ml_text, tail_pt, layer))
+            continue
 
         # Room boundary polygons
         if _role_matches(layer, "rooms", layer_mapping):
@@ -797,6 +872,22 @@ def ingest_dxf(
                     furn_poly = furn_poly.buffer(0.0)
                 if isinstance(furn_poly, Polygon) and 80_000.0 <= furn_poly.area <= 15_000_000.0:
                     furniture_polys.append((furn_poly, furn_kind))
+            else:
+                txt = _extract_text_item(ent, scale)
+                if txt is not None:
+                    furniture_texts.append((txt[0], Point(txt[1])))
+        elif any(tok in layer_up for tok in ("FURN", "FURNITURE", "JOINERY", "EQUIP")):
+            coords = _extract_poly_coords(ent, scale)
+            if coords is not None:
+                furn_poly = Polygon(coords)
+                if not furn_poly.is_valid:
+                    furn_poly = furn_poly.buffer(0.0)
+                if isinstance(furn_poly, Polygon) and 80_000.0 <= furn_poly.area <= 15_000_000.0:
+                    untyped_furniture_polys.append(furn_poly)
+            else:
+                txt = _extract_text_item(ent, scale)
+                if txt is not None:
+                    furniture_texts.append((txt[0], Point(txt[1])))
 
         # Layer "0" fallback lines & 90-deg door arcs (used only when dedicated layers are absent)
         elif layer == "0" and not block_hint:
@@ -829,15 +920,47 @@ def ingest_dxf(
                         )
                     )
 
-        # Architectural text labels
-        if _role_matches(layer, "text", layer_mapping) or (
-            dtype in ("TEXT", "MTEXT")
-            and not _role_matches(layer, "fixtures", layer_mapping)
-            and not _role_matches(layer, "db", layer_mapping)
+        # Architectural text labels (exclude furniture layer labels & short Greek appliance letters)
+        is_furn_layer = any(tok in layer_up for tok in ("FURN", "FURNITURE", "JOINERY"))
+        if (
+            _role_matches(layer, "text", layer_mapping)
+            or (
+                dtype in ("TEXT", "MTEXT")
+                and not _role_matches(layer, "fixtures", layer_mapping)
+                and not _role_matches(layer, "db", layer_mapping)
+                and not is_furn_layer
+            )
         ):
             txt = _extract_text_item(ent, scale)
             if txt is not None:
-                text_labels.append((txt[0], Point(txt[1]), layer))
+                norm_tok = normalize_label(clean_room_label(txt[0]))
+                if norm_tok in _APPLIANCE_CALLOUT_TOKENS:
+                    if norm_tok in _FRIDGE_CALLOUT_TOKENS:
+                        fx, fy = txt[1]
+                        furniture_polys.append(
+                            (
+                                Polygon(
+                                    [
+                                        (fx - 300.0, fy - 300.0),
+                                        (fx + 300.0, fy - 300.0),
+                                        (fx + 300.0, fy + 300.0),
+                                        (fx - 300.0, fy + 300.0),
+                                    ]
+                                ),
+                                "fridge",
+                            )
+                        )
+                else:
+                    text_labels.append((txt[0], Point(txt[1]), layer))
+
+    # Resolve untyped furniture polylines (e.g. A-FURN rectangle + 'BED'/'DINING TABLE' text)
+    for fpoly in untyped_furniture_polys:
+        for ftxt, fpt in furniture_texts:
+            if fpoly.contains(fpt) or fpoly.distance(fpt) < 400.0:
+                fk = _classify_furniture_hint("", ftxt)
+                if fk is not None:
+                    furniture_polys.append((fpoly, fk))
+                    break
 
     # Fallback: drawings with walls drawn purely on layer "0" (legacy homeowner/AutoCAD plans)
     if not room_raw_polys and not wall_lines and layer0_lines:
@@ -936,11 +1059,75 @@ def ingest_dxf(
     room_flags_by_id: dict[str, list[ReviewFlag]] = defaultdict(list)
     tmpl_std = std.room_templates
 
+    # Pre-index text labels that sit outside ALL room polygons (for LEADER & veranda fallback)
+    outside_text_indices: list[int] = [
+        ti
+        for ti, (_t, pt, _l) in enumerate(text_labels)
+        if not any(p.contains(pt) or p.touches(pt) for p in room_raw_polys)
+    ]
+    leader_texts_by_room_idx: dict[int, list[str]] = defaultdict(list)
+    consumed_outside_text: set[int] = set()
+    for tip_pt, tail_pt in leader_arrows:
+        pointed_idx = next(
+            (
+                i
+                for i, p in enumerate(room_raw_polys)
+                if p.contains(tip_pt) or p.distance(tip_pt) <= 120.0
+            ),
+            None,
+        )
+        if pointed_idx is None:
+            continue
+        best_ti: int | None = None
+        best_d = 2500.0
+        for ti in outside_text_indices:
+            if ti in consumed_outside_text:
+                continue
+            d = float(tail_pt.distance(text_labels[ti][1]))
+            if d < best_d:
+                best_d = d
+                best_ti = ti
+        if best_ti is not None:
+            consumed_outside_text.add(best_ti)
+            leader_texts_by_room_idx[pointed_idx].append(text_labels[best_ti][0])
+
+    # Near-boundary fallback for unlabelled outdoor verandas/entrances when leader is plain LINEs
+    unlabelled_room_indices = [
+        i
+        for i, p in enumerate(room_raw_polys)
+        if not leader_texts_by_room_idx.get(i)
+        and not any(p.contains(pt) or p.touches(pt) for _t, pt, _l in text_labels)
+    ]
+    for ti in outside_text_indices:
+        if ti in consumed_outside_text:
+            continue
+        txt_val, txt_pt, _ = text_labels[ti]
+        cls_probe = classify_room_label(clean_room_label(txt_val), tmpl_std)
+        if cls_probe.confidence < 0.90 or cls_probe.normalized_type not in (
+            RoomType.VERANDA,
+            RoomType.CORRIDOR,
+        ):
+            continue
+        best_ri: int | None = None
+        best_d = 1800.0
+        for ri in unlabelled_room_indices:
+            if leader_texts_by_room_idx.get(ri):
+                continue
+            d = float(room_raw_polys[ri].distance(txt_pt))
+            if d < best_d:
+                best_d = d
+                best_ri = ri
+        if best_ri is not None:
+            consumed_outside_text.add(ti)
+            leader_texts_by_room_idx[best_ri].append(txt_val)
+
     for idx, poly in enumerate(room_raw_polys, start=1):
         rid = f"R{idx}"
         room_poly_pairs.append((rid, poly))
 
         inside_texts = [t for t, pt, _ in text_labels if poly.contains(pt) or poly.touches(pt)]
+        if not inside_texts and leader_texts_by_room_idx.get(idx - 1):
+            inside_texts = list(leader_texts_by_room_idx[idx - 1])
         if inside_texts:
             # Prefer texts matching Tier-1 room aliases over CAD door/window callouts (e.g. '3068')
             best_label = clean_room_label(inside_texts[0])
@@ -986,9 +1173,10 @@ def ingest_dxf(
                             if c[1].confidence >= 0.90 and c[0] != joined_lbl
                         )
                     )
-                    best_cls = classify_room_label(
+                    kl_cls = classify_room_label(
                         "kitchen/living", tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
                     )
+                    best_cls = replace(kl_cls, cleaned_label=best_label or kl_cls.cleaned_label)
                 elif (
                     RoomType.UTILITY in matched_types
                     and RoomType.STORAGE in matched_types
@@ -1026,11 +1214,26 @@ def ingest_dxf(
                         )
                     )
                 else:
-                    candidates.sort(
-                        key=lambda item: (item[1].confidence, len(item[1].matched_alias or "")),
-                        reverse=True,
-                    )
-                    best_label, best_cls = candidates[0]
+                    # Preserve combined labels when multiple distinct aliases share the same type
+                    # (e.g. Greek open-plan 'καθιστικό' + 'τραπεζαρία' -> 'καθιστικό / τραπεζαρία')
+                    high_conf_singles = [
+                        c
+                        for c in candidates
+                        if c[1].confidence >= 0.90 and c[0] != joined_lbl
+                    ]
+                    if (
+                        len(matched_types) == 1
+                        and len({c[0].lower() for c in high_conf_singles}) >= 2
+                        and RoomType.LIVING_ROOM in matched_types
+                    ):
+                        best_label = " / ".join(dict.fromkeys(c[0] for c in high_conf_singles))
+                        best_cls = replace(high_conf_singles[0][1], cleaned_label=best_label)
+                    else:
+                        candidates.sort(
+                            key=lambda item: (item[1].confidence, len(item[1].matched_alias or "")),
+                            reverse=True,
+                        )
+                        best_label, best_cls = candidates[0]
             raw_label = best_label
             cls_res = best_cls
         else:
@@ -1077,6 +1280,18 @@ def ingest_dxf(
                 ),
                 fixtures=[],
             )
+        )
+
+    # Fail-fast guard: reject uncleaned raw PDF-to-DXF vector soup (layer '0' only, >40 cells,
+    # zero readable DXF text labels) instead of routing garbage hatch polygons.
+    used_layer0_fallback = any(f.code == "WALLS_INFERRED_FROM_LAYER_0" for f in flags)
+    unlabelled_count = sum(1 for r in rooms if r.raw_label.startswith("Unnamed Room"))
+    if used_layer0_fallback and len(rooms) > 40 and unlabelled_count == len(rooms):
+        raise ValueError(
+            f"Input DXF '{dxf_path.name}' appears to be an unlayered raw vector/PDF export "
+            f"({len(rooms)} unlabelled cells on layer '0' and 0 readable DXF room text labels). "
+            "Export a native layered AutoCAD/BIM DXF/DWG with TEXT/MTEXT room labels (e.g. "
+            "A-WALL, A-ROOM, A-DOOR) or supply DxfLayerMapping."
         )
 
     # Automatic side-by-side / stacked multi-plan cluster splitting & non-floor sheet exclusion
@@ -1170,6 +1385,47 @@ def ingest_dxf(
         if ftype in ("bathtub", "shower_tray") and not room_obj.is_wet_room:
             room_obj.is_wet_room = True
 
+    # P0 Life-Safety Promotion: unlabelled rooms containing bathtub/shower/WC MUST NOT stay STORAGE!
+    for room_obj in rooms:
+        if (
+            room_obj.normalized_type == RoomType.STORAGE
+            and room_obj.raw_label.startswith("Unnamed Room")
+            and room_obj.fixtures
+        ):
+            ftypes = {str(fx.fixture_type) for fx in room_obj.fixtures}
+            promoted_type: RoomType | None = None
+            promoted_lbl: str | None = None
+            if "bathtub" in ftypes or "shower_tray" in ftypes:
+                promoted_type = RoomType.BATHROOM
+                promoted_lbl = "Bathroom (inferred)"
+            elif "wc" in ftypes:
+                promoted_type = RoomType.WC
+                promoted_lbl = "WC (inferred)"
+            if promoted_type is not None and promoted_lbl is not None:
+                room_obj.normalized_type = promoted_type
+                room_obj.is_wet_room = True
+                room_obj.raw_label = promoted_lbl
+                flags = [
+                    f
+                    for f in flags
+                    if not (
+                        f.code == "ROOM_LABEL_MISSING" and f"Room {room_obj.id} " in f.message
+                    )
+                ]
+                flags.append(
+                    ReviewFlag(
+                        code="WET_ROOM_INFERRED_FROM_FIXTURES",
+                        severity=ReviewSeverity.INFO,
+                        category="bs7671",
+                        message=(
+                            f"Unlabelled room {room_obj.id} ({room_obj.area_m2:.2f} m²) contains "
+                            f"sanitary fixtures ({', '.join(sorted(ftypes))}); automatically "
+                            f"promoted to '{promoted_type.value}' with full BS 7671 Sec. 701 "
+                            "wet-zone safety rules."
+                        ),
+                    )
+                )
+
     # Attach detected furniture/joinery items for furniture-aware electrical placement
     for furn_idx, (furn_poly, furn_kind) in enumerate(furniture_polys, start=1):
         target_rid = _find_containing_room(
@@ -1249,6 +1505,48 @@ def ingest_dxf(
                 swing_dir=swing_dir,
             )
         )
+
+    # Promote unlabelled compact circulation hubs (>= 3 doors touching boundary, <= 16 m²)
+    poly_by_rid = dict(room_poly_pairs)
+    for room_obj in rooms:
+        if (
+            room_obj.normalized_type == RoomType.STORAGE
+            and room_obj.raw_label.startswith("Unnamed Room")
+            and not room_obj.is_wet_room
+            and not room_obj.is_outdoor
+            and room_obj.area_m2 <= 16.0
+        ):
+            rpoly = poly_by_rid.get(room_obj.id)
+            if rpoly is None:
+                continue
+            touching_doors = sum(
+                1
+                for d in doors
+                if d.room_id == room_obj.id
+                or float(rpoly.exterior.distance(Point(d.hinge.x_mm, d.hinge.y_mm))) <= 150.0
+            )
+            if touching_doors >= 3:
+                room_obj.normalized_type = RoomType.CORRIDOR
+                room_obj.raw_label = "Corridor / Hall (inferred)"
+                flags = [
+                    f
+                    for f in flags
+                    if not (
+                        f.code == "ROOM_LABEL_MISSING" and f"Room {room_obj.id} " in f.message
+                    )
+                ]
+                flags.append(
+                    ReviewFlag(
+                        code="CORRIDOR_INFERRED_FROM_DOORS",
+                        severity=ReviewSeverity.INFO,
+                        category="geometry",
+                        message=(
+                            f"Unlabelled room {room_obj.id} ({room_obj.area_m2:.2f} m²) serves "
+                            f"{touching_doors} doorways; promoted to 'corridor' for 2-way "
+                            "circulation switching and DB placement."
+                        ),
+                    )
+                )
 
     # Build WindowOpenings
     windows: list[WindowOpening] = []
