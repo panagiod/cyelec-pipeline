@@ -224,6 +224,7 @@ def test_w2_separate_discipline_dxfs_details_sheet_and_pdfs(tmp_path: Path) -> N
             "e101_lighting_pdf",
             "e102_power_pdf",
             "e201_sld_pdf",
+            "e203_selectivity_pdf",
             "e301_details_pdf",
         ):
             assert pdf_key in outputs and outputs[pdf_key].is_file()

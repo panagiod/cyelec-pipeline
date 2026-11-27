@@ -428,3 +428,141 @@ def test_direct_vector_pdf_ingestion_and_api_preview(tmp_path: Path) -> None:
         files={"file": ("scanned_raster.pdf", raster_pdf.read_bytes(), "application/pdf")},
     )
     assert bad_resp.status_code == 422
+
+
+def test_e203_selectivity_pdf_registered_in_deliverables_and_zip(tmp_path: Path) -> None:
+    """E-203 PDF must be registered when export_svg_sheet_to_pdf returns (pdf_path, None)."""
+    import zipfile
+    from unittest.mock import patch
+
+    from cyelec.render.eac_pack import build_submission_zip
+    from cyelec.render.pdf_export import is_weasyprint_available
+    from cyelec.render.selectivity_svg import export_selectivity_deliverables
+
+    bldg = generate_benchmark_dxf(BenchmarkTemplate.APARTMENT_3BED)
+    p2 = run_phase2_pipeline(bldg)
+
+    # Always verify the (pdf_path, None) success contract even without local WeasyPrint
+    def _fake_svg_pdf(src: Path, dst: Path, **_kwargs: object) -> tuple[Path, None]:
+        assert src.name == "E203_selectivity_curves.svg"
+        dst.write_bytes(b"%PDF-1.7\n" + b"0" * 2048)
+        return dst, None
+
+    mock_dir = tmp_path / "mock_sel"
+    with patch("cyelec.render.selectivity_svg.export_svg_sheet_to_pdf", side_effect=_fake_svg_pdf):
+        outs = export_selectivity_deliverables(p2, mock_dir, export_pdf=True)
+    assert "e203_selectivity_svg" in outs and outs["e203_selectivity_svg"].is_file()
+    assert "e203_selectivity_pdf" in outs and outs["e203_selectivity_pdf"].is_file()
+    assert outs["e203_selectivity_pdf"].read_bytes().startswith(b"%PDF-")
+
+    zp = build_submission_zip(outs, tmp_path / "sel.zip")
+    with zipfile.ZipFile(zp) as zf:
+        assert "E203_selectivity_curves.pdf" in zf.namelist()
+
+    # If WeasyPrint is installed in the test environment (e.g. Docker / Cloud Run), verify real PDF
+    if is_weasyprint_available():
+        real_outs = export_selectivity_deliverables(p2, tmp_path / "real_sel", export_pdf=True)
+        assert "e203_selectivity_pdf" in real_outs
+        raw_pdf = real_outs["e203_selectivity_pdf"].read_bytes()
+        assert raw_pdf.startswith(b"%PDF-") and len(raw_pdf) > 1024
+
+
+def test_uniformity_fill_downlights_refine_l_shaped_room_and_noop_when_compliant() -> None:
+    """L-shaped room with dark leg gets fill downlights to reach U0 >= target; compliant is noop."""
+    from cyelec.models.building import BuildingType, DistributionBoardAnchor
+    from cyelec.spatial.placement import (
+        _place_ceiling_luminaires,
+        _plan_uniformity_fill_points,
+    )
+
+    # 1. Already-compliant rectangular office -> _plan_uniformity_fill_points is a no-op
+    rect_room = Room(
+        id="R_RECT",
+        raw_label="Compliant Office",
+        normalized_type=RoomType.OPEN_OFFICE,
+        polygon_mm=[
+            Point2D(x_mm=0.0, y_mm=0.0),
+            Point2D(x_mm=6000.0, y_mm=0.0),
+            Point2D(x_mm=6000.0, y_mm=4000.0),
+            Point2D(x_mm=0.0, y_mm=4000.0),
+        ],
+        area_m2=24.0,
+        ceiling_height_mm=2900.0,
+    )
+    rect_lums = [
+        PlacedDevice(
+            device_id=f"RL{i}",
+            room_id="R_RECT",
+            device_type=DeviceType.LUMINAIRE,
+            label=f"Panel {i}",
+            location_mm=Point2D(x_mm=x, y_mm=y),
+            mounting_height_mm=2900.0,
+            luminaire_wattage_w=40.0,
+            lumens=4200,
+        )
+        for i, (x, y) in enumerate(
+            [(1500.0, 1000.0), (4500.0, 1000.0), (1500.0, 3000.0), (4500.0, 3000.0)],
+            start=1,
+        )
+    ]
+    fills_noop, u0_b, u0_a = _plan_uniformity_fill_points(rect_room, rect_lums, max_extra=4)
+    assert fills_noop == []
+    assert u0_b == u0_a and u0_b >= 0.60
+
+    # 2. L-shaped open-plan room whose naive bounding-box grid drops points in the narrow leg
+    l_poly = [
+        Point2D(x_mm=0.0, y_mm=0.0),
+        Point2D(x_mm=8500.0, y_mm=0.0),
+        Point2D(x_mm=8500.0, y_mm=3200.0),
+        Point2D(x_mm=3400.0, y_mm=3200.0),
+        Point2D(x_mm=3400.0, y_mm=7800.0),
+        Point2D(x_mm=0.0, y_mm=7800.0),
+    ]
+    # Area = 8.5*3.2 + 3.4*4.6 = 27.2 + 15.64 = 42.84 m²
+    l_room = Room(
+        id="R_LOPEN",
+        raw_label="Open Plan Living/Kitchen",
+        normalized_type=RoomType.KITCHEN_LIVING,
+        polygon_mm=l_poly,
+        area_m2=42.84,
+        ceiling_height_mm=2800.0,
+    )
+    # Verify naive grid layout (without fill) fails U0 < 0.40 on this geometry
+    naive_pts = _place_ceiling_luminaires(l_room, count=6)
+    naive_lums = [
+        PlacedDevice(
+            device_id=f"NL{i}",
+            room_id="R_LOPEN",
+            device_type=DeviceType.LUMINAIRE,
+            label=f"L{i}",
+            location_mm=pt,
+            mounting_height_mm=2800.0,
+            luminaire_wattage_w=14.0,
+            lumens=1500,
+        )
+        for i, pt in enumerate(naive_pts, start=1)
+    ]
+    naive_res = evaluate_room_photometrics_2d(l_room, naive_lums, grid_step_mm=250.0)
+    assert naive_res.u0_compliant is False, f"Expected naive L-shape to fail U0, got {naive_res}"
+
+    # Full pipeline run must add fill downlights, emit INFO flag, and satisfy both U0 & E_avg
+    model = BuildingModel(
+        project_name="L-Shape Uniformity Test",
+        building_type=BuildingType.APARTMENT_1BED,
+        total_floor_area_m2=42.84,
+        rooms=[l_room],
+        db_anchor=DistributionBoardAnchor(
+            id="DB-MAIN",
+            location_mm=Point2D(x_mm=500.0, y_mm=500.0),
+        ),
+    )
+    p2 = run_phase2_pipeline(model)
+    assert all(c.overall_pass for c in p2.design.circuits)
+    assert any(
+        f.code == "PHOTOMETRIC_UNIFORMITY_FILL_ADDED" for f in p2.design.review_flags
+    ), "Expected PHOTOMETRIC_UNIFORMITY_FILL_ADDED INFO flag"
+    chk = next(lc for lc in p2.design.lumen_checks if lc.room_id == "R_LOPEN")
+    assert chk.u0_compliant is True, f"Expected refined L-shape U0 compliant, got {chk}"
+    assert chk.achieved_lux >= chk.target_lux * 0.90
+    assert chk.achieved_lux <= chk.target_lux * 1.40
+

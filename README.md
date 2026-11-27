@@ -74,7 +74,7 @@ Formal procedures are documented in [`docs/QA_PROCEDURE.md`](docs/QA_PROCEDURE.m
 # Full local QA gate (~60s): adds pip-audit, Playwright Chromium UI regression & Tier-1 48-room stress
 ./scripts/run_qa.sh --full
 
-# Full production container parity: Docker E2E (MIT .dwg/.ifc/10 PDFs) + Tier-2 2 vCPU/2 GiB concurrency & soak
+# Full production container parity: Docker E2E (MIT .dwg/.ifc/11 PDFs) + Tier-2 2 vCPU/2 GiB concurrency & soak
 ./scripts/run_qa.sh --docker
 
 # Standalone performance tiers (Tier-1 per-stage/48-room stress, Tier-2 4x ZIP & 30-solve leak soak)

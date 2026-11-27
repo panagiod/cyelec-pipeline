@@ -295,12 +295,12 @@
     "diversified_kva": 38.09,
     "connected_kva": 48.01,
     "imbalance_pct": 0.62,
-    "total_conduit_m": 994.9,
+    "total_conduit_m": 1000.65,
     "circuit_count": 20,
     "all_circuits_pass": true,
-    "device_count": 160,
-    "boq_subtotal_eur": 15932.9,
-    "boq_grand_total_eur": 18960.15,
+    "device_count": 161,
+    "boq_subtotal_eur": 15999.19,
+    "boq_grand_total_eur": 19039.04,
     "lps_required": false,
     "blocker_count": 0,
     "warning_count": 2,
@@ -325,8 +325,8 @@
         "breaker_curve": "B",
         "cable_mm2": 1.5,
         "cpc_mm2": 1.5,
-        "length_m": 77.65,
-        "voltage_drop_pct": 0.29,
+        "length_m": 83.4,
+        "voltage_drop_pct": 0.28,
         "overall_pass": true
       },
       {
@@ -1346,12 +1346,12 @@
     "diversified_kva": 37.6,
     "connected_kva": 44.97,
     "imbalance_pct": 0.29,
-    "total_conduit_m": 1069.94,
+    "total_conduit_m": 1126.8,
     "circuit_count": 18,
     "all_circuits_pass": true,
-    "device_count": 133,
-    "boq_subtotal_eur": 15848.6,
-    "boq_grand_total_eur": 18859.83,
+    "device_count": 143,
+    "boq_subtotal_eur": 16517.67,
+    "boq_grand_total_eur": 19656.03,
     "lps_required": false,
     "blocker_count": 0,
     "warning_count": 2,
@@ -1389,8 +1389,8 @@
         "breaker_curve": "B",
         "cable_mm2": 1.5,
         "cpc_mm2": 1.5,
-        "length_m": 174.22,
-        "voltage_drop_pct": 1.03,
+        "length_m": 161.3,
+        "voltage_drop_pct": 1.25,
         "overall_pass": true
       },
       {
@@ -1402,8 +1402,8 @@
         "breaker_curve": "B",
         "cable_mm2": 1.5,
         "cpc_mm2": 1.5,
-        "length_m": 98.9,
-        "voltage_drop_pct": 0.82,
+        "length_m": 156.98,
+        "voltage_drop_pct": 0.93,
         "overall_pass": true
       },
       {
@@ -1415,8 +1415,8 @@
         "breaker_curve": "B",
         "cable_mm2": 1.5,
         "cpc_mm2": 1.5,
-        "length_m": 37.82,
-        "voltage_drop_pct": 0.22,
+        "length_m": 40.7,
+        "voltage_drop_pct": 0.23,
         "overall_pass": true
       },
       {
@@ -1467,8 +1467,8 @@
         "breaker_curve": "B",
         "cable_mm2": 2.5,
         "cpc_mm2": 2.5,
-        "length_m": 73.72,
-        "voltage_drop_pct": 1.32,
+        "length_m": 86.54,
+        "voltage_drop_pct": 1.55,
         "overall_pass": true
       },
       {
@@ -1519,8 +1519,8 @@
         "breaker_curve": "C",
         "cable_mm2": 2.5,
         "cpc_mm2": 2.5,
-        "length_m": 33.26,
-        "voltage_drop_pct": 2.35,
+        "length_m": 29.26,
+        "voltage_drop_pct": 2.07,
         "overall_pass": true
       },
       {

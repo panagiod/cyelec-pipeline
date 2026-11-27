@@ -15,7 +15,7 @@ from pathlib import Path
 
 from cyelec.models.electrical import BreakerCurve, ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
-from cyelec.render.pdf_export import export_html_to_pdf
+from cyelec.render.pdf_export import export_svg_sheet_to_pdf
 
 
 def _esc(val: object) -> str:
@@ -399,17 +399,11 @@ def export_selectivity_deliverables(
     svg_path.write_text(svg_str, encoding="utf-8")
     out: dict[str, Path] = {"e203_selectivity_svg": svg_path}
     if export_pdf:
-        html_str = (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<style>@page{size:A3 landscape;margin:8mm;}body{margin:0;padding:0;}</style>"
-            f"</head><body>{svg_str}</body></html>"
+        # NOTE: the exporters return (pdf_path | None, ReviewFlag | None); a None flag means
+        # success. Register the sheet whenever a PDF path is returned.
+        pdf_path, _flag = export_svg_sheet_to_pdf(
+            svg_path, out_dir / "E203_selectivity_curves.pdf"
         )
-        tmp_html = out_dir / "_e203_tmp.html"
-        tmp_html.write_text(html_str, encoding="utf-8")
-        try:
-            pdf_path, ok = export_html_to_pdf(tmp_html, out_dir / "E203_selectivity_curves.pdf")
-            if ok and pdf_path is not None:
-                out["e203_selectivity_pdf"] = pdf_path
-        finally:
-            tmp_html.unlink(missing_ok=True)
+        if pdf_path is not None and pdf_path.exists():
+            out["e203_selectivity_pdf"] = pdf_path
     return out

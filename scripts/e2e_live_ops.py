@@ -108,7 +108,8 @@ def _verify_zip_bundle(zip_bytes: bytes) -> dict[str, Any]:
                 doc = ezdxf.readfile(str(p))
                 audit_errors += len(doc.audit().errors)
                 dxfs += 1
-    assert pdfs >= 10, f"Expected >= 10 WeasyPrint PDFs in live ZIP, got {pdfs}"
+    assert pdfs >= 11, f"Expected >= 11 WeasyPrint PDFs in live ZIP, got {pdfs}"
+    assert "E203_selectivity_curves.pdf" in names, "Missing E203_selectivity_curves.pdf in live ZIP"
     assert dxfs >= 7, f"Expected >= 7 DXFs in live ZIP, got {dxfs}"
     assert audit_errors == 0, f"Expected 0 DXF audit errors in live ZIP, got {audit_errors}"
     return {

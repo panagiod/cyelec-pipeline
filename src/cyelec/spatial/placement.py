@@ -212,6 +212,82 @@ def _place_ceiling_luminaires(room: Room, count: int) -> list[Point2D]:
     return pts
 
 
+def _plan_uniformity_fill_points(
+    room: Room,
+    ceiling_lums: list[PlacedDevice],
+    *,
+    max_extra: int,
+    wall_inset_mm: float = 600.0,
+    min_spacing_mm: float = 900.0,
+) -> tuple[list[Point2D], float, float]:
+    """Greedy closed-loop BS EN 12464-1 uniformity refinement (U0 = E_min / E_avg).
+
+    Repeatedly evaluates the true 2D working-plane grid and drops one fill downlight at the
+    darkest grid point (pulled >= ``wall_inset_mm`` off the walls and >= ``min_spacing_mm`` from
+    every existing fixture) until U0 meets the room target or ``max_extra`` is reached.
+
+    Because every term of the grid model (direct + Sumpner inter-reflection) is linear in
+    luminous flux, U0 is invariant to a uniform lumen rescale; fixing U0 geometrically here lets
+    the caller rescale the lumen package afterwards to land E_avg on target without wasted watts.
+
+    Returns ``(fill_points, u0_before, u0_after)``; ``fill_points`` is empty unless U0 improved.
+    """
+    from cyelec.solver.photometrics import evaluate_room_photometrics_2d
+
+    if not ceiling_lums or max_extra <= 0 or room.area_m2 < 4.0:
+        return [], 0.0, 0.0
+
+    poly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
+    inner: BaseGeometry = poly.buffer(-wall_inset_mm)
+    if inner.is_empty or inner.area < 0.15 * poly.area:
+        inner = poly.buffer(-min(300.0, wall_inset_mm))
+    if inner.is_empty:
+        inner = poly
+
+    base = evaluate_room_photometrics_2d(room, ceiling_lums, grid_step_mm=250.0)
+    u0_before = base.uniformity_u0
+    if base.u0_compliant or base.grid_points == 0:
+        return [], u0_before, u0_before
+
+    template = ceiling_lums[0]
+    trial = list(ceiling_lums)
+    fills: list[Point2D] = []
+    res = base
+    for _ in range(max_extra):
+        if res.u0_compliant or res.grid_points == 0:
+            break
+        order = sorted(range(len(res.lux_values)), key=lambda k: res.lux_values[k])
+        placed = False
+        for k in order[:80]:
+            cand = Point(res.xs_mm[k], res.ys_mm[k])
+            if not inner.contains(cand):
+                cand = nearest_points(inner, cand)[0]
+            if not poly.contains(cand):
+                continue
+            if any(
+                math.hypot(cand.x - d.location_mm.x_mm, cand.y - d.location_mm.y_mm)
+                < min_spacing_mm
+                for d in trial
+            ):
+                continue
+            new_pt = Point2D(x_mm=round(float(cand.x), 1), y_mm=round(float(cand.y), 1))
+            trial.append(
+                template.model_copy(
+                    update={"device_id": f"_u0fill{len(fills)}", "location_mm": new_pt}
+                )
+            )
+            fills.append(new_pt)
+            placed = True
+            break
+        if not placed:
+            break
+        res = evaluate_room_photometrics_2d(room, trial, grid_step_mm=250.0)
+
+    if not fills or res.uniformity_u0 <= u0_before + 1e-6:
+        return [], u0_before, u0_before
+    return fills, u0_before, res.uniformity_u0
+
+
 def _snap_to_room_edge(
     room: Room,
     target: Point2D,
@@ -498,6 +574,70 @@ def place_electrical_devices(
                 )
             )
 
+        # Closed-loop BS EN 12464-1 uniformity refinement: if the 2D grid shows a dark corner /
+        # L-shaped leg (U0 = E_min/E_avg below target), add fill downlights at the darkest
+        # working-plane points. U0 is flux-invariant, so the lumen calibration below then
+        # rescales the whole room package (up OR down) to land E_avg on target.
+        room_ceils = [d for d in devices if d.device_id in room_lum_ids]
+        n_u0_fills = 0
+        if room_ceils:
+            max_fill = min(8, max(2, len(room_ceils) // 2))
+            fill_pts, u0_before, u0_after = _plan_uniformity_fill_points(
+                room, room_ceils, max_extra=max_fill
+            )
+            for fpt in fill_pts:
+                n_u0_fills += 1
+                f_zone = classify_point_wet_zone(fpt, room_wz)
+                f_tmpl = room_ceils[0]
+                f_ip = f_tmpl.ip_rating
+                f_type = f_tmpl.luminaire_fixture_type
+                if not room.is_outdoor and (
+                    f_zone in ("zone_0", "zone_1", "zone_2") or room.is_wet_room
+                ):
+                    f_ip, f_type = "IP44", "IP44 Recessed LED Downlight"
+                nearest = min(
+                    room_ceils,
+                    key=lambda d: math.hypot(
+                        d.location_mm.x_mm - fpt.x_mm, d.location_mm.y_mm - fpt.y_mm
+                    ),
+                )
+                f_grp = nearest.switch_group or "a"
+                fid = _next_dev("L")
+                room_lum_ids.append(fid)
+                (room_lum_group_b if f_grp == "b" else room_lum_group_a).append(fid)
+                devices.append(
+                    PlacedDevice(
+                        device_id=fid,
+                        room_id=room.id,
+                        device_type=DeviceType.LUMINAIRE,
+                        label=f"Luminaire {len(lum_pts) + n_u0_fills} ({room.raw_label})",
+                        location_mm=fpt,
+                        mounting_height_mm=room.ceiling_height_mm,
+                        ip_rating=f_ip,
+                        switch_group=f_grp,
+                        luminaire_wattage_w=lum_w,
+                        luminaire_fixture_type=f_type,
+                        lumens=lum_lm,
+                        target_lux=target_lux,
+                    )
+                )
+            if n_u0_fills:
+                flags.append(
+                    ReviewFlag(
+                        code="PHOTOMETRIC_UNIFORMITY_FILL_ADDED",
+                        severity=ReviewSeverity.INFO,
+                        category="geometry",
+                        regulation_ref="BS EN 12464-1 (Illuminance Uniformity U0 = Emin/Eavg)",
+                        message=(
+                            f"Room '{room.raw_label}' ({room.area_m2:.1f} m²): added "
+                            f"{n_u0_fills} fill downlight(s) at darkest 2D grid points; "
+                            f"ceiling-only U0 {u0_before:.2f} -> {u0_after:.2f} "
+                            "(lumen package re-calibrated to target E_avg)."
+                        ),
+                        requires_etek_signoff=False,
+                    )
+                )
+
         # Closed-loop 2D working-plane photometric calibration (DIALux-style):
         # verify the placed ceiling luminaires achieve target_lux under true 2D point-by-point
         # inverse-square cosine-cubed + cavity inter-reflection physics, stepping up fixture
@@ -507,8 +647,14 @@ def place_electrical_devices(
             from cyelec.solver.photometrics import evaluate_room_photometrics_2d
 
             grid_chk = evaluate_room_photometrics_2d(room, room_ceils, grid_step_mm=350.0)
+            scale_req = 1.0
             if 0.0 < grid_chk.avg_lux < target_lux * 0.98:
                 scale_req = min(3.2, (target_lux * 1.04) / grid_chk.avg_lux)
+            elif n_u0_fills and grid_chk.avg_lux > target_lux * 1.10:
+                # Fill fixtures raised E_avg; trim the per-fixture package back to target
+                # (never below 300 lm) so uniformity is fixed without wasted circuit load.
+                scale_req = max(300.0 / lum_lm, (target_lux * 1.04) / grid_chk.avg_lux)
+            if abs(scale_req - 1.0) > 1e-6:
                 new_lm = int(math.ceil((lum_lm * scale_req) / 50.0) * 50)
                 new_w = round(new_lm / 105.0, 1)
                 for idx_d, dev in enumerate(devices):
