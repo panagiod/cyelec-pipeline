@@ -328,6 +328,7 @@ def place_electrical_devices(
     counters: dict[str, int] = {
         "L": 0,
         "PD": 0,
+        "WS": 0,
         "ML": 0,
         "EF": 0,
         "SW": 0,
@@ -343,7 +344,7 @@ def place_electrical_devices(
     }
 
     def _next_dev(prefix: str) -> str:
-        counters[prefix] += 1
+        counters[prefix] = counters.get(prefix, 0) + 1
         return f"DEV-{prefix}{counters[prefix]}"
 
     def _offset_along_wall(pt: Point2D, angle_deg: float, delta_mm: float) -> Point2D:
@@ -470,6 +471,85 @@ def place_electrical_devices(
                     target_lux=target_lux,
                 )
             )
+
+        # Opt-in Cyprus decorative wall sconces (φωτιστικά τοίχου) for bedrooms & living/dining
+        if (
+            brief is not None
+            and brief.include_decorative_wall_sconces
+            and not room.is_wet_room
+            and not room.is_outdoor
+        ):
+            bed_for_ws = next((fn for fn in room.furniture if fn.furniture_type == "bed"), None)
+            if room.normalized_type in (RoomType.MASTER_BEDROOM, RoomType.BEDROOM):
+                ws_pts: list[tuple[Point2D, float]] = []
+                if bed_for_ws is not None:
+                    b_pt, b_ang, _ = _snap_to_room_edge(room, bed_for_ws.centroid_mm)
+                    for sign in (-1.0, 1.0):
+                        raw_ws = _offset_along_wall(b_pt, b_ang, sign * 750.0)
+                        s_pt, s_ang, _ = _snap_to_room_edge(room, raw_ws)
+                        ws_pts.append((s_pt, s_ang))
+                elif valid_walls:
+                    best_w = max(valid_walls, key=lambda c: c.line.length)
+                    if best_w.line.length >= 1600.0:
+                        for frac in (0.32, 0.68):
+                            p = best_w.line.interpolate(frac, normalized=True)
+                            ws_pts.append(
+                                (
+                                    Point2D(x_mm=round(float(p.x), 1), y_mm=round(float(p.y), 1)),
+                                    best_w.angle_deg,
+                                )
+                            )
+                for ws_idx, (ws_pt, ws_ang) in enumerate(ws_pts, start=1):
+                    ws_id = _next_dev("WS")
+                    room_lum_ids.append(ws_id)
+                    room_lum_group_b.append(ws_id)
+                    devices.append(
+                        PlacedDevice(
+                            device_id=ws_id,
+                            room_id=room.id,
+                            device_type=DeviceType.WALL_SCONCE,
+                            label=f"Decorative Wall Sconce {ws_idx} ({room.raw_label})",
+                            location_mm=ws_pt,
+                            mounting_height_mm=1600.0,
+                            wall_angle_deg=ws_ang,
+                            ip_rating="IP20",
+                            switch_group="b",
+                            luminaire_wattage_w=8.0,
+                            luminaire_fixture_type="3000K Decorative Wall Sconce",
+                            lumens=700,
+                            target_lux=target_lux,
+                        )
+                    )
+            elif (
+                room.normalized_type in (RoomType.LIVING_ROOM, RoomType.KITCHEN_LIVING)
+                and valid_walls
+            ):
+                best_w = max(valid_walls, key=lambda c: c.line.length)
+                if best_w.line.length >= 1800.0:
+                    for ws_idx, frac in enumerate((0.30, 0.70), start=1):
+                        p = best_w.line.interpolate(frac, normalized=True)
+                        ws_id = _next_dev("WS")
+                        room_lum_ids.append(ws_id)
+                        room_lum_group_b.append(ws_id)
+                        devices.append(
+                            PlacedDevice(
+                                device_id=ws_id,
+                                room_id=room.id,
+                                device_type=DeviceType.WALL_SCONCE,
+                                label=f"Decorative Wall Sconce {ws_idx} ({room.raw_label})",
+                                location_mm=Point2D(
+                                    x_mm=round(float(p.x), 1), y_mm=round(float(p.y), 1)
+                                ),
+                                mounting_height_mm=1800.0,
+                                wall_angle_deg=best_w.angle_deg,
+                                ip_rating="IP20",
+                                switch_group="b",
+                                luminaire_wattage_w=10.0,
+                                luminaire_fixture_type="3000K Decorative Wall Sconce",
+                                lumens=900,
+                                target_lux=target_lux,
+                            )
+                        )
 
         # 1b. Wet-room Cyprus accessories: IP44 Vanity Mirror Light + Exhaust Fan + 3P Fan Isolator
         mirror_id: str | None = None

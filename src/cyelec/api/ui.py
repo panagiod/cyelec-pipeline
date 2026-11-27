@@ -620,6 +620,14 @@ def render_etek_workbench_html(
 
       <label for="dxfFile">{upload_label}</label>
       <input id="dxfFile" type="file" accept="{upload_accept}" multiple />
+      <div style="font-size:10.5px;color:#475569;margin-top:3px;line-height:1.35;">
+        <strong>Native CAD contract:</strong> Layered AutoCAD/BIM <code>.dxf</code> /
+        <code>.dwg</code> / <code>.ifc</code> with <code>TEXT/MTEXT</code> room labels
+        (raw PDF-to-DXF vector dumps fail fast with HTTP 422).
+      </div>
+      <div id="cadPreflightAlert" style="display:none;margin-top:6px;padding:7px 8px;
+           border:1px solid #f59e0b;background:#fffbeb;border-radius:5px;
+           font-size:10.5px;color:#92400e;line-height:1.4;"></div>
       <div id="fileStatusRow" class="file-pill">
         <span id="fileStatusTxt"></span>
         <button id="btnClearFiles" type="button" class="btn btn-secondary btn-xs"
@@ -670,6 +678,15 @@ def render_etek_workbench_html(
       <label for="pvKva">PV Capacity Override (kVA, optional)</label>
       <input id="pvKva" type="number" step="0.5" placeholder="Use model default" />
 
+      <label for="supplyHeadroomSel">EAC Supply Headroom / Min Main Breaker</label>
+      <select id="supplyHeadroomSel">
+        <option value="auto">Auto (Exact Diversified Demand)</option>
+        <option value="headroom20">Future-Ready (+20% Spare Headroom)</option>
+        <option value="min60">Minimum 3×60A (41.6 kVA)</option>
+        <option value="min80">Minimum 3×80A (55.4 kVA)</option>
+        <option value="min100">Minimum 3×100A (69.3 kVA)</option>
+      </select>
+
       <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;">
         <input id="corridorCgChk" type="checkbox" style="width:auto;" />
         <span>Apply Auto Corridor Cg Grouping (Trunking / Tray Mode)</span>
@@ -708,7 +725,7 @@ def render_etek_workbench_html(
       <details id="briefBox" style="margin-top:10px;border:1px solid #93c5fd;border-radius:6px;
                padding:8px 10px;background:#eff6ff;">
         <summary style="font-size:11.5px;font-weight:700;color:#1e3a8a;cursor:pointer;">
-          3b. 60-Sec Cyprus Engineering Brief (HVAC / ELV / Site / KNX)
+          3b. 60-Sec Cyprus Engineering Brief (HVAC / BESS / ELV / Site)
         </summary>
         <label for="briefHvac">HVAC Plant System</label>
         <select id="briefHvac">
@@ -733,6 +750,16 @@ def render_etek_workbench_html(
               <option value="homerun_arcs">Cyprus Home-Run Arrows</option>
               <option value="full_routed">Full Routed Conduits</option>
             </select>
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="briefBatteryKwh">Battery Storage BESS (kWh)</label>
+            <input id="briefBatteryKwh" type="number" step="2.5" min="0" max="200" value="0" />
+          </div>
+          <div>
+            <label for="briefPvWp">PV Module Rating (Wp)</label>
+            <input id="briefPvWp" type="number" step="5" min="300" max="750" value="550" />
           </div>
         </div>
         <div class="row2">
@@ -787,6 +814,14 @@ def render_etek_workbench_html(
           <span>Site Trenching, Garden Bollards &amp; IEC 62305-2 LPS</span>
         </label>
         <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefWallSconces" type="checkbox" style="width:auto;" />
+          <span>Decorative Wall Sconces (Φωτιστικά Τοίχου — Bed &amp; Living)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefEpsBackup" type="checkbox" style="width:auto;" />
+          <span>EPS Backup Automatic Transfer Switch (Requires BESS kWh &gt; 0)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
           <input id="briefPool" type="checkbox" style="width:auto;" />
           <span>Swimming Pool Plant Sub-DB (BS 7671 Sec. 702)</span>
         </label>
@@ -799,7 +834,7 @@ def render_etek_workbench_html(
       <details id="eacMetaBox" style="margin-top:10px;border:1px solid #cbd5e0;border-radius:6px;
                padding:8px 10px;background:#f8fafc;">
         <summary style="font-size:11.5px;font-weight:700;color:#1b365d;cursor:pointer;">
-          4. EAC Cadastral &amp; Contractor Metadata (Ε-ΔΔ-516)
+          4. EAC Cadastral, Contractor &amp; Η.Μ.Υ. 58.18-1 Pre-Fill
         </summary>
         <label for="eacDistrict">EAC District (Επαρχία)</label>
         <select id="eacDistrict">
@@ -820,12 +855,56 @@ def render_etek_workbench_html(
         <input id="eacPermitNo" placeholder="e.g., BP-2026/0841" />
         <label for="eacOwner">Property Owner / Applicant</label>
         <input id="eacOwner" placeholder="Owner full name or company" />
+        <label for="eacPremisesNo">EAC Premises / Account No.</label>
+        <input id="eacPremisesNo" placeholder="e.g., 10482910" />
+        <label for="eacSupplyConn">EAC Service Feed Type (Section I / SPD*1)</label>
+        <select id="eacSupplyConn">
+          <option value="underground">Underground Cable (Υπόγεια — SPD Type 2)</option>
+          <option value="overhead">Overhead Line (Εναέρια — Escalates SPD Type 1+2)</option>
+        </select>
         <label for="eacTariff">EAC Tariff Code (optional)</label>
         <input id="eacTariff" placeholder="Auto (e.g., Code 01 Domestic)" />
         <label for="eacContractor">Licensed Installer Name</label>
         <input id="eacContractor" placeholder="Class A Electrical Contractor" />
         <label for="eacHmyReg">Contractor HMY Licence No.</label>
         <input id="eacHmyReg" placeholder="e.g., HMY-A-1420" />
+        <label for="eacInspDate">Commissioning / Inspection Date</label>
+        <input id="eacInspDate" placeholder="e.g., 2026-11-27" />
+        <div style="margin-top:8px;padding-top:6px;border-top:1px dashed #cbd5e1;
+                    font-size:10.5px;color:#475569;">
+          <strong>Site Commissioning Measurements (Optional Η.Μ.Υ. 58.18-1 Pre-Fill):</strong>
+          Physical site testing &amp; licensed ETEK/HMY stamp remain legally mandatory.
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measZe">Measured Ze (Ω)</label>
+            <input id="measZe" type="number" step="0.01" placeholder="e.g., 0.35" />
+          </div>
+          <div>
+            <label for="measRa">Measured Ra (Ω)</label>
+            <input id="measRa" type="number" step="0.1" placeholder="e.g., 28.5" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measMainBond">Main Bond (Ω ≤0.5)</label>
+            <input id="measMainBond" type="number" step="0.01" placeholder="e.g., 0.18" />
+          </div>
+          <div>
+            <label for="measIr">Min IR (MΩ ≥1.0)</label>
+            <input id="measIr" type="number" step="1" placeholder="e.g., 500" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measRcd1x">RCD 1×IΔn (ms ≤200)</label>
+            <input id="measRcd1x" type="number" step="1" placeholder="e.g., 24" />
+          </div>
+          <div>
+            <label for="measRcd5x">RCD 5×IΔn (ms ≤40)</label>
+            <input id="measRcd5x" type="number" step="1" placeholder="e.g., 14" />
+          </div>
+        </div>
       </details>
 
       <div class="sidebar-actions">
@@ -1454,6 +1533,10 @@ def render_etek_workbench_html(
         include_water_pumps: document.getElementById('briefPumps').checked,
         include_gate_motor: document.getElementById('briefGate').checked,
         include_site_works: document.getElementById('briefSite').checked,
+        include_decorative_wall_sconces: document.getElementById('briefWallSconces').checked,
+        pv_module_wp: parseInt(document.getElementById('briefPvWp').value || '550', 10),
+        battery_storage_kwh: parseFloat(document.getElementById('briefBatteryKwh').value || '0'),
+        include_eps_backup: document.getElementById('briefEpsBackup').checked,
         include_pool: document.getElementById('briefPool').checked,
         include_knx: document.getElementById('briefKnx').checked,
       }};
@@ -1470,6 +1553,11 @@ def render_etek_workbench_html(
       if (amb) ov.ambient_temp_c = parseInt(amb, 10);
       const pv = document.getElementById('pvKva').value;
       if (pv) ov.pv_capacity_kva = parseFloat(pv);
+      const shSel = document.getElementById('supplyHeadroomSel').value;
+      if (shSel === 'headroom20') ov.min_supply_headroom_pct = 20.0;
+      else if (shSel === 'min60') ov.min_main_breaker_a = 60;
+      else if (shSel === 'min80') ov.min_main_breaker_a = 80;
+      else if (shSel === 'min100') ov.min_main_breaker_a = 100;
       if (dbLocationOverride) ov.db_location_override_mm = dbLocationOverride;
       if (meterLocationOverride) ov.meter_location_override_mm = meterLocationOverride;
       if (earthPitLocationOverride) ov.earth_pit_location_override_mm = earthPitLocationOverride;
@@ -1488,11 +1576,33 @@ def render_etek_workbench_html(
         plot_no: (document.getElementById('eacPlotNo').value || '').trim(),
         building_permit_no: (document.getElementById('eacPermitNo').value || '').trim(),
         owner_name: (document.getElementById('eacOwner').value || '').trim(),
+        eac_premises_no: (document.getElementById('eacPremisesNo').value || '').trim(),
         eac_tariff: (document.getElementById('eacTariff').value || '').trim(),
         contractor_name: (document.getElementById('eacContractor').value || '').trim(),
         contractor_hmy_reg: (document.getElementById('eacHmyReg').value || '').trim(),
+        supply_connection_type: document.getElementById('eacSupplyConn').value || 'underground',
+        inspection_date: (document.getElementById('eacInspDate').value || '').trim(),
       }};
-      if (Object.values(eacMeta).some(v => v.length > 0)) {{
+      const optFloat = (id) => {{
+        const v = (document.getElementById(id).value || '').trim();
+        return v === '' ? null : parseFloat(v);
+      }};
+      const mZe = optFloat('measZe');
+      const mRa = optFloat('measRa');
+      const mMb = optFloat('measMainBond');
+      const mIr = optFloat('measIr');
+      const mR1 = optFloat('measRcd1x');
+      const mR5 = optFloat('measRcd5x');
+      if (mZe !== null) eacMeta.measured_ze_ohm = mZe;
+      if (mRa !== null) eacMeta.measured_ra_ohm = mRa;
+      if (mMb !== null) eacMeta.measured_main_bonding_ohm = mMb;
+      if (mIr !== null) eacMeta.measured_ir_mohm = mIr;
+      if (mR1 !== null) eacMeta.measured_rcd_1x_ms = mR1;
+      if (mR5 !== null) eacMeta.measured_rcd_5x_ms = mR5;
+      const hasMeta = Object.entries(eacMeta).some(
+        ([k, v]) => (k === 'supply_connection_type' ? v !== 'underground' : v !== '' && v !== null)
+      );
+      if (hasMeta) {{
         ov.eac_metadata = eacMeta;
       }}
       return ov;
@@ -1578,6 +1688,25 @@ def render_etek_workbench_html(
             </span></div>`
         );
       }}
+      const pvs = d.pv_storage_design;
+      if (pvs) {{
+        const pvOk = pvs.voc_cold_pass && pvs.mppt_window_pass && pvs.dc_vd_pass;
+        const epsTag = pvs.eps_backup_enabled ? ' + EPS' : '';
+        const battTxt = pvs.battery_enabled
+          ? (` · BESS ${{pvs.battery_nominal_kwh}} kWh LFP `
+             + `(${{pvs.battery_bus_voltage_v}}V${{epsTag}})`)
+          : ' · Storage-Ready';
+        chips.push(
+          `<div class="s5-chip"><strong>EAC 2026 PV/BESS (PVS-S-1.2):</strong>
+            ${{pvs.module_count}}×${{pvs.module_wp}}Wp = ${{pvs.array_dc_kwp}} kWp
+            (${{pvs.strings_count}}×${{pvs.modules_per_string}}s,
+            Voc 0°C=${{pvs.string_voc_cold_0c_v}}V,
+            ΔV_DC=${{pvs.dc_voltage_drop_pct}}%)${{escapeHtml(battTxt)}}
+            <span class="badge ${{pvOk ? 'b-pass' : 'b-warn'}}">
+              ${{pvOk ? 'DC PASS' : 'CHECK'}}
+            </span></div>`
+        );
+      }}
       const lumens = d.lumen_checks || [];
       let luxHtml = '';
       if (lumens.length > 0) {{
@@ -1624,7 +1753,11 @@ def render_etek_workbench_html(
       const pb = d.phase_balance;
       const boq = d.boq;
 
-      document.getElementById('kSupply').textContent = eac.recommended_supply_tier;
+      const utilPct = Number(eac.supply_tier_utilization_pct || 0);
+      const utilTag = utilPct > 0 ? ` (${{utilPct.toFixed(1)}}%)` : '';
+      const kSupEl = document.getElementById('kSupply');
+      kSupEl.textContent = `${{eac.recommended_supply_tier}}${{utilTag}}`;
+      kSupEl.style.color = utilPct >= 92 ? '#b45309' : '';
       const divKva = eac.total_diversified_kva.toFixed(2);
       const conKva = eac.total_connected_kva.toFixed(2);
       document.getElementById('kKva').textContent = `${{divKva}} / ${{conKva}} kVA`;
@@ -2112,11 +2245,22 @@ def render_etek_workbench_html(
             body: JSON.stringify(overrides)
           }});
         }}
+        const preAlert = document.getElementById('cadPreflightAlert');
         if (!resp.ok) {{
           let errTxt = await resp.text();
           try {{ errTxt = JSON.parse(errTxt).detail || errTxt; }} catch (_) {{}}
+          if (resp.status === 422 && preAlert) {{
+            preAlert.style.display = 'block';
+            preAlert.innerHTML =
+              `<strong>CAD Preflight Rejected (HTTP 422):</strong> ${{escapeHtml(errTxt)}}` +
+              `<br/><strong>How to fix:</strong> Export a native layered AutoCAD/ArchiCAD/Revit ` +
+              `<code>.dxf</code>/<code>.dwg</code>/<code>.ifc</code> with readable ` +
+              `<code>TEXT/MTEXT</code> room labels, or assign custom wall/room layers in the ` +
+              `<strong>CAD Layer Mapping Wizard</strong> below.`;
+          }}
           throw new Error(errTxt);
         }}
+        if (preAlert) {{ preAlert.style.display = 'none'; preAlert.innerHTML = ''; }}
         const data = await resp.json();
         renderResult(data);
         const ms = resp.headers.get('X-Process-Time-Ms') || '?';

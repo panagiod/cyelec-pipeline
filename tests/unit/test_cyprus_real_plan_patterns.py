@@ -9,11 +9,13 @@ import pytest
 from ezdxf.filemanagement import new as new_dxf
 from shapely.geometry import Point, Polygon
 
+from cyelec.api.ui import render_etek_workbench_html
 from cyelec.ingest.dxf_ingest import ingest_dxf
 from cyelec.models.building import BuildingType, Room, RoomType
 from cyelec.models.electrical import (
     DesignOverrides,
     EacProfile,
+    EacProjectMetadata,
     EarthingSystem,
     ResidentialSystemsBrief,
 )
@@ -191,3 +193,133 @@ def test_raw_unlayered_pdf_vector_dump_fails_fast_without_hanging(tmp_path: Path
         ingest_dxf(dxf_path)
     elapsed = time.perf_counter() - t0
     assert elapsed < 12.0, f"Raw dense DXF guard took {elapsed:.2f}s (expected < 12s)"
+
+
+def test_supply_headroom_warning_and_future_ready_override(tmp_path: Path) -> None:
+    """High tier utilization (>=92%) warns engineer; headroom/min-breaker upgrades cleanly."""
+    dxf_path = _build_cyprus_house_dxf(tmp_path / "headroom_house.dxf")
+    base = run_phase2_pipeline(dxf_path, building_type=BuildingType.INDEPENDENT_HOUSE)
+    eac_base = base.design.eac_compliance
+    assert eac_base.supply_tier_utilization_pct > 0.0
+    assert eac_base.next_supply_tier is not None
+
+    # Force 20% headroom or explicit 3x80A floor and verify clean tier upgrade + INFO flag
+    upgraded = run_phase2_pipeline(
+        dxf_path,
+        overrides=DesignOverrides(min_supply_headroom_pct=20.0, min_main_breaker_a=80),
+        building_type=BuildingType.INDEPENDENT_HOUSE,
+    )
+    eac_up = upgraded.design.eac_compliance
+    assert eac_up.recommended_main_breaker_a >= 80
+    assert eac_up.supply_tier_utilization_pct < eac_base.supply_tier_utilization_pct
+    assert any(f.code == "EAC_SUPPLY_HEADROOM_UPGRADED" for f in upgraded.design.review_flags)
+
+
+def test_dc_pv_stringing_bess_eps_decorative_sconces_and_hmy_commissioning(
+    tmp_path: Path,
+) -> None:
+    """Verify DC PV stringing, 15kWh LFP BESS+EPS, decorative sconces & HMY commissioning."""
+    dxf_path = _build_cyprus_house_dxf(tmp_path / "full_2026_turnkey.dxf")
+    res = run_phase2_pipeline(
+        dxf_path,
+        overrides=DesignOverrides(
+            earthing_system=EarthingSystem.TT,
+            pv_capacity_kva=6.0,
+            residential_brief=ResidentialSystemsBrief(
+                ev_charger_kw=11.0,
+                pv_module_wp=550,
+                battery_storage_kwh=15.0,
+                include_eps_backup=True,
+                include_decorative_wall_sconces=True,
+            ),
+            eac_metadata=EacProjectMetadata(
+                district="Nicosia",
+                municipality="Strovolos",
+                plot_no="412",
+                eac_premises_no="10482910",
+                supply_connection_type="overhead",
+                inspection_date="2026-11-27",
+                measured_ze_ohm=0.35,
+                measured_ra_ohm=28.5,
+                measured_main_bonding_ohm=0.18,
+                measured_ir_mohm=500.0,
+                measured_rcd_1x_ms=24.0,
+                measured_rcd_5x_ms=14.0,
+            ),
+        ),
+        building_type=BuildingType.INDEPENDENT_HOUSE,
+    )
+
+    # 1. DC PV & BESS calculations verified (Cyprus 0C Voc, 70C Vmp, EN 50618 DC cable, BESS+EPS)
+    pvs = res.design.pv_storage_design
+    assert pvs is not None
+    assert pvs.inverter_phases == 3
+    assert pvs.inverter_max_dc_v == 1000
+    assert pvs.voc_cold_pass is True
+    assert pvs.mppt_window_pass is True
+    assert pvs.dc_vd_pass is True
+    assert pvs.battery_enabled is True
+    assert pvs.battery_nominal_kwh == 15.0
+    assert pvs.battery_usable_kwh == 13.5
+    assert pvs.battery_bus_voltage_v == 384
+    assert pvs.eps_backup_enabled is True
+    assert "Automatic Transfer Switch" in pvs.eps_changeover_spec
+
+    # 2. Decorative wall sconces placed cleanly in bedrooms & living/dining + priced in BOQ
+    sconces = [d for d in res.spatial.devices if d.device_type == DeviceType.WALL_SCONCE]
+    assert len(sconces) >= 6  # 2x master + 2x bedroom + 2x kitchen_living
+    assert res.design.boq is not None
+    boq_descs = " | ".join(it.description_en for it in res.design.boq.items)
+    assert "Decorative LED Wall Sconce" in boq_descs
+    assert "Battery Energy Storage System 15 kWh LiFePO4" in boq_descs
+    assert "EPS Automatic Transfer Switch" in boq_descs
+
+    # 3. Export deliverables and verify Annex VII, Overhead SPD Type 1+2, Commissioning & SLD
+    out_dir = tmp_path / "pack"
+    export_phase3_deliverables(res, out_dir, export_pdf=False, source_dxf_path=dxf_path)
+
+    eac_html = (out_dir / "eac_application_form.html").read_text(encoding="utf-8")
+    for token in (
+        "10482910",
+        "Type 1+2 (Class I+II)",
+        "12.5 kA (10/350µs)",
+        "Annex VII",
+        "15 kWh nominal / 13.5 kWh usable",
+        "EPS Critical-Load Backup",
+        "2026-11-27",
+        "0.18 Ω (PASS",
+        "RCD 5×IΔn=14 ms (PASS ≤40ms)",
+    ):
+        assert token in eac_html, f"Missing expected EAC/HMY token: {token}"
+
+    sld_svg = (out_dir / "single_line_diagram.svg").read_text(encoding="utf-8")
+    assert "BESS 15kWh LFP" in sld_svg
+    assert "+ EPS ATS" in sld_svg
+    assert "Voc(0°C)=" in sld_svg
+
+    e101_svg = (out_dir / "E101_lighting_layout.svg").read_text(encoding="utf-8")
+    assert "WS(b)" in e101_svg
+
+    calc_md = (out_dir / "calc_report.md").read_text(encoding="utf-8")
+    assert "2b. DC-Side PV Array & Battery Storage Sizing" in calc_md
+    assert "15 kWh" in calc_md
+
+
+def test_workbench_ui_exposes_cad_contract_bess_sconces_and_commissioning_fields() -> None:
+    """Workbench HTML exposes CAD input contract, 422 preflight alert, headroom, BESS & HMY."""
+    html = render_etek_workbench_html()
+    for token in (
+        "Native CAD contract:",
+        'id="cadPreflightAlert"',
+        'id="supplyHeadroomSel"',
+        'id="briefBatteryKwh"',
+        'id="briefWallSconces"',
+        'id="briefEpsBackup"',
+        'id="eacPremisesNo"',
+        'id="eacSupplyConn"',
+        'id="measMainBond"',
+        'id="measRcd5x"',
+        "CAD Preflight Rejected (HTTP 422)",
+    ):
+        assert token in html, f"Workbench HTML missing expected control/contract token: {token}"
+

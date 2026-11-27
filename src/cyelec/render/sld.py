@@ -334,30 +334,51 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         pv_x = bus_x1 - 175
         pv_kva = result.building.pv_capacity_kva
         pv_ph = "3P" if (eac.supply_phases == 3 and pv_kva > 4.2) else "1P"
+        pvs = result.pv_storage_design
+        if pvs is not None:
+            pv_dc_line = (
+                f"{pvs.module_count}×{pvs.module_wp}Wp = {pvs.array_dc_kwp:g}kWp "
+                f"({pvs.strings_count}×{pvs.modules_per_string}s) · "
+                f"Voc(0°C)={pvs.string_voc_cold_0c_v:.0f}V · {pvs.dc_cable_mm2:g}mm² DC"
+            )
+            if pvs.battery_enabled:
+                eps_tag = " + EPS ATS" if pvs.eps_backup_enabled else ""
+                pv_batt_line = (
+                    f"BESS {pvs.battery_nominal_kwh:g}kWh LFP ({pvs.battery_bus_voltage_v}V DC, "
+                    f"{pvs.battery_max_power_kw:g}kW){eps_tag} · PVS-S-1.2"
+                )
+            else:
+                pv_batt_line = (
+                    f"DC SPD {pvs.inverter_max_dc_v}V + DC Load-Break · "
+                    "Storage Ready (EAC PVS-S-1.2)"
+                )
+        else:
+            pv_dc_line = "EN 50549-1 NS Prot. · DC SPD &amp; DC Load-Break"
+            pv_batt_line = "Battery Storage Ready (EAC PVS-S-1.2 / 2026)"
         parts.extend(
             [
                 (
-                    f'  <rect x="{pv_x - 148}" y="76" width="296" height="46" rx="4" '
+                    f'  <rect x="{pv_x - 154}" y="72" width="308" height="52" rx="4" '
                     'fill="#ecfdf5" stroke="#059669" stroke-width="1.6" />'
                 ),
                 (
-                    f'  <text x="{pv_x}" y="94" text-anchor="middle" class="hdr">'
+                    f'  <text x="{pv_x}" y="89" text-anchor="middle" class="hdr">'
                     f"HYBRID PV INVERTER {pv_kva:g} kVA ({pv_ph})</text>"
                 ),
                 (
-                    f'  <text x="{pv_x}" y="108" text-anchor="middle" class="xs">'
-                    "EN 50549-1 NS Prot. · DC SPD &amp; DC Load-Break</text>"
+                    f'  <text x="{pv_x}" y="103" text-anchor="middle" class="xs">'
+                    f"{_esc(pv_dc_line)}</text>"
                 ),
                 (
-                    f'  <text x="{pv_x}" y="118" text-anchor="middle" class="xs">'
-                    "Battery Storage Ready (EAC PVS-S-1.2 / 2026)</text>"
+                    f'  <text x="{pv_x}" y="116" text-anchor="middle" class="xs">'
+                    f"{_esc(pv_batt_line)}</text>"
                 ),
                 (
-                    f'  <line x1="{pv_x}" y1="122" x2="{pv_x}" y2="144" '
+                    f'  <line x1="{pv_x}" y1="124" x2="{pv_x}" y2="144" '
                     'stroke="#059669" stroke-width="2.2" />'
                 ),
                 (
-                    f'  <rect x="{pv_x - 148}" y="144" width="296" height="46" rx="3" '
+                    f'  <rect x="{pv_x - 154}" y="144" width="308" height="46" rx="3" '
                     'fill="#fef3c7" stroke="#d97706" stroke-width="1.4" />'
                 ),
                 (
@@ -377,7 +398,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                     'stroke="#059669" stroke-width="2.2" />'
                 ),
                 (
-                    f'  <rect x="{pv_x - 148}" y="212" width="296" height="42" rx="3" '
+                    f'  <rect x="{pv_x - 154}" y="212" width="308" height="42" rx="3" '
                     'fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.4" />'
                 ),
                 (
@@ -919,20 +940,39 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
     if result.building.pv_capacity_kva > 0.0:
         pv_x = bus_x1 - 2400.0
         pv_kva = result.building.pv_capacity_kva
+        pvs_dxf = result.pv_storage_design
         msp.add_lwpolyline(
             [
-                (pv_x - 1800.0, bus_y + 3200.0),
-                (pv_x + 1800.0, bus_y + 3200.0),
-                (pv_x + 1800.0, bus_y + 4200.0),
-                (pv_x - 1800.0, bus_y + 4200.0),
+                (pv_x - 1900.0, bus_y + 3200.0),
+                (pv_x + 1900.0, bus_y + 3200.0),
+                (pv_x + 1900.0, bus_y + 4300.0),
+                (pv_x - 1900.0, bus_y + 4300.0),
             ],
             close=True,
             dxfattribs={"layer": "E-SLD-EARTH"},
         )
         msp.add_text(
-            f"HYBRID PV {pv_kva:g} kVA (EN 50549-1 / STORAGE)",
-            dxfattribs={"layer": "E-SLD-TEXT", "height": 155.0},
-        ).set_placement((pv_x - 1680.0, bus_y + 3600.0))
+            f"HYBRID PV {pv_kva:g} kVA (EN 50549-1 / PVS-S-1.2)",
+            dxfattribs={"layer": "E-SLD-TEXT", "height": 150.0},
+        ).set_placement((pv_x - 1780.0, bus_y + 3920.0))
+        if pvs_dxf is not None:
+            msp.add_text(
+                (
+                    f"{pvs_dxf.module_count}x{pvs_dxf.module_wp}Wp="
+                    f"{pvs_dxf.array_dc_kwp:g}kWp ({pvs_dxf.strings_count}x"
+                    f"{pvs_dxf.modules_per_string}s) Voc0={pvs_dxf.string_voc_cold_0c_v:.0f}V"
+                ),
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 125.0},
+            ).set_placement((pv_x - 1780.0, bus_y + 3620.0))
+            if pvs_dxf.battery_enabled:
+                msp.add_text(
+                    (
+                        f"BESS {pvs_dxf.battery_nominal_kwh:g}kWh LFP "
+                        f"({pvs_dxf.battery_bus_voltage_v}V DC, {pvs_dxf.battery_max_power_kw:g}kW)"
+                        + (" + EPS ATS" if pvs_dxf.eps_backup_enabled else "")
+                    ),
+                    dxfattribs={"layer": "E-SLD-TEXT", "height": 125.0},
+                ).set_placement((pv_x - 1780.0, bus_y + 3340.0))
         msp.add_line(
             (pv_x, bus_y + 3200.0), (pv_x, bus_y + 2200.0), dxfattribs={"layer": "E-SLD-EARTH"}
         )

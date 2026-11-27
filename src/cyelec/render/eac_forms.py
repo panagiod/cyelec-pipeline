@@ -105,6 +105,16 @@ def build_eac_application_rows(result: Phase2DesignResult) -> list[tuple[str, st
         ),
         (
             "A. Premises / Υποστατικό",
+            "EAC Premises / Account No.",
+            "Αρ. Υποστατικού / Λογαριασμού ΑΗΚ",
+            (
+                d.eac_metadata.eac_premises_no.strip()
+                if d.eac_metadata and d.eac_metadata.eac_premises_no.strip()
+                else "[Complete from EAC Application / Existing Bill]"
+            ),
+        ),
+        (
+            "A. Premises / Υποστατικό",
             "EAC Tariff Code",
             "Διατίμηση ΑΗΚ",
             (
@@ -168,7 +178,16 @@ def build_eac_application_rows(result: Phase2DesignResult) -> list[tuple[str, st
             "C. EAC Supply & Metering / Παροχή ΑΗΚ",
             "Requested EAC Supply Tier",
             "Αιτούμενη Παροχή ΑΗΚ",
-            eac.recommended_supply_tier,
+            (
+                f"{eac.recommended_supply_tier} "
+                f"(Utilization: {eac.supply_tier_utilization_pct:.1f}%"
+                + (
+                    f" — Next tier: {eac.next_supply_tier}"
+                    if eac.next_supply_tier and eac.supply_tier_utilization_pct >= 85.0
+                    else ""
+                )
+                + ")"
+            ),
         ),
         (
             "C. EAC Supply & Metering / Παροχή ΑΗΚ",
@@ -337,12 +356,148 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
     else:
         main_cable_spec = f"Code C (XLPE/PVC) · {cores}×16 mm² Cu / 16 mm² PE"
 
-    # Official HMY 58.18-1 Section I SPD parameters
-    spd_type = "Type 1+2 (Class I+II)" if lps_req else "Type 2 (Class II)"
-    spd_iimp = "12.5 kA (10/350µs)" if lps_req else "N/A (Underground / No LPS*1)"
+    # Official HMY 58.18-1 Section I SPD parameters (Footnote *1: overhead or LPS -> Type 1+2)
+    meta = d.eac_metadata
+    is_overhead = bool(meta is not None and meta.supply_connection_type == "overhead")
+    spd_type12 = lps_req or is_overhead
+    spd_type = "Type 1+2 (Class I+II)" if spd_type12 else "Type 2 (Class II)"
+    spd_iimp = (
+        "12.5 kA (10/350µs)"
+        if spd_type12
+        else "N/A (Underground / No LPS*1)"
+    )
     spd_in = "20 kA nominal / 40 kA Imax (8/20µs)"
     spd_up = "≤ 1.5 kV"
     spd_uc = "275 V AC (L-N / L-PE)"
+
+    # Official 2026 EAC Παράρτημα VII — PV & Battery Storage Technical Parameters Table
+    pv_storage_section = ""
+    pvs = d.pv_storage_design
+    if pvs is not None:
+        voc_badge = "PASS" if pvs.voc_cold_pass else "FAIL"
+        mppt_badge = "PASS" if pvs.mppt_window_pass else "CHECK"
+        dcvd_badge = "PASS" if pvs.dc_vd_pass else "CHECK"
+        bess_rows = ""
+        if pvs.battery_enabled:
+            bess_rows = (
+                "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
+                f"<td>{pvs.battery_nominal_kwh:g} kWh nominal / "
+                f"{pvs.battery_usable_kwh:g} kWh usable "
+                f"({esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC bus)</td></tr>"
+                "<tr><td><strong>BESS Charge/Discharge &amp; DC Protection</strong></td>"
+                f"<td>Max {pvs.battery_max_power_kw:g} kW ({pvs.battery_max_current_a:g} A DC) · "
+                f"{esc(pvs.battery_dc_breaker_spec)} · {esc(pvs.battery_dc_cable_spec)}</td></tr>"
+            )
+            if pvs.eps_backup_enabled:
+                bess_rows += (
+                    "<tr><td><strong>EPS Critical-Load Backup (Annex VI)</strong></td>"
+                    f"<td>{esc(pvs.eps_changeover_spec)}</td></tr>"
+                )
+        else:
+            bess_rows = (
+                "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
+                "<td>Hybrid Inverter Storage-Ready (0 kWh installed — "
+                "upgradeable under EAC PVS-S-1.2)</td></tr>"
+            )
+        pv_storage_section = (
+            "<h2>G. Official 2026 EAC Annex VII — PV DC Array &amp; "
+            "Battery Storage (DRG. PVS-S-1.2)</h2>"
+            "<table><thead><tr>"
+            "<th style='width:38%'>PV / Storage Parameter (BS 7671 Sec. 712 / EAC 2026)</th>"
+            "<th>Engineered Value / Υπολογισμένη Τιμή</th>"
+            "</tr></thead><tbody>"
+            "<tr><td><strong>Hybrid Inverter AC Rating &amp; Phases</strong></td>"
+            f"<td>{pvs.inverter_ac_kva:g} kVA ({pvs.inverter_phases}-Phase, "
+            "EN 50549-1 NS Protection, "
+            f"Vdc_max={pvs.inverter_max_dc_v}V, MPPT {pvs.mppt_min_v}–{pvs.mppt_max_v}V)</td></tr>"
+            "<tr><td><strong>PV Array &amp; String Configuration</strong></td>"
+            f"<td>{pvs.module_count} × {pvs.module_wp} Wp = "
+            f"<strong>{pvs.array_dc_kwp:g} kWp</strong> "
+            f"(DC/AC {pvs.dc_ac_ratio:.2f}) — {pvs.strings_count} string(s) × "
+            f"{pvs.modules_per_string} modules/string</td></tr>"
+            "<tr><td><strong>Cyprus Cold Voc (0°C) &amp; Hot Vmp (70°C)</strong></td>"
+            f"<td>Voc(STC)={pvs.string_voc_stc_v:.1f}V · Voc(0°C)={pvs.string_voc_cold_0c_v:.1f}V "
+            f"≤ {pvs.inverter_max_dc_v}V [<strong>{voc_badge}</strong>] · "
+            f"Vmp(70°C)={pvs.string_vmp_hot_70c_v:.1f}V [<strong>{mppt_badge}</strong>]</td></tr>"
+            "<tr><td><strong>Solar DC Cabling &amp; Voltage Drop</strong></td>"
+            f"<td>{esc(pvs.dc_cable_spec)} (est. {pvs.dc_run_length_m:.1f} m) · "
+            f"ΔV_DC = {pvs.dc_voltage_drop_pct:.2f}% ≤ 1.50% "
+            f"[<strong>{dcvd_badge}</strong>]</td></tr>"
+            "<tr><td><strong>DC Load-Break Isolator &amp; DC SPD</strong></td>"
+            f"<td>{esc(pvs.dc_isolator_spec)} · {esc(pvs.dc_spd_spec)}</td></tr>"
+            f"{bess_rows}"
+            "<tr><td><strong>EAC 2026 Grid Curtailment &amp; Zero-Export</strong></td>"
+            f"<td>{esc(pvs.eac_2026_drg_ref)} · Bidirectional Smart Meter + "
+            "Sealable Contactor Box + CT Sensor</td></tr>"
+            "</tbody></table>"
+        )
+
+    # Commissioning measurements pre-fill (optional engineer-entered site test readings)
+    supply_chk_html = (
+        "&#9745; <strong>Εναέρια (Overhead)</strong> &nbsp; &#9744; Υπόγεια (Underground)"
+        if is_overhead
+        else "&#9744; Εναέρια (Overhead) &nbsp; &#9745; <strong>Υπόγεια (Underground)</strong>"
+    )
+    mb_val = meta.measured_main_bonding_ohm if meta is not None else None
+    sb_val = meta.measured_supp_bonding_ohm if meta is not None else None
+    ra_val = meta.measured_ra_ohm if meta is not None else None
+    ze_val = meta.measured_ze_ohm if meta is not None else None
+    ir_val = meta.measured_ir_mohm if meta is not None else None
+    rcd1_val = meta.measured_rcd_1x_ms if meta is not None else None
+    rcd5_val = meta.measured_rcd_5x_ms if meta is not None else None
+    insp_date_val = meta.inspection_date.strip() if meta is not None else ""
+
+    mb_pass = mb_val is not None and mb_val <= 0.5
+    sb_pass = sb_val is not None and sb_val <= 1.0
+    ra_pass = ra_val is not None and ra_val <= 200.0
+    ir_pass = ir_val is not None and ir_val >= 1.0
+    rcd1_pass = rcd1_val is not None and rcd1_val <= 200.0
+    rcd5_pass = rcd5_val is not None and rcd5_val <= 40.0
+
+    mb_box = (
+        f"&#9745; <strong>{mb_val:.2f} Ω ({'PASS' if mb_pass else 'FAIL >0.5Ω'})</strong>"
+        if mb_val is not None
+        else "&#9744; Αγωγών κύριας ισοδυναμικής γεφύρωσης (≤ 0.5 Ω)"
+    )
+    sb_box = (
+        f"&#9745; <strong>{sb_val:.2f} Ω ({'PASS' if sb_pass else 'FAIL >1.0Ω'})</strong>"
+        if sb_val is not None
+        else "&#9744; Αγωγών συμπληρωματικής ισοδυναμικής γεφύρωσης"
+    )
+
+    comm_items: list[str] = []
+    if ze_val is not None:
+        comm_items.append(f"Ze={ze_val:.2f} Ω")
+    if ra_val is not None:
+        comm_items.append(f"Ra={ra_val:.1f} Ω ({'PASS' if ra_pass else 'CHECK >200Ω'})")
+    if mb_val is not None:
+        comm_items.append(
+            f"Main Bonding={mb_val:.2f} Ω ({'PASS ≤0.5Ω' if mb_pass else 'FAIL >0.5Ω'})"
+        )
+    if ir_val is not None:
+        comm_items.append(f"IR={ir_val:.1f} MΩ ({'PASS ≥1MΩ' if ir_pass else 'FAIL <1MΩ'})")
+    if rcd1_val is not None:
+        comm_items.append(
+            f"RCD 1×IΔn={rcd1_val:.0f} ms ({'PASS ≤200ms' if rcd1_pass else 'FAIL'})"
+        )
+    if rcd5_val is not None:
+        comm_items.append(
+            f"RCD 5×IΔn={rcd5_val:.0f} ms ({'PASS ≤40ms' if rcd5_pass else 'FAIL'})"
+        )
+    comm_summary_row = ""
+    if comm_items or insp_date_val:
+        dt_part = (
+            f"<strong>Inspection Date:</strong> {esc(insp_date_val)} &nbsp;|&nbsp; "
+            if insp_date_val
+            else ""
+        )
+        comm_txt = " · ".join(comm_items) if comm_items else "Entered on site"
+        comm_summary_row = (
+            "<tr>"
+            "<td><strong>Μετρήσεις Ελέγχου / Site Commissioning</strong></td>"
+            f"<td colspan='3'>{dt_part}{esc(comm_txt)}</td>"
+            "</tr>"
+        )
 
     grouped_html: list[str] = []
     cur_section = ""
@@ -646,6 +801,7 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
   </div>
   {"".join(grouped_html)}
   {submain_section}
+  {pv_storage_section}
 
   <div class="signbox">
     <strong>
@@ -699,7 +855,7 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
         <td><strong>Σύστημα Γείωσης / Earthing</strong></td>
         <td>{esc(d.earthing_system.value)} (Design Ze/Ra = {d.ze_or_ra_ohm:.2f} Ω)</td>
         <td style="width:24%"><strong>Τύπος Παροχής / Supply Type</strong></td>
-        <td>&#9744; Εναέρια (Overhead) &nbsp; &#9744; Υπόγεια (Underground)</td>
+        <td>{supply_chk_html}</td>
       </tr>
       <tr>
         <td><strong>Κεντρική Παροχή / Main Feeder</strong></td>
@@ -719,6 +875,7 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
         <td><strong>RCD στην Αφετηρία (όπου απαιτ.)</strong></td>
         <td>{esc(origin_rcd_lbl)}</td>
       </tr>
+      {comm_summary_row}
     </tbody>
   </table>
 
@@ -734,8 +891,8 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
     <tbody>
       <tr>
         <td>&#9744; Προστατευτικών αγωγών κυκλωμάτων (CPC)</td>
-        <td>&#9744; Αγωγών κύριας ισοδυναμικής γεφύρωσης (≤ 0.5 Ω)</td>
-        <td>&#9744; Αγωγών συμπληρωματικής ισοδυναμικής γεφύρωσης</td>
+        <td>{mb_box}</td>
+        <td>{sb_box}</td>
         <td>&#9744; Αγωγού Γείωσης (MEC, ≤ 1.0 Ω)</td>
         <td>&#9744; Γεφύρωσης εξωτερικών αγώγιμων μερών</td>
       </tr>

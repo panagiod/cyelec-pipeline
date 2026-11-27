@@ -781,6 +781,18 @@ def render_floorplan_svg(
                 'fill="#fef08a" stroke="#a16207" stroke-width="1.4" rx="2" />'
             )
             deferred_tags.append((dx, dy, "ML(b)", ""))
+        elif dt == DeviceType.WALL_SCONCE:
+            occ_boxes.append((dx - 6.5, dy - 6.5, dx + 6.5, dy + 6.5))
+            parts.append(
+                f'  <circle cx="{dx:.1f}" cy="{dy:.1f}" r="5.0" '
+                'fill="#fde68a" stroke="#b45309" stroke-width="1.5" />'
+            )
+            parts.append(
+                f'  <line x1="{dx - 5.0:.1f}" y1="{dy:.1f}" x2="{dx + 5.0:.1f}" y2="{dy:.1f}" '
+                'stroke="#92400e" stroke-width="1.2" />'
+            )
+            if discipline == "lighting":
+                deferred_tags.append((dx, dy, f"WS({dev.switch_group or 'b'})", ""))
         elif dt == DeviceType.EXHAUST_FAN:
             occ_boxes.append((dx - 7.0, dy - 7.0, dx + 7.0, dy + 7.0))
             parts.append(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Literal
 
 from cyelec.models.building import BuildingModel, RoomType
 from cyelec.models.electrical import (
@@ -10,6 +11,7 @@ from cyelec.models.electrical import (
     DinRailRow,
     ElectricalDesignResult,
     LightningRiskAssessment,
+    PvStorageEngineeringResult,
     ResidentialSystemsBrief,
     ReviewFlag,
     ReviewSeverity,
@@ -514,3 +516,237 @@ def compute_lightning_risk_iec62305(
             )
         )
     return assessment, flags
+
+
+def compute_pv_and_storage_engineering(
+    pv_capacity_kva: float,
+    supply_phases: Literal[1, 3],
+    brief: ResidentialSystemsBrief,
+) -> tuple[PvStorageEngineeringResult | None, list[ReviewFlag]]:
+    """Deterministic DC-side PV stringing & Battery Storage (BESS) sizing for Cyprus (EAC 2026).
+
+    Verifies Cyprus winter open-circuit voltage (T_min = 0°C vs inverter Vdc_max),
+    summer rooftop MPPT tracking window (T_cell = 70°C), EN 50618 H1Z2Z2-K DC solar
+    cable voltage drop (<=1.5%), DC Type 1+2 SPD & DC load-break isolator ratings,
+    and optional LiFePO4 battery storage DC protection & EPS backup changeover per
+    March 2026 EAC Technical Guide DRG. No PVS-S-1.2.
+    """
+    if pv_capacity_kva <= 0.0:
+        return None, []
+
+    inv_phases: Literal[1, 3] = 3 if (supply_phases == 3 and pv_capacity_kva > 4.2) else 1
+    if inv_phases == 3:
+        inv_max_dc_v = 1000
+        mppt_min_v = 180
+        mppt_max_v = 850
+    else:
+        inv_max_dc_v = 600
+        mppt_min_v = 120
+        mppt_max_v = 550
+
+    wp = brief.pv_module_wp
+    # N-Type monocrystalline reference scaled to selected Wp (550 Wp -> Voc=49.8V, Vmp=41.8V)
+    scale_v = (wp / 550.0) ** 0.25
+    voc_stc_mod = 49.8 * scale_v
+    vmp_stc_mod = 41.8 * scale_v
+    imp_stc_mod = wp / vmp_stc_mod
+    isc_stc_mod = imp_stc_mod * 1.064
+
+    # Cyprus thermal extremes: T_min = 0°C (winter morning), T_cell_hot = 70°C (45°C summer roof)
+    voc_cold_mod = voc_stc_mod * (1.0 + (-0.0026) * (0.0 - 25.0))
+    vmp_hot_mod = vmp_stc_mod * (1.0 + (-0.0034) * (70.0 - 25.0))
+
+    target_dc_kwp = pv_capacity_kva * 1.10
+    raw_modules = max(4, int(round((target_dc_kwp * 1000.0) / float(wp))))
+    # Enforce >=6% voltage safety margin below inverter Vdc_max at 0°C
+    max_ns = max(4, int(math.floor((inv_max_dc_v * 0.94) / voc_cold_mod)))
+    min_ns = max(4, int(math.ceil((mppt_min_v * 1.12) / vmp_hot_mod)))
+
+    if raw_modules <= max_ns and raw_modules <= 12:
+        strings_count = 1
+        modules_per_string = max(min_ns, raw_modules)
+    else:
+        strings_count = max(2, int(math.ceil(raw_modules / float(max_ns))))
+        modules_per_string = max(min_ns, int(math.ceil(raw_modules / float(strings_count))))
+        if modules_per_string > max_ns:
+            strings_count += 1
+            modules_per_string = max(min_ns, int(math.ceil(raw_modules / float(strings_count))))
+
+    module_count = strings_count * modules_per_string
+    array_dc_kwp = round((module_count * wp) / 1000.0, 2)
+    dc_ac_ratio = round(array_dc_kwp / pv_capacity_kva, 2)
+
+    string_voc_stc_v = round(modules_per_string * voc_stc_mod, 1)
+    string_voc_cold_0c_v = round(modules_per_string * voc_cold_mod, 1)
+    string_vmp_stc_v = round(modules_per_string * vmp_stc_mod, 1)
+    string_vmp_hot_70c_v = round(modules_per_string * vmp_hot_mod, 1)
+    # BS 7671 Reg 712.433 / IEC 62548: Isc_max = 1.25 * Isc_stc per string
+    string_isc_max_a = round(isc_stc_mod * 1.25, 1)
+
+    # EN 50618 H1Z2Z2-K double-insulated DC solar cable sizing (target <=1.5% DC voltage drop)
+    dc_run_length_m = round(max(12.0, brief.building_height_m * 1.6 + 8.0), 1)
+    rho_cu_70c = 0.0214  # Ohm*mm2/m at 70C conductor operating temp
+    dc_cable_mm2 = 4.0
+    dc_vd_pct = 0.0
+    for candidate_mm2 in (4.0, 6.0, 10.0):
+        dv_v = (2.0 * dc_run_length_m * imp_stc_mod * rho_cu_70c) / candidate_mm2
+        pct = (dv_v / max(string_vmp_stc_v, 1.0)) * 100.0
+        dc_cable_mm2 = candidate_mm2
+        dc_vd_pct = round(pct, 2)
+        if pct <= 1.5:
+            break
+
+    iso_rating_a = 25 if string_isc_max_a <= 20.0 else (32 if string_isc_max_a <= 28.0 else 40)
+    dc_isolator_spec = (
+        f"{strings_count}× 2P DC Load-Break Isolator {iso_rating_a}A "
+        f"{inv_max_dc_v}V DC (IEC 60947-3, DC-PV2)"
+    )
+    spd_up_kv = "3.8kV" if inv_max_dc_v >= 1000 else "2.5kV"
+    dc_spd_spec = (
+        f"Type 1+2 DC SPD {inv_max_dc_v}V DC (Up≤{spd_up_kv}, EN 50539-11) per MPPT"
+    )
+    dc_cable_spec = (
+        f"{strings_count}× (2×{dc_cable_mm2:g}mm² EN 50618 H1Z2Z2-K UV-Resistant Solar DC)"
+    )
+
+    voc_cold_pass = string_voc_cold_0c_v <= float(inv_max_dc_v)
+    mppt_window_pass = float(mppt_min_v) <= string_vmp_hot_70c_v <= float(mppt_max_v)
+    dc_vd_pass = dc_vd_pct <= 1.5
+
+    # Optional Battery Energy Storage System (BESS) per March 2026 EAC DRG. No PVS-S-1.2
+    batt_kwh = round(brief.battery_storage_kwh, 2)
+    battery_enabled = batt_kwh > 0.0
+    battery_usable_kwh = 0.0
+    battery_bus_v = 0
+    battery_max_kw = 0.0
+    battery_max_i_a = 0.0
+    battery_dc_breaker_spec = ""
+    battery_dc_cable_spec = ""
+    eps_enabled = bool(brief.include_eps_backup and battery_enabled)
+    eps_spec = ""
+
+    if battery_enabled:
+        battery_usable_kwh = round(batt_kwh * 0.90, 2)
+        # 3-phase or >10 kWh uses HV 384V LFP stack; small 1P systems use 51.2V LV LFP rack
+        is_hv = inv_phases == 3 or batt_kwh > 10.0
+        battery_bus_v = 384 if is_hv else 51
+        v_min_discharge = 340.0 if is_hv else 48.0
+        battery_max_kw = round(min(pv_capacity_kva, max(2.5, batt_kwh * 0.5)), 2)
+        battery_max_i_a = round((battery_max_kw * 1000.0) / v_min_discharge, 1)
+        req_bkr = battery_max_i_a * 1.25
+        std_dc_ratings = (25, 32, 40, 50, 63, 80, 100, 125, 160, 200, 250)
+        dc_bkr_a = next((r for r in std_dc_ratings if r >= req_bkr), 250)
+        if is_hv:
+            batt_mm2 = 6.0 if dc_bkr_a <= 32 else (10.0 if dc_bkr_a <= 50 else 16.0)
+            battery_dc_breaker_spec = (
+                f"2P DC MCCB / NH00 gG Fuse {dc_bkr_a}A 500V DC (Icu≥10kA DC)"
+            )
+            battery_dc_cable_spec = f"2×{batt_mm2:g}mm² HV DC Battery Cable (Double Insulated)"
+        else:
+            batt_mm2 = (
+                25.0
+                if dc_bkr_a <= 80
+                else (35.0 if dc_bkr_a <= 125 else (50.0 if dc_bkr_a <= 160 else 70.0))
+            )
+            battery_dc_breaker_spec = (
+                f"2P DC MCCB / NH00 gG Fuse {dc_bkr_a}A 125V DC (Icu≥20kA DC)"
+            )
+            battery_dc_cable_spec = (
+                f"2×{batt_mm2:g}mm² Flexible Battery DC Cable (H07V-K / Class 5)"
+            )
+
+        if eps_enabled:
+            poles = "4P" if inv_phases == 3 else "2P"
+            eps_spec = (
+                f"{poles} Motorized Automatic Transfer Switch (ATS / Break-Before-Make) + "
+                "Critical-Load Sub-Busbar + Dedicated Islanding TT Earth Reference "
+                "(BS 7671 Sec. 551 / EAC PVS-S-1.2 Annex VI)"
+            )
+
+    res = PvStorageEngineeringResult(
+        inverter_ac_kva=round(pv_capacity_kva, 2),
+        inverter_phases=inv_phases,
+        inverter_max_dc_v=inv_max_dc_v,
+        mppt_min_v=mppt_min_v,
+        mppt_max_v=mppt_max_v,
+        module_wp=wp,
+        module_count=module_count,
+        array_dc_kwp=array_dc_kwp,
+        dc_ac_ratio=dc_ac_ratio,
+        strings_count=strings_count,
+        modules_per_string=modules_per_string,
+        string_voc_stc_v=string_voc_stc_v,
+        string_voc_cold_0c_v=string_voc_cold_0c_v,
+        string_vmp_stc_v=string_vmp_stc_v,
+        string_vmp_hot_70c_v=string_vmp_hot_70c_v,
+        string_isc_max_a=string_isc_max_a,
+        dc_cable_mm2=dc_cable_mm2,
+        dc_cable_spec=dc_cable_spec,
+        dc_run_length_m=dc_run_length_m,
+        dc_voltage_drop_pct=dc_vd_pct,
+        dc_isolator_spec=dc_isolator_spec,
+        dc_spd_spec=dc_spd_spec,
+        voc_cold_pass=voc_cold_pass,
+        mppt_window_pass=mppt_window_pass,
+        dc_vd_pass=dc_vd_pass,
+        battery_enabled=battery_enabled,
+        battery_nominal_kwh=batt_kwh,
+        battery_usable_kwh=battery_usable_kwh,
+        battery_bus_voltage_v=battery_bus_v,
+        battery_max_power_kw=battery_max_kw,
+        battery_max_current_a=battery_max_i_a,
+        battery_dc_breaker_spec=battery_dc_breaker_spec,
+        battery_dc_cable_spec=battery_dc_cable_spec,
+        eps_backup_enabled=eps_enabled,
+        eps_changeover_spec=eps_spec,
+    )
+
+    flags: list[ReviewFlag] = []
+    if not voc_cold_pass:
+        flags.append(
+            ReviewFlag(
+                code="PV_DC_VOC_EXCEEDS_INVERTER_MAX",
+                severity=ReviewSeverity.BLOCKER,
+                category="bs7671",
+                regulation_ref="BS 7671 Reg 712.512.1.1 / IEC 62548",
+                message=(
+                    f"PV string cold open-circuit voltage Voc(0°C)={string_voc_cold_0c_v:.1f}V "
+                    f"exceeds inverter Vdc_max={inv_max_dc_v}V. Reduce modules per string."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+    if not mppt_window_pass:
+        flags.append(
+            ReviewFlag(
+                code="PV_MPPT_HOT_WINDOW_WARNING",
+                severity=ReviewSeverity.WARNING,
+                category="bs7671",
+                regulation_ref="IEC 62548 / Inverter MPPT Window",
+                message=(
+                    f"PV string hot operating voltage Vmp(70°C)={string_vmp_hot_70c_v:.1f}V "
+                    f"falls outside inverter MPPT window ({mppt_min_v}-{mppt_max_v}V)."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+    if battery_enabled:
+        flags.append(
+            ReviewFlag(
+                code="EAC_2026_BESS_STORAGE_ENGINEERED",
+                severity=ReviewSeverity.INFO,
+                category="eac",
+                regulation_ref=(
+                    "EAC Technical Guide for Storage System Connections 2026 (DRG. PVS-S-1.2)"
+                ),
+                message=(
+                    f"Battery storage {batt_kwh:g} kWh LiFePO4 ({battery_bus_v}V DC, "
+                    f"max {battery_max_kw:g} kW / {battery_max_i_a:g} A, "
+                    f"{battery_dc_breaker_spec}) sized with EAC R1 Curtailment + "
+                    "R2 Zero-Export ripple receivers."
+                ),
+                requires_etek_signoff=False,
+            )
+        )
+    return res, flags
+

@@ -69,7 +69,8 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
         "| Parameter | Value |",
         "| --- | --- |",
         f"| Supply Phases | {supply_detail} |",
-        f"| Recommended EAC Supply Tier | **{eac.recommended_supply_tier}** |",
+        f"| Recommended EAC Supply Tier | **{eac.recommended_supply_tier}** "
+        f"(`{eac.supply_tier_utilization_pct:.1f}%` utilized) |",
         f"| Total Connected Demand | `{eac.total_connected_kva:.2f} kVA` |",
         f"| Total Diversified Demand | `{eac.total_diversified_kva:.2f} kVA` |",
         f"| Peak Phase Demand | `{eac.max_phase_demand_a:.2f} A` |",
@@ -84,6 +85,44 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
     if eac.three_phase_reasons:
         lines.append("**3-Phase Determination Reasons:**")
         lines.extend(f"- {reason}" for reason in eac.three_phase_reasons)
+        lines.append("")
+
+    if result.pv_storage_design is not None:
+        pvs = result.pv_storage_design
+        lines.extend(
+            [
+                "### 2b. DC-Side PV Array & Battery Storage Sizing (BS 7671 Sec. 712 / EAC 2026)",
+                "",
+                "| Parameter | Engineered Specification |",
+                "| --- | --- |",
+                f"| Hybrid Inverter | `{pvs.inverter_ac_kva:g} kVA` ({pvs.inverter_phases}P, "
+                f"Vdc_max `{pvs.inverter_max_dc_v} V`, "
+                f"MPPT `{pvs.mppt_min_v}-{pvs.mppt_max_v} V`) |",
+                f"| PV Array & Strings | `{pvs.module_count} × {pvs.module_wp} Wp = "
+                f"{pvs.array_dc_kwp:g} kWp` (`{pvs.strings_count} × {pvs.modules_per_string}s`, "
+                f"DC/AC `{pvs.dc_ac_ratio:.2f}`) |",
+                f"| Cyprus Voc(0°C) / Vmp(70°C) | `Voc(0°C) = {pvs.string_voc_cold_0c_v:.1f} V` "
+                f"({'PASS' if pvs.voc_cold_pass else 'FAIL'}) · "
+                f"`Vmp(70°C) = {pvs.string_vmp_hot_70c_v:.1f} V` "
+                f"({'PASS' if pvs.mppt_window_pass else 'CHECK'}) |",
+                f"| Solar DC Cable & ΔV | {pvs.dc_cable_spec} (`{pvs.dc_run_length_m:.1f} m`, "
+                f"ΔV_DC `{pvs.dc_voltage_drop_pct:.2f}%`) |",
+                f"| DC Protection | {pvs.dc_isolator_spec} · {pvs.dc_spd_spec} |",
+            ]
+        )
+        if pvs.battery_enabled:
+            lines.extend(
+                [
+                    f"| Battery Storage (BESS) | `{pvs.battery_nominal_kwh:g} kWh` "
+                    f"(`{pvs.battery_usable_kwh:g} kWh` usable, {pvs.battery_chemistry}, "
+                    f"`{pvs.battery_bus_voltage_v} V` DC, max `{pvs.battery_max_power_kw:g} kW` / "
+                    f"`{pvs.battery_max_current_a:g} A`) |",
+                    f"| BESS DC Protection & Cable | {pvs.battery_dc_breaker_spec} · "
+                    f"{pvs.battery_dc_cable_spec} |",
+                ]
+            )
+            if pvs.eps_backup_enabled:
+                lines.append(f"| EPS Critical-Load Backup | {pvs.eps_changeover_spec} |")
         lines.append("")
 
     if result.phase_balance is not None:
@@ -453,6 +492,68 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
   </section>
 """
 
+    pv_storage_html = ""
+    if result.pv_storage_design is not None:
+        pvs = result.pv_storage_design
+        bess_tr = ""
+        if pvs.battery_enabled:
+            bess_tr = (
+                "<tr><td><strong>Battery Storage (BESS)</strong></td>"
+                f"<td>{pvs.battery_nominal_kwh:g} kWh ({pvs.battery_usable_kwh:g} kWh usable, "
+                f"{esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC, "
+                f"max {pvs.battery_max_power_kw:g} kW / {pvs.battery_max_current_a:g} A)</td></tr>"
+                "<tr><td><strong>BESS Protection &amp; Cabling</strong></td>"
+                f"<td>{esc(pvs.battery_dc_breaker_spec)} · "
+                f"{esc(pvs.battery_dc_cable_spec)}</td></tr>"
+            )
+            if pvs.eps_backup_enabled:
+                bess_tr += (
+                    "<tr><td><strong>EPS Critical-Load Backup</strong></td>"
+                    f"<td>{esc(pvs.eps_changeover_spec)}</td></tr>"
+                )
+        voc_st = "PASS" if pvs.voc_cold_pass else "FAIL"
+        mppt_st = "PASS" if pvs.mppt_window_pass else "CHECK"
+        pv_storage_html = f"""
+  <section>
+    <h2>2b. DC-Side PV Array &amp; Battery Storage (BS 7671 Sec. 712 / EAC 2026 PVS-S-1.2)</h2>
+    <table>
+      <thead>
+        <tr><th style="width:32%">Parameter</th><th>Engineered Specification</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Hybrid Inverter</strong></td>
+          <td>{pvs.inverter_ac_kva:g} kVA ({pvs.inverter_phases}P,
+            Vdc_max={pvs.inverter_max_dc_v}V, MPPT {pvs.mppt_min_v}–{pvs.mppt_max_v}V)</td>
+        </tr>
+        <tr>
+          <td><strong>PV Array &amp; Strings</strong></td>
+          <td>{pvs.module_count} × {pvs.module_wp} Wp =
+            <strong>{pvs.array_dc_kwp:g} kWp</strong>
+            ({pvs.strings_count} × {pvs.modules_per_string}s,
+            DC/AC {pvs.dc_ac_ratio:.2f})</td>
+        </tr>
+        <tr>
+          <td><strong>Cyprus Voc(0°C) / Vmp(70°C)</strong></td>
+          <td>Voc(0°C) = {pvs.string_voc_cold_0c_v:.1f} V ({voc_st}) ·
+            Vmp(70°C) = {pvs.string_vmp_hot_70c_v:.1f} V ({mppt_st})</td>
+        </tr>
+        <tr>
+          <td><strong>Solar DC Cabling &amp; ΔV</strong></td>
+          <td>{esc(pvs.dc_cable_spec)} ({pvs.dc_run_length_m:.1f} m,
+            ΔV_DC = {pvs.dc_voltage_drop_pct:.2f}%)</td>
+        </tr>
+        <tr>
+          <td><strong>DC Protection &amp; Grid Control</strong></td>
+          <td>{esc(pvs.dc_isolator_spec)} · {esc(pvs.dc_spd_spec)} ·
+            {esc(pvs.eac_2026_drg_ref)}</td>
+        </tr>
+        {bess_tr}
+      </tbody>
+    </table>
+  </section>
+"""
+
     standards_list = " | ".join(
         f"{esc(k)}: <code>{esc(v)}</code>"
         for k, v in sorted(prov.standards_versions.items())
@@ -590,13 +691,17 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
     <div><strong>EAC Profile:</strong> {esc(eac.eac_profile.value)}</div>
     <div><strong>Bathroom Exclusion:</strong> {eac.bathroom_socket_exclusion_m:.1f} m</div>
     <div><strong>Earthing:</strong> {earthing_txt}</div>
-    <div><strong>Recommended Supply:</strong> {esc(eac.recommended_supply_tier)}</div>
+    <div>
+      <strong>Recommended Supply:</strong>
+      {esc(eac.recommended_supply_tier)} ({eac.supply_tier_utilization_pct:.1f}%)
+    </div>
     <div><strong>Diversified / Connected:</strong> {demand_txt}</div>
     <div><strong>Input SHA-256:</strong> <code>{esc(prov.input_sha256[:16])}</code></div>
   </div>
 
   {balance_section}
   {submains_section}
+  {pv_storage_html}
 
   <section>
     <h2>4. BS 7671 Final Circuit Calculations</h2>

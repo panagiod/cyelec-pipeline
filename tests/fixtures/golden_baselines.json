@@ -930,7 +930,7 @@
     "boq_grand_total_eur": 30148.4,
     "lps_required": true,
     "blocker_count": 0,
-    "warning_count": 2,
+    "warning_count": 3,
     "invariants": {
       "lumen_checks_count": 12,
       "lumen_non_compliant": 0,

@@ -45,6 +45,7 @@ from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circ
 from cyelec.solver.residential_engineering import (
     compute_din_rail_layouts,
     compute_lightning_risk_iec62305,
+    compute_pv_and_storage_engineering,
     compute_room_lumen_checks,
 )
 from cyelec.solver.submain import finalize_submain_cumulative_vd, solve_submain
@@ -238,6 +239,10 @@ def run_phase1_pipeline(
         prospective_fault_current_ka=(
             overrides.prospective_fault_current_ka if overrides is not None else None
         ),
+        min_supply_headroom_pct=(
+            overrides.min_supply_headroom_pct if overrides is not None else 0.0
+        ),
+        min_main_breaker_a=(overrides.min_main_breaker_a if overrides is not None else None),
     )
 
     # 5. Aggregate statutory ETEK Human Review Flags Register
@@ -270,6 +275,13 @@ def run_phase1_pipeline(
             effective_building, residential_brief
         )
         review_flags.extend(lps_flags)
+
+    pv_storage_design, pv_storage_flags = compute_pv_and_storage_engineering(
+        effective_building.pv_capacity_kva,
+        eac_compliance.supply_phases,
+        residential_brief,
+    )
+    review_flags.extend(pv_storage_flags)
 
     has_blockers = any(f.severity == ReviewSeverity.BLOCKER for f in review_flags)
 
@@ -314,6 +326,7 @@ def run_phase1_pipeline(
         eac_metadata=overrides.eac_metadata if overrides is not None else None,
         residential_brief=residential_brief,
         lightning_risk=lightning_risk,
+        pv_storage_design=pv_storage_design,
         review_flags=review_flags,
         has_blockers=has_blockers,
         etek_signoff_required=True,

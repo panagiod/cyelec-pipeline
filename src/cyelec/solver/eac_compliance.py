@@ -17,12 +17,15 @@ from cyelec.models.electrical import (
 from cyelec.standards_loader import StandardsBundle, SupplyTier
 
 
-def _select_supply_tier(tiers: list[SupplyTier], demand_a: float) -> tuple[SupplyTier, bool]:
+def _select_supply_tier(
+    tiers: list[SupplyTier], demand_a: float
+) -> tuple[SupplyTier, bool, SupplyTier | None]:
     ordered = sorted(tiers, key=lambda t: t.amps)
-    for tier in ordered:
+    for idx, tier in enumerate(ordered):
         if float(tier.amps) >= demand_a - 1e-9:
-            return tier, False
-    return ordered[-1], True
+            next_tier = ordered[idx + 1] if idx + 1 < len(ordered) else None
+            return tier, False, next_tier
+    return ordered[-1], True, None
 
 
 def evaluate_eac_compliance(
@@ -34,6 +37,8 @@ def evaluate_eac_compliance(
     phase_balance: PhaseBalanceResult | None = None,
     pv_capacity_kva_override: float | None = None,
     prospective_fault_current_ka: float | None = None,
+    min_supply_headroom_pct: float = 0.0,
+    min_main_breaker_a: int | None = None,
 ) -> EacComplianceResult:
     """Evaluate Cyprus EAC 1P/3P supply rules, tiering, CT metering, and BS 7671+A2 checks."""
     eac_rules = standards.eac_rules
@@ -76,6 +81,11 @@ def evaluate_eac_compliance(
     mandatory_three_phase = len(three_phase_reasons) > 0
     supply_phases: Literal[1, 3] = 3 if mandatory_three_phase else 1
 
+    tier_table = (
+        eac_rules.supply_tiers.three_phase
+        if supply_phases == 3
+        else eac_rules.supply_tiers.single_phase
+    )
     if supply_phases == 3:
         if phase_balance is not None:
             max_phase_demand_a = phase_balance.max_phase_current_a
@@ -84,16 +94,23 @@ def evaluate_eac_compliance(
                 (total_diversified_kva * 1000.0)
                 / (math.sqrt(3.0) * eac_rules.system_nominal.ul_v)
             )
-        selected_tier, exceeded_max_tier = _select_supply_tier(
-            eac_rules.supply_tiers.three_phase, max_phase_demand_a
-        )
     else:
         max_phase_demand_a = sum(c.spec.design_current_ib_a for c in circuits)
-        selected_tier, exceeded_max_tier = _select_supply_tier(
-            eac_rules.supply_tiers.single_phase, max_phase_demand_a
-        )
 
-    ct_metering_required = max_phase_demand_a > supply_rules.ct_metering_threshold_a_per_phase
+    raw_tier, _, _ = _select_supply_tier(tier_table, max_phase_demand_a)
+    sizing_demand_a = max_phase_demand_a
+    if min_supply_headroom_pct > 0.0:
+        sizing_demand_a = max_phase_demand_a / max(1.0 - (min_supply_headroom_pct / 100.0), 0.5)
+    if min_main_breaker_a is not None:
+        sizing_demand_a = max(sizing_demand_a, float(min_main_breaker_a))
+
+    selected_tier, exceeded_max_tier, next_tier = _select_supply_tier(tier_table, sizing_demand_a)
+    utilization_pct = round((max_phase_demand_a / max(float(selected_tier.amps), 1.0)) * 100.0, 1)
+
+    ct_metering_required = (
+        max(max_phase_demand_a, float(selected_tier.amps if min_main_breaker_a else 0.0))
+        > supply_rules.ct_metering_threshold_a_per_phase
+    )
     substation_warning = total_diversified_kva >= supply_rules.substation_warning_kva
     substation_consultation_required = total_diversified_kva >= supply_rules.substation_blocker_kva
 
@@ -106,11 +123,28 @@ def evaluate_eac_compliance(
             message=(
                 f"Active Cyprus EAC profile: {active_profile.value} "
                 f"(bathroom socket exclusion {profile_spec.bathroom_socket_exclusion_m:.1f} m; "
-                f"recommended supply {selected_tier.label})."
+                f"recommended supply {selected_tier.label}, utilization {utilization_pct:.1f}%)."
             ),
             requires_etek_signoff=False,
         )
     ]
+
+    if selected_tier.amps > raw_tier.amps and (
+        min_supply_headroom_pct > 0.0 or min_main_breaker_a is not None
+    ):
+        flags.append(
+            ReviewFlag(
+                code="EAC_SUPPLY_HEADROOM_UPGRADED",
+                severity=ReviewSeverity.INFO,
+                category="eac",
+                regulation_ref="EAC Standard LV Supply Tiers / Future-Ready Margin",
+                message=(
+                    f"Supply tier upgraded from {raw_tier.label} to {selected_tier.label} "
+                    f"(utilization {utilization_pct:.1f}%) per engineer headroom/breaker setting."
+                ),
+                requires_etek_signoff=False,
+            )
+        )
 
     if exceeded_max_tier:
         flags.append(
@@ -123,6 +157,38 @@ def evaluate_eac_compliance(
                     f"Peak phase demand {max_phase_demand_a:.1f} A exceeds largest tabulated "
                     f"EAC LV tier ({selected_tier.label}); dedicated MV supply design required."
                 ),
+            )
+        )
+    elif next_tier is not None and utilization_pct >= 92.0:
+        spare_pct = max(0.0, round(100.0 - utilization_pct, 1))
+        flags.append(
+            ReviewFlag(
+                code="EAC_SUPPLY_LOW_HEADROOM",
+                severity=ReviewSeverity.WARNING,
+                category="eac",
+                regulation_ref="EAC Supply Capacity Planning / BS 7671 Reg 311.1",
+                message=(
+                    f"Diversified load ({total_diversified_kva:.2f} kVA, "
+                    f"{max_phase_demand_a:.1f} A/ph) utilizes {utilization_pct:.1f}% of "
+                    f"{selected_tier.label} ({spare_pct:.1f}% spare). Strongly consider "
+                    f"upgrading to {next_tier.label} for future EV/PV/HVAC expansion."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+    elif next_tier is not None and utilization_pct >= 85.0:
+        spare_pct = max(0.0, round(100.0 - utilization_pct, 1))
+        flags.append(
+            ReviewFlag(
+                code="EAC_SUPPLY_MODERATE_HEADROOM",
+                severity=ReviewSeverity.INFO,
+                category="eac",
+                regulation_ref="EAC Supply Capacity Planning / BS 7671 Reg 311.1",
+                message=(
+                    f"Supply tier {selected_tier.label} is at {utilization_pct:.1f}% utilization "
+                    f"({spare_pct:.1f}% spare). Next EAC tier is {next_tier.label}."
+                ),
+                requires_etek_signoff=False,
             )
         )
 
@@ -275,6 +341,8 @@ def evaluate_eac_compliance(
         max_phase_demand_a=round(max_phase_demand_a, 2),
         recommended_supply_tier=selected_tier.label,
         recommended_main_breaker_a=selected_tier.amps,
+        supply_tier_utilization_pct=utilization_pct,
+        next_supply_tier=next_tier.label if next_tier is not None else None,
         ct_metering_required=ct_metering_required,
         substation_warning=substation_warning,
         substation_consultation_required=substation_consultation_required,

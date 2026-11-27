@@ -185,7 +185,7 @@ class BoqSummary(BaseModel):
 
 
 class EacProjectMetadata(BaseModel):
-    """Cyprus EAC (ΑΗΚ) cadastral, tariff, and contractor metadata for Ε-ΔΔ-516 & sheets."""
+    """Cyprus EAC (ΑΗΚ) cadastral, tariff, contractor & HMY 58.18-1 commissioning metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -195,9 +195,20 @@ class EacProjectMetadata(BaseModel):
     plot_no: str = ""
     building_permit_no: str = ""
     owner_name: str = ""
+    eac_premises_no: str = ""
     eac_tariff: str = ""
     contractor_name: str = ""
     contractor_hmy_reg: str = ""
+    supply_connection_type: Literal["underground", "overhead"] = "underground"
+    inspection_date: str = ""
+    # Optional site commissioning test values for Η.Μ.Υ. 58.18-1 pre-fill
+    measured_ze_ohm: float | None = Field(default=None, ge=0.0, le=2000.0)
+    measured_ra_ohm: float | None = Field(default=None, ge=0.0, le=2000.0)
+    measured_main_bonding_ohm: float | None = Field(default=None, ge=0.0, le=50.0)
+    measured_supp_bonding_ohm: float | None = Field(default=None, ge=0.0, le=50.0)
+    measured_ir_mohm: float | None = Field(default=None, ge=0.0, le=10000.0)
+    measured_rcd_1x_ms: float | None = Field(default=None, ge=0.0, le=2000.0)
+    measured_rcd_5x_ms: float | None = Field(default=None, ge=0.0, le=1000.0)
 
 
 class ResidentialSystemsBrief(BaseModel):
@@ -216,15 +227,65 @@ class ResidentialSystemsBrief(BaseModel):
     include_smoke_detectors: bool = True
     include_pool: bool = False
     include_site_works: bool = True
+    include_decorative_wall_sconces: bool = False
     earthing_electrode_type: Literal["rod_pit", "foundation_ring"] = "foundation_ring"
     building_height_m: float = Field(default=7.5, gt=2.0, le=50.0)
     lightning_flash_density_ng: float = Field(default=1.5, gt=0.0, le=20.0)
     include_knx: bool = False
     ev_charger_kw: float | None = Field(default=None, ge=0.0, le=22.0)
+    pv_module_wp: int = Field(default=550, ge=300, le=750)
+    battery_storage_kwh: float = Field(default=0.0, ge=0.0, le=200.0)
+    include_eps_backup: bool = False
     plot_length_m: float = Field(default=24.0, gt=5.0, le=200.0)
     plot_width_m: float = Field(default=18.0, gt=5.0, le=200.0)
     street_setback_m: float = Field(default=6.0, gt=1.0, le=60.0)
     conduit_drafting_style: Literal["homerun_arcs", "full_routed"] = "homerun_arcs"
+
+
+class PvStorageEngineeringResult(BaseModel):
+    """DC PV stringing & Battery Storage (BESS) sizing per BS 7671 Sec. 712 & EAC 2026."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inverter_ac_kva: float = Field(gt=0.0)
+    inverter_phases: Literal[1, 3]
+    inverter_max_dc_v: int
+    mppt_min_v: int
+    mppt_max_v: int
+    module_wp: int
+    module_count: int = Field(ge=1)
+    array_dc_kwp: float = Field(gt=0.0)
+    dc_ac_ratio: float = Field(gt=0.0)
+    strings_count: int = Field(ge=1)
+    modules_per_string: int = Field(ge=1)
+    string_voc_stc_v: float
+    string_voc_cold_0c_v: float
+    string_vmp_stc_v: float
+    string_vmp_hot_70c_v: float
+    string_isc_max_a: float
+    dc_cable_mm2: float
+    dc_cable_spec: str
+    dc_run_length_m: float
+    dc_voltage_drop_pct: float
+    dc_isolator_spec: str
+    dc_spd_spec: str
+    voc_cold_pass: bool
+    mppt_window_pass: bool
+    dc_vd_pass: bool
+    # Optional Battery Energy Storage System (BESS) per March 2026 EAC DRG. No PVS-S-1.2
+    battery_enabled: bool = False
+    battery_nominal_kwh: float = 0.0
+    battery_usable_kwh: float = 0.0
+    battery_chemistry: str = "LiFePO4 (LFP)"
+    battery_bus_voltage_v: int = 0
+    battery_max_power_kw: float = 0.0
+    battery_max_current_a: float = 0.0
+    battery_dc_breaker_spec: str = ""
+    battery_dc_cable_spec: str = ""
+    eps_backup_enabled: bool = False
+    eps_changeover_spec: str = ""
+    eac_2026_drg_ref: str = "EAC DRG. No PVS-S-1.2 (2026) · R1 Curtailment + R2 Zero-Export"
+    standard_ref: str = "BS 7671 Sec. 712 / IEC 62548 / EAC Storage Guide 2026"
 
 
 class RoomLumenCheck(BaseModel):
@@ -304,6 +365,8 @@ class DesignOverrides(BaseModel):
     ambient_temp_c: int | None = Field(default=None, ge=10, le=70)
     pv_capacity_kva: float | None = Field(default=None, ge=0.0)
     prospective_fault_current_ka: float | None = Field(default=None, gt=0.0)
+    min_supply_headroom_pct: float = Field(default=0.0, ge=0.0, le=50.0)
+    min_main_breaker_a: int | None = Field(default=None, ge=30, le=400)
     circuit_overrides: dict[str, CircuitOverride] = Field(default_factory=dict)
     room_type_overrides: dict[str, RoomType] = Field(default_factory=dict)
     db_location_override_mm: Point2D | None = None
@@ -470,6 +533,8 @@ class EacComplianceResult(BaseModel):
     max_phase_demand_a: float
     recommended_supply_tier: str
     recommended_main_breaker_a: int
+    supply_tier_utilization_pct: float = 0.0
+    next_supply_tier: str | None = None
     ct_metering_required: bool
     substation_warning: bool
     substation_consultation_required: bool
@@ -514,6 +579,7 @@ class ElectricalDesignResult(BaseModel):
     lumen_checks: list[RoomLumenCheck] = Field(default_factory=list)
     din_rail_boards: list[DinRailBoardLayout] = Field(default_factory=list)
     lightning_risk: LightningRiskAssessment | None = None
+    pv_storage_design: PvStorageEngineeringResult | None = None
     review_flags: list[ReviewFlag] = Field(default_factory=list)
     has_blockers: bool
     etek_signoff_required: bool = True

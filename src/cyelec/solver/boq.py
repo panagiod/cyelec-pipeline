@@ -560,6 +560,37 @@ def generate_boq(
             1,
             acc.get("pv_ac_isolator_meter_kit", 240.0),
         )
+        pvs = design.pv_storage_design
+        if pvs is not None and pvs.battery_enabled:
+            _add(
+                "Specialist",
+                (
+                    f"Battery Energy Storage System {pvs.battery_nominal_kwh:g} kWh LiFePO4 "
+                    f"({pvs.battery_bus_voltage_v}V DC) + {pvs.battery_dc_breaker_spec} & DC Cables"
+                ),
+                (
+                    f"Σύστημα Αποθήκευσης Ενέργειας (BESS) {pvs.battery_nominal_kwh:g} kWh "
+                    f"LiFePO4 ({pvs.battery_bus_voltage_v}V DC) με Προστασία DC"
+                ),
+                "kWh",
+                pvs.battery_nominal_kwh,
+                acc.get("bess_lfp_per_kwh", 420.0),
+            )
+            if pvs.eps_backup_enabled:
+                _add(
+                    "Specialist",
+                    (
+                        "EPS Automatic Transfer Switch (ATS) & Critical-Load "
+                        "Backup Sub-Busbar (EAC PVS-S-1.2)"
+                    ),
+                    (
+                        "Αυτόματος Μεταγωγέας Εφεδρικής Τροφοδοσίας (EPS / ATS) "
+                        "& Υποζυγός Κρίσιμων Φορτίων"
+                    ),
+                    "no.",
+                    1,
+                    acc.get("eps_backup_ats_kit", 680.0),
+                )
 
     effective_ev_kw = (
         design.residential_brief.ev_charger_kw
@@ -598,6 +629,14 @@ def generate_boq(
             "no.",
             dev_counts[DeviceType.PENDANT_LIGHT],
             acc.get("pendant_light_point", 55.0),
+        )
+        _add(
+            "Lighting",
+            "Decorative LED Wall Sconce Point (8-10W, 3000K, H=+1600-1800 mm)",
+            "Φωτιστικό Τοίχου LED (Απλίκα 8-10W, 3000K, H=+1600-1800 mm)",
+            "no.",
+            dev_counts[DeviceType.WALL_SCONCE],
+            acc.get("wall_sconce_point", 46.0),
         )
         _add(
             "Lighting",
