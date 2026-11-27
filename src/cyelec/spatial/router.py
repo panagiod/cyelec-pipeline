@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections import Counter
 
@@ -18,10 +19,15 @@ from cyelec.models.electrical import (
 from cyelec.models.spatial import ConduitSegment, DeviceType, PlacedDevice, RoutedCircuit
 
 _SNAP_MM = 10.0  # Snap tolerance when merging identical graph vertices
+_SNAP_INT = int(_SNAP_MM)
 
 
 def _node_key(pt: Point2D) -> tuple[int, int]:
-    return (round(pt.x_mm / _SNAP_MM) * int(_SNAP_MM), round(pt.y_mm / _SNAP_MM) * int(_SNAP_MM))
+    return (round(pt.x_mm / _SNAP_MM) * _SNAP_INT, round(pt.y_mm / _SNAP_MM) * _SNAP_INT)
+
+
+def _node_key_xy(x_mm: float, y_mm: float) -> tuple[int, int]:
+    return (round(x_mm / _SNAP_MM) * _SNAP_INT, round(y_mm / _SNAP_MM) * _SNAP_INT)
 
 
 def _dist_m(a: tuple[int, int], b: tuple[int, int]) -> float:
@@ -68,7 +74,7 @@ def _project_point_onto_segment(
     t = max(0.0, min(1.0, ((pt.x_mm - ax) * dx + (pt.y_mm - ay) * dy) / seg_len_sq))
     px = ax + t * dx
     py = ay + t * dy
-    proj = _node_key(Point2D(x_mm=px, y_mm=py))
+    proj = _node_key_xy(px, py)
     return proj, math.hypot(pt.x_mm - px, pt.y_mm - py)
 
 
@@ -83,20 +89,53 @@ def _attach_node_to_graph(
     if node in graph:
         return node
 
+    x = pt.x_mm
+    y = pt.y_mm
     best_edge: tuple[tuple[int, int], tuple[int, int]] | None = None
-    best_proj: tuple[int, int] | None = None
-    best_dist = float("inf")
+    best_px = 0.0
+    best_py = 0.0
+    best_d_sq = float("inf")
 
-    for u, v in list(graph.edges()):
-        proj, d = _project_point_onto_segment(pt, u, v)
-        if d < best_dist:
-            best_dist = d
+    for u, v in graph.edges():
+        ax, ay = u
+        bx, by = v
+        # Exact AABB lower-bound rejection skips distant edges without float division
+        dx_box = (ax - x) if x < ax else ((x - bx) if x > bx else 0.0)
+        if ax > bx:
+            dx_box = (bx - x) if x < bx else ((x - ax) if x > ax else 0.0)
+        dy_box = (ay - y) if y < ay else ((y - by) if y > by else 0.0)
+        if ay > by:
+            dy_box = (by - y) if y < by else ((y - ay) if y > ay else 0.0)
+        if dx_box * dx_box + dy_box * dy_box > best_d_sq:
+            continue
+
+        dx = bx - ax
+        dy = by - ay
+        seg_len_sq = dx * dx + dy * dy
+        if seg_len_sq < 1e-6:
+            px, py = float(ax), float(ay)
+        else:
+            t = ((x - ax) * dx + (y - ay) * dy) / seg_len_sq
+            if t <= 0.0:
+                px, py = float(ax), float(ay)
+            elif t >= 1.0:
+                px, py = float(bx), float(by)
+            else:
+                px = ax + t * dx
+                py = ay + t * dy
+        ddx = x - px
+        ddy = y - py
+        d_sq = ddx * ddx + ddy * ddy
+        if d_sq < best_d_sq:
+            best_d_sq = d_sq
             best_edge = (u, v)
-            best_proj = proj
+            best_px = px
+            best_py = py
 
     graph.add_node(node)
-    if best_edge is not None and best_proj is not None:
+    if best_edge is not None:
         u, v = best_edge
+        best_proj = _node_key_xy(best_px, best_py)
         old_data = dict(graph[u][v])
         old_kind = str(old_data.get("kind", "wall"))
         old_len = float(old_data.get("length_m", 1.0))
@@ -122,28 +161,24 @@ def build_conduit_graph(
         pts = room.polygon_mm
         n = len(pts)
         room_nodes = [_node_key(p) for p in pts]
+        mids = [
+            _node_key_xy(
+                (pts[i].x_mm + pts[(i + 1) % n].x_mm) / 2.0,
+                (pts[i].y_mm + pts[(i + 1) % n].y_mm) / 2.0,
+            )
+            for i in range(n)
+        ]
         for i in range(n):
             u = room_nodes[i]
             v = room_nodes[(i + 1) % n]
             # Add midpoint node along long edges for cleaner orthogonal transitions
-            mid = _node_key(
-                Point2D(
-                    x_mm=(pts[i].x_mm + pts[(i + 1) % n].x_mm) / 2.0,
-                    y_mm=(pts[i].y_mm + pts[(i + 1) % n].y_mm) / 2.0,
-                )
-            )
+            mid = mids[i]
             _add_weighted_edge(graph, u, mid, penalty=1.0, kind="wall")
             _add_weighted_edge(graph, mid, v, penalty=1.0, kind="wall")
 
         # Ceiling centroid connected to wall midpoints (slab conduit drops, slight penalty 1.05)
         centroid = _node_key(room.centroid_mm())
-        for i in range(n):
-            mid = _node_key(
-                Point2D(
-                    x_mm=(pts[i].x_mm + pts[(i + 1) % n].x_mm) / 2.0,
-                    y_mm=(pts[i].y_mm + pts[(i + 1) % n].y_mm) / 2.0,
-                )
-            )
+        for mid in mids:
             _add_weighted_edge(graph, centroid, mid, penalty=1.05, kind="ceiling")
 
     # 2. Explicit architectural walls
@@ -187,27 +222,31 @@ def build_conduit_graph(
 
     # 4. Ensure global connectivity via closest-pair MST (keeps intra-floor detached rooms local
     # before bridging across wide empty gaps between side-by-side floor clusters)
-    components = [set(c) for c in nx.connected_components(graph)]
+    components = [list(c) for c in nx.connected_components(graph)]
     while len(components) > 1:
-        best_dist = float("inf")
+        best_d_sq = float("inf")
         best_i, best_j = 0, 1
         best_pair: tuple[tuple[int, int], tuple[int, int]] | None = None
         for i in range(len(components)):
+            comp_i = components[i]
             for j in range(i + 1, len(components)):
-                pair = min(
-                    ((u, v) for u in components[i] for v in components[j]),
-                    key=lambda p: _dist_m(p[0], p[1]),
-                )
-                d = _dist_m(pair[0], pair[1])
-                if d < best_dist:
-                    best_dist = d
-                    best_i, best_j = i, j
-                    best_pair = pair
+                comp_j = components[j]
+                for u in comp_i:
+                    ux, uy = u
+                    for v in comp_j:
+                        dx = ux - v[0]
+                        dy = uy - v[1]
+                        d_sq = dx * dx + dy * dy
+                        if d_sq < best_d_sq:
+                            best_d_sq = d_sq
+                            best_i, best_j = i, j
+                            best_pair = (u, v)
         if best_pair is None:
             break
+        best_dist = math.sqrt(best_d_sq) / 1000.0
         bridge_pen = 5.0 if best_dist > 1.5 else 1.25
         _add_weighted_edge(graph, best_pair[0], best_pair[1], penalty=bridge_pen, kind="bridge")
-        components[best_i] = components[best_i] | components[best_j]
+        components[best_i].extend(components[best_j])
         components.pop(best_j)
 
     return graph, db_node, device_nodes
@@ -400,23 +439,56 @@ def assign_devices_to_circuits(
     return updated_devices, by_circuit
 
 
+def _nearest_target_dijkstra(
+    graph: nx.Graph,
+    start: tuple[int, int],
+    target_set: set[tuple[int, int]],
+) -> tuple[int, int]:
+    """Find the exact nearest node in target_set via early-stopping Dijkstra."""
+    adj = graph._adj  # Direct adjacency dict avoids NetworkX decorator/backend overhead
+    dist: dict[tuple[int, int], float] = {start: 0.0}
+    heap: list[tuple[float, tuple[int, int]]] = [(0.0, start)]
+    best_dist: float | None = None
+    best_candidates: list[tuple[float, tuple[int, int]]] = []
+
+    while heap:
+        d, u = heapq.heappop(heap)
+        if best_dist is not None and d > best_dist + 1e-12:
+            break
+        if d > dist.get(u, float("inf")):
+            continue
+        if u in target_set:
+            if best_dist is None or d < best_dist:
+                best_dist = d
+            best_candidates.append((d, u))
+            continue
+        for v, edata in adj[u].items():
+            nd = d + float(edata["weight"])
+            if best_dist is not None and nd > best_dist + 1e-12:
+                continue
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                heapq.heappush(heap, (nd, v))
+
+    if best_candidates:
+        return min(best_candidates)[1]
+    return min(target_set)
+
+
 def _order_waypoints_greedy(
     graph: nx.Graph,
     start: tuple[int, int],
     targets: list[tuple[int, int]],
 ) -> list[tuple[int, int]]:
     """Deterministic nearest-neighbor ordering of target device nodes along graph shortest paths."""
-    remaining = list(dict.fromkeys(targets))
+    remaining = set(targets)
     ordered: list[tuple[int, int]] = []
     curr = start
     while remaining:
-        nxt = min(
-            remaining,
-            key=lambda node: (
-                float(nx.shortest_path_length(graph, curr, node, weight="weight")),
-                node,
-            ),
-        )
+        if len(remaining) == 1:
+            nxt = next(iter(remaining))
+        else:
+            nxt = _nearest_target_dijkstra(graph, curr, remaining)
         ordered.append(nxt)
         remaining.remove(nxt)
         curr = nxt

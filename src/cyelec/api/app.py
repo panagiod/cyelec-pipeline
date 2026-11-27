@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import hmac
 import importlib.util
@@ -9,6 +10,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid
 from collections import defaultdict, deque
@@ -469,6 +471,19 @@ def _solve_dxf_bytes_sync(
         )
 
 
+def _resolve_bundle_concurrency_limit() -> int:
+    raw = os.environ.get("CYELEC_MAX_CONCURRENT_BUNDLES", "2").strip()
+    try:
+        return max(1, min(8, int(raw)))
+    except ValueError:
+        return 2
+
+
+# Bound concurrent heavy Phase 3 + WeasyPrint PDF + ZIP exports to match 2 vCPU / 2 GiB
+# Cloud Run containers without OOM or GIL/Cairo thrashing under parallel downloads.
+_BUNDLE_SEMAPHORE = threading.BoundedSemaphore(_resolve_bundle_concurrency_limit())
+
+
 def _solve_dxf_bundle_sync(
     data: bytes,
     suffix: str,
@@ -480,35 +495,39 @@ def _solve_dxf_bundle_sync(
     from cyelec.pipeline import export_phase3_deliverables, run_phase2_pipeline
     from cyelec.render.eac_pack import build_submission_zip
 
-    with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
-        tmp = Path(tmp_dir)
-        in_path = tmp / f"plan{suffix}"
-        in_path.write_bytes(data)
-        extra_flags = []
-        source_dxf: Path | None = None
-        if suffix == ".dwg":
-            conv_dxf, dwg_flag = convert_dwg_to_dxf(in_path, tmp / "dwg_conv")
-            extra_flags.append(dwg_flag)
-            solve_path = conv_dxf
-            source_dxf = conv_dxf
-        else:
-            solve_path = in_path
-            source_dxf = in_path if suffix == ".dxf" else None
-        p2 = run_phase2_pipeline(
-            solve_path,
-            overrides=overrides,
-            building_type=building_type,
-            layer_mapping=layer_mapping,
-            extra_flags=extra_flags,
-        )
-        outputs = export_phase3_deliverables(
-            p2,
-            tmp / "pack",
-            export_pdf=is_weasyprint_available(),
-            source_dxf_path=source_dxf,
-        )
-        zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
-        return p2, zip_path.read_bytes()
+    with _BUNDLE_SEMAPHORE:
+        try:
+            with tempfile.TemporaryDirectory(prefix="cyelec_bundle_") as tmp_dir:
+                tmp = Path(tmp_dir)
+                in_path = tmp / f"plan{suffix}"
+                in_path.write_bytes(data)
+                extra_flags = []
+                source_dxf: Path | None = None
+                if suffix == ".dwg":
+                    conv_dxf, dwg_flag = convert_dwg_to_dxf(in_path, tmp / "dwg_conv")
+                    extra_flags.append(dwg_flag)
+                    solve_path = conv_dxf
+                    source_dxf = conv_dxf
+                else:
+                    solve_path = in_path
+                    source_dxf = in_path if suffix == ".dxf" else None
+                p2 = run_phase2_pipeline(
+                    solve_path,
+                    overrides=overrides,
+                    building_type=building_type,
+                    layer_mapping=layer_mapping,
+                    extra_flags=extra_flags,
+                )
+                outputs = export_phase3_deliverables(
+                    p2,
+                    tmp / "pack",
+                    export_pdf=is_weasyprint_available(),
+                    source_dxf_path=source_dxf,
+                )
+                zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+                return p2, zip_path.read_bytes()
+        finally:
+            gc.collect()
 
 
 def _validate_safe_id(value: str, field_name: str) -> str:
@@ -647,19 +666,25 @@ def _solve_multifloor_bundle_sync(
     from cyelec.render.eac_pack import build_submission_zip
 
     # Keep floor DXF files alive inside the SAME temp dir so layout_dxf preserves real underlays!
-    with tempfile.TemporaryDirectory(prefix="cyelec_mfb_") as tmp_dir:
-        tmp = Path(tmp_dir)
-        p2 = _run_multifloor_in_dir(
-            tmp,
-            floor_blobs,
-            submain_lengths_m,
-            overrides,
-            building_type,
-            layer_mapping,
-        )
-        outputs = export_phase3_deliverables(p2, tmp / "pack", export_pdf=is_weasyprint_available())
-        zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
-        return p2, zip_path.read_bytes()
+    with _BUNDLE_SEMAPHORE:
+        try:
+            with tempfile.TemporaryDirectory(prefix="cyelec_mfb_") as tmp_dir:
+                tmp = Path(tmp_dir)
+                p2 = _run_multifloor_in_dir(
+                    tmp,
+                    floor_blobs,
+                    submain_lengths_m,
+                    overrides,
+                    building_type,
+                    layer_mapping,
+                )
+                outputs = export_phase3_deliverables(
+                    p2, tmp / "pack", export_pdf=is_weasyprint_available()
+                )
+                zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+                return p2, zip_path.read_bytes()
+        finally:
+            gc.collect()
 
 
 def create_app(
@@ -1224,15 +1249,21 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         t0 = time.perf_counter()
         eff_overrides = _merge_tenant_defaults(tid, overrides)
-        with tempfile.TemporaryDirectory(prefix="cyelec_bench_") as tmp_dir:
-            tmp = Path(tmp_dir)
-            building = generate_benchmark_dxf(template, out_dxf=tmp / f"{template.value}.dxf")
-            p2 = run_phase2_pipeline(building, overrides=eff_overrides)
-            outputs = export_phase3_deliverables(
-                p2, tmp / "pack", export_pdf=is_weasyprint_available()
-            )
-            zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
-            zip_bytes = zip_path.read_bytes()
+        with _BUNDLE_SEMAPHORE:
+            try:
+                with tempfile.TemporaryDirectory(prefix="cyelec_bench_") as tmp_dir:
+                    tmp = Path(tmp_dir)
+                    building = generate_benchmark_dxf(
+                        template, out_dxf=tmp / f"{template.value}.dxf"
+                    )
+                    p2 = run_phase2_pipeline(building, overrides=eff_overrides)
+                    outputs = export_phase3_deliverables(
+                        p2, tmp / "pack", export_pdf=is_weasyprint_available()
+                    )
+                    zip_path = build_submission_zip(outputs, tmp / "eac_submission_pack.zip")
+                    zip_bytes = zip_path.read_bytes()
+            finally:
+                gc.collect()
         store.record_usage(
             tid,
             "solve_benchmark_bundle",

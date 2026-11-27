@@ -1,18 +1,25 @@
 name: Deploy to Google Cloud Run (EU)
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: ["main"]
   workflow_dispatch:
     inputs:
       environment:
-        description: "Target Cloud Run environment"
+        description: "Target Cloud Run environment(s)"
         required: true
-        default: "staging"
+        default: "staging_and_prod"
         type: choice
         options:
+          - staging_and_prod
           - staging
           - prod
+
+concurrency:
+  group: deploy-gcp-eu
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -24,22 +31,29 @@ env:
   IMAGE_NAME: cyelec-api
 
 jobs:
-  deploy:
-    # Skip automatic push deploys cleanly until GCP_PROJECT_ID repo variable is configured
-    if: ${{ vars.GCP_PROJECT_ID != '' }}
+  build-image:
+    name: Build & Push Single Immutable EU Image
+    # Strictly gated on green CI on main (or explicit manual workflow_dispatch)
+    if: >-
+      vars.GCP_PROJECT_ID != '' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}
+    outputs:
+      target_sha: ${{ steps.meta.outputs.target_sha }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Resolve target environment
-        id: target
+      - name: Resolve target commit SHA and image URI
+        id: meta
         run: |
-          ENV_NAME="${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'staging' }}"
-          echo "env=${ENV_NAME}" >> "$GITHUB_OUTPUT"
-          echo "tf_state_bucket=${{ vars.GCP_PROJECT_ID }}-cyelec-tfstate" >> "$GITHUB_OUTPUT"
-          echo "image_uri=${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          TARGET_SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "target_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_uri=${GCP_REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/${IMAGE_NAME}:${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Target SHA: ${TARGET_SHA}"
+
+      - name: Checkout exact CI-verified commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.meta.outputs.target_sha }}
 
       - name: Authenticate to Google Cloud via Keyless OIDC (WIF)
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
@@ -50,10 +64,17 @@ jobs:
       - name: Configure Docker for EU Artifact Registry
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Build and push immutable SHA-pinned container image
-        run: |
-          docker build -t "${{ steps.target.outputs.image_uri }}" .
-          docker push "${{ steps.target.outputs.image_uri }}"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push immutable SHA-pinned container image (reusing GHA cache)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image_uri }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Prune older Artifact Registry images (keep newest 2 for €0.00/mo free tier)
         run: |
@@ -68,25 +89,48 @@ jobs:
               --delete-tags --quiet || true
           done
 
+  deploy-staging:
+    name: Deploy EU Staging + Live E2E, Tier-3 Perf & UI Gate
+    needs: [build-image]
+    if: >-
+      github.event_name == 'workflow_run' ||
+      (github.event_name == 'workflow_dispatch' && inputs.environment != 'prod')
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      service_url: ${{ steps.tf.outputs.service_url }}
+    steps:
+      - name: Checkout exact CI-verified commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build-image.outputs.target_sha }}
+
+      - name: Authenticate to Google Cloud via Keyless OIDC (WIF)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "1.9.8"
           terraform_wrapper: false
 
-      - name: Terraform Init & Apply (Cloud Run + Firestore + GCS in europe-west1)
+      - name: Terraform Init & Apply EU Staging
+        id: tf
         working-directory: deploy/gcp/terraform
         env:
           TF_VAR_pilot_invite_code: ${{ secrets.CYELEC_PILOT_INVITE_CODE || vars.CYELEC_PILOT_INVITE_CODE || '' }}
         run: |
           terraform init \
-            -backend-config="bucket=${{ steps.target.outputs.tf_state_bucket }}" \
-            -backend-config="prefix=cyelec/${{ steps.target.outputs.env }}"
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID }}-cyelec-tfstate" \
+            -backend-config="prefix=cyelec/staging"
           terraform apply -auto-approve \
             -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
             -var="region=${GCP_REGION}" \
-            -var="environment=${{ steps.target.outputs.env }}" \
-            -var="image_uri=${{ steps.target.outputs.image_uri }}" \
+            -var="environment=staging" \
+            -var="image_uri=${{ needs.build-image.outputs.image_uri }}" \
             -var="prod_min_instances=${{ vars.CYELEC_PROD_MIN_INSTANCES || '0' }}" \
             -var="budget_gate_mode=${{ vars.CYELEC_BUDGET_GATE_MODE || 'pause_ingress' }}" \
             -var="alert_email=${{ vars.CYELEC_ALERT_EMAIL || '' }}" \
@@ -100,44 +144,147 @@ jobs:
             -var="jwt_secret_id=${{ vars.CYELEC_JWT_SECRET_ID || '' }}"
           SERVICE_URL="$(terraform output -raw service_url)"
           echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
-        id: tf
 
-      - name: Live Post-Deploy Health, Security Headers & Backend Verification
+      - name: Set up Python 3.12 & Playwright for Live Staging Gates
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install test runner dependencies & Chromium
         run: |
-          URL="${{ steps.tf.outputs.service_url }}"
-          ENV_NAME="${{ steps.target.outputs.env }}"
-          echo "Verifying live Cloud Run endpoint: ${URL}/health"
-          HDR_FILE="$(mktemp)"
-          RESP="$(curl -fsS --retry 5 --retry-delay 3 -D "${HDR_FILE}" "${URL}/health")"
-          echo "${RESP}"
-          python3 -c '
-          import json, sys
-          data = json.loads(sys.argv[1])
-          hdrs = open(sys.argv[2], encoding="utf-8").read().lower()
-          assert data["status"] == "ok", f"Unhealthy: {data}"
-          assert data["store_backend"] == "firestore", f"Wrong store backend: {data}"
-          assert data.get("ifc_available") is True, f"IFC BIM not enabled: {data}"
-          assert data.get("dwg_available") is True, f"DWG converter not enabled: {data}"
-          assert data.get("pdf_export_available") is True, f"WeasyPrint PDF not enabled: {data}"
-          for required in (
-              "x-frame-options: deny",
-              "x-content-type-options: nosniff",
-              "referrer-policy: no-referrer",
-              "content-security-policy:",
-              "strict-transport-security:",
-          ):
-              assert required in hdrs, f"Missing security header: {required}"
-          print("VERIFIED: status=ok, store_backend=firestore, ifc=true, dwg=true, pdf=true, OWASP headers present, version=" + data["pipeline_version"])
-          ' "${RESP}" "${HDR_FILE}"
-          if [ "${ENV_NAME}" = "prod" ]; then
-            OPENAPI_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${URL}/openapi.json")"
-            test "${OPENAPI_CODE}" = "404" || (echo "Expected prod /openapi.json 404, got ${OPENAPI_CODE}" && exit 1)
-            for page in "/" "/guide"; do
-              PAGE_HTML="$(curl -fsS "${URL}${page}")"
-              if echo "${PAGE_HTML}" | grep -q 'href="/docs"'; then
-                echo "Prod ${page} must not expose broken /docs link!"
-                exit 1
-              fi
-            done
-            echo "VERIFIED: prod /openapi.json disabled (HTTP 404) & /docs hidden on / and /guide"
-          fi
+          python -m pip install --upgrade pip
+          pip install -e ".[api,dev,ui]"
+          python -m playwright install --with-deps chromium
+
+      - name: Live EU Staging Operational E2E & Tier-3 Cold/Warm Latency Gate
+        run: |
+          python3 scripts/e2e_live_ops.py \
+            --env staging \
+            --url "${{ steps.tf.outputs.service_url }}" \
+            --report staging_e2e_report.json
+
+      - name: Live EU Staging Playwright Browser UI Gate
+        env:
+          CYELEC_E2E_URL: ${{ steps.tf.outputs.service_url }}
+          CYELEC_SCREENSHOT_DIR: staging_ui_screenshots
+        run: pytest tests/e2e/test_ui_playwright.py -v
+
+      - name: Upload Live Staging Verification Artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-staging-e2e-artifacts
+          path: |
+            staging_e2e_report.json
+            staging_ui_screenshots
+          if-no-files-found: ignore
+          retention-days: 7
+
+  deploy-prod:
+    name: Auto-Promote EU Production + Live E2E, Tier-3 Perf & Auto-Rollback
+    needs: [build-image, deploy-staging]
+    if: >-
+      !cancelled() &&
+      needs.build-image.result == 'success' &&
+      (
+        (github.event_name == 'workflow_run' && needs.deploy-staging.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging_and_prod' && needs.deploy-staging.result == 'success') ||
+        (github.event_name == 'workflow_dispatch' && inputs.environment == 'prod')
+      )
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Checkout exact CI-verified commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.build-image.outputs.target_sha }}
+
+      - name: Authenticate to Google Cloud via Keyless OIDC (WIF)
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+
+      - name: Capture current live Production revision (for automatic instant rollback)
+        id: prev
+        run: |
+          PREV_REV="$(gcloud run services describe cyelec-prod \
+            --region "${GCP_REGION}" \
+            --format='value(status.latestReadyRevisionName)' 2>/dev/null || true)"
+          echo "prev_rev=${PREV_REV}" >> "$GITHUB_OUTPUT"
+          echo "Recorded previous live Production revision: ${PREV_REV:-<none>}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Terraform Init & Apply EU Production (exact Staging-verified SHA image)
+        id: tf
+        working-directory: deploy/gcp/terraform
+        env:
+          TF_VAR_pilot_invite_code: ${{ secrets.CYELEC_PILOT_INVITE_CODE || vars.CYELEC_PILOT_INVITE_CODE || '' }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.GCP_PROJECT_ID }}-cyelec-tfstate" \
+            -backend-config="prefix=cyelec/prod"
+          terraform apply -auto-approve \
+            -var="project_id=${{ vars.GCP_PROJECT_ID }}" \
+            -var="region=${GCP_REGION}" \
+            -var="environment=prod" \
+            -var="image_uri=${{ needs.build-image.outputs.image_uri }}" \
+            -var="prod_min_instances=${{ vars.CYELEC_PROD_MIN_INSTANCES || '0' }}" \
+            -var="budget_gate_mode=${{ vars.CYELEC_BUDGET_GATE_MODE || 'pause_ingress' }}" \
+            -var="alert_email=${{ vars.CYELEC_ALERT_EMAIL || '' }}" \
+            -var="custom_domain=${{ vars.CYELEC_CUSTOM_DOMAIN || '' }}" \
+            -var="google_client_id=${{ vars.CYELEC_GOOGLE_CLIENT_ID || '' }}" \
+            -var="stripe_secret_id=${{ vars.CYELEC_STRIPE_SECRET_ID || '' }}" \
+            -var="stripe_webhook_secret_id=${{ vars.CYELEC_STRIPE_WEBHOOK_SECRET_ID || '' }}" \
+            -var="stripe_price_pilot=${{ vars.CYELEC_STRIPE_PRICE_PILOT || '' }}" \
+            -var="stripe_price_pro=${{ vars.CYELEC_STRIPE_PRICE_PRO || '' }}" \
+            -var="stripe_price_enterprise=${{ vars.CYELEC_STRIPE_PRICE_ENTERPRISE || '' }}" \
+            -var="jwt_secret_id=${{ vars.CYELEC_JWT_SECRET_ID || '' }}"
+          SERVICE_URL="$(terraform output -raw service_url)"
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python 3.12 for Live Production Verification
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install client dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[api]"
+
+      - name: Live EU Production E2E, Tier-3 Perf & GDPR Art. 17 Cleanup Gate
+        env:
+          CYELEC_PILOT_INVITE_CODE: ${{ secrets.CYELEC_PILOT_INVITE_CODE || vars.CYELEC_PILOT_INVITE_CODE || '' }}
+        run: |
+          python3 scripts/e2e_live_ops.py \
+            --env prod \
+            --url "${{ steps.tf.outputs.service_url }}" \
+            --report prod_e2e_report.json
+
+      - name: Automatic Instant Cloud Run Rollback to Previous Good Revision
+        if: failure() && steps.prev.outputs.prev_rev != ''
+        run: |
+          PREV_REV="${{ steps.prev.outputs.prev_rev }}"
+          echo "::error::Live Production E2E/Perf gate failed! Automatically rolling back cyelec-prod traffic 100% -> ${PREV_REV}"
+          gcloud run services update-traffic cyelec-prod \
+            --region "${GCP_REGION}" \
+            --to-revisions="${PREV_REV}=100" \
+            --quiet
+          echo "ROLLBACK COMPLETE: 100% EU Production traffic restored to ${PREV_REV}"
+
+      - name: Upload Live Production Verification Report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-prod-e2e-report
+          path: prod_e2e_report.json
+          if-no-files-found: ignore
+          retention-days: 14

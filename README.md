@@ -63,10 +63,22 @@ gh workflow run deploy-gcp.yml -f environment=staging
 gh workflow run deploy-gcp.yml -f environment=prod
 ```
 
-## Development Checks
+## Quality Assurance, Regression & Performance Testing
+
+Formal procedures are documented in [`docs/QA_PROCEDURE.md`](docs/QA_PROCEDURE.md) and [`docs/PERF_PROCEDURE.md`](docs/PERF_PROCEDURE.md).
 
 ```bash
-ruff check src tests
-mypy src
-pytest -v
+# Fast local QA gate (~20s): ruff, mypy, bandit, parallel pytest (>=85% cov) + 0%-tolerance golden snapshots
+./scripts/run_qa.sh --quick
+
+# Full local QA gate (~60s): adds pip-audit, Playwright Chromium UI regression & Tier-1 48-room stress
+./scripts/run_qa.sh --full
+
+# Full production container parity: Docker E2E (MIT .dwg/.ifc/10 PDFs) + Tier-2 2 vCPU/2 GiB concurrency & soak
+./scripts/run_qa.sh --docker
+
+# Standalone performance tiers (Tier-1 per-stage/48-room stress, Tier-2 4x ZIP & 30-solve leak soak)
+./scripts/run_perf.sh --tier1
+./scripts/run_perf.sh --tier2
 ```
+
