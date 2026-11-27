@@ -420,3 +420,52 @@ def test_bugs14_to_20_workbench_ui_markup_and_invariants() -> None:
     assert 'id="authGateBanner"' in html
     assert "data-reset-uid=" in html
     assert "t.boq_rate_overrides.vat_rate" in html
+
+
+def test_e2e_bug22_carry_forward_preserves_all_stage4_stage5_overrides() -> None:
+    """E2E operational catch: carry_forward_overrides must preserve brief, 4 anchors & metadata."""
+    from cyelec.models.building import Point2D
+    from cyelec.models.electrical import BoqRateOverrides, EacProjectMetadata
+    from cyelec.saas.revisions import carry_forward_overrides
+
+    rev1 = DesignOverrides(
+        db_location_override_mm=Point2D(x_mm=4200.0, y_mm=3800.0),
+        meter_location_override_mm=Point2D(x_mm=100.0, y_mm=-900.0),
+        earth_pit_location_override_mm=Point2D(x_mm=500.0, y_mm=-900.0),
+        telecom_location_override_mm=Point2D(x_mm=3100.0, y_mm=2200.0),
+        prospective_fault_current_ka=8.5,
+        boq_rate_overrides=BoqRateOverrides(vat_rate=0.05),
+        eac_metadata=EacProjectMetadata(district="Limassol", plot_no="418"),
+        apply_corridor_grouping=True,
+    )
+    rev2 = DesignOverrides(
+        pv_capacity_kva=6.0,
+        tender_boq_blank_rates=True,
+        residential_brief=ResidentialSystemsBrief(
+            hvac_mode="heat_pump_ufh",
+            heat_pump_kw=6.0,
+            include_pool=True,
+            include_knx=True,
+            ev_charger_kw=11.0,
+            building_height_m=12.0,
+        ),
+    )
+    merged = carry_forward_overrides(rev1, rev2)
+    assert merged is not None
+    assert merged.db_location_override_mm == Point2D(x_mm=4200.0, y_mm=3800.0)
+    assert merged.meter_location_override_mm == Point2D(x_mm=100.0, y_mm=-900.0)
+    assert merged.earth_pit_location_override_mm == Point2D(x_mm=500.0, y_mm=-900.0)
+    assert merged.telecom_location_override_mm == Point2D(x_mm=3100.0, y_mm=2200.0)
+    assert merged.prospective_fault_current_ka == 8.5
+    assert merged.boq_rate_overrides is not None
+    assert merged.boq_rate_overrides.vat_rate == 0.05
+    assert merged.eac_metadata is not None
+    assert merged.eac_metadata.plot_no == "418"
+    assert merged.apply_corridor_grouping is True
+    assert merged.pv_capacity_kva == 6.0
+    assert merged.tender_boq_blank_rates is True
+    assert merged.residential_brief is not None
+    assert merged.residential_brief.include_pool is True
+    assert merged.residential_brief.include_knx is True
+    assert merged.residential_brief.ev_charger_kw == 11.0
+

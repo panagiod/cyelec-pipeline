@@ -229,54 +229,41 @@ def carry_forward_overrides(
     if new_overrides is None:
         return prev_overrides.model_copy(deep=True)
 
+    defaults = DesignOverrides()
     merged_circuits = dict(prev_overrides.circuit_overrides)
     merged_circuits.update(new_overrides.circuit_overrides)
 
     merged_rooms = dict(prev_overrides.room_type_overrides)
     merged_rooms.update(new_overrides.room_type_overrides)
 
+    def _pick(field: str) -> object:
+        nv = getattr(new_overrides, field)
+        pv = getattr(prev_overrides, field)
+        dv = getattr(defaults, field)
+        if dv is None:
+            return nv if nv is not None else pv
+        return nv if nv != dv else pv
+
     return DesignOverrides(
-        eac_profile=(
-            new_overrides.eac_profile
-            if new_overrides.eac_profile is not None
-            else prev_overrides.eac_profile
-        ),
-        earthing_system=(
-            new_overrides.earthing_system
-            if new_overrides.earthing_system is not None
-            else prev_overrides.earthing_system
-        ),
-        ze_or_ra_ohm=(
-            new_overrides.ze_or_ra_ohm
-            if new_overrides.ze_or_ra_ohm is not None
-            else prev_overrides.ze_or_ra_ohm
-        ),
-        ambient_temp_c=(
-            new_overrides.ambient_temp_c
-            if new_overrides.ambient_temp_c is not None
-            else prev_overrides.ambient_temp_c
-        ),
-        pv_capacity_kva=(
-            new_overrides.pv_capacity_kva
-            if new_overrides.pv_capacity_kva is not None
-            else prev_overrides.pv_capacity_kva
-        ),
+        eac_profile=_pick("eac_profile"),  # type: ignore[arg-type]
+        earthing_system=_pick("earthing_system"),  # type: ignore[arg-type]
+        ze_or_ra_ohm=_pick("ze_or_ra_ohm"),  # type: ignore[arg-type]
+        ambient_temp_c=_pick("ambient_temp_c"),  # type: ignore[arg-type]
+        pv_capacity_kva=_pick("pv_capacity_kva"),  # type: ignore[arg-type]
+        prospective_fault_current_ka=_pick("prospective_fault_current_ka"),  # type: ignore[arg-type]
         circuit_overrides=merged_circuits,
         room_type_overrides=merged_rooms,
-        db_location_override_mm=(
-            new_overrides.db_location_override_mm
-            if new_overrides.db_location_override_mm is not None
-            else prev_overrides.db_location_override_mm
-        ),
-        report_language=(
-            new_overrides.report_language
-            if new_overrides.report_language != DesignOverrides().report_language
-            else prev_overrides.report_language
-        ),
-        branding=(
-            new_overrides.branding
-            if new_overrides.branding is not None
-            else prev_overrides.branding
-        ),
-        notes=new_overrides.notes if new_overrides.notes is not None else prev_overrides.notes,
+        db_location_override_mm=_pick("db_location_override_mm"),  # type: ignore[arg-type]
+        meter_location_override_mm=_pick("meter_location_override_mm"),  # type: ignore[arg-type]
+        earth_pit_location_override_mm=_pick("earth_pit_location_override_mm"),  # type: ignore[arg-type]
+        telecom_location_override_mm=_pick("telecom_location_override_mm"),  # type: ignore[arg-type]
+        residential_brief=_pick("residential_brief"),  # type: ignore[arg-type]
+        report_language=_pick("report_language"),  # type: ignore[arg-type]
+        branding=_pick("branding"),  # type: ignore[arg-type]
+        boq_rate_overrides=_pick("boq_rate_overrides"),  # type: ignore[arg-type]
+        tender_boq_blank_rates=_pick("tender_boq_blank_rates"),  # type: ignore[arg-type]
+        apply_corridor_grouping=_pick("apply_corridor_grouping"),  # type: ignore[arg-type]
+        include_tt_main_rcd_s=_pick("include_tt_main_rcd_s"),  # type: ignore[arg-type]
+        eac_metadata=_pick("eac_metadata"),  # type: ignore[arg-type]
+        notes=_pick("notes"),  # type: ignore[arg-type]
     )
