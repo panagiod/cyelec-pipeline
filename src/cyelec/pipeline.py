@@ -735,6 +735,7 @@ def export_phase3_deliverables(
     source_dxf_path: Path | None = None,
 ) -> dict[str, Path]:
     """Write complete Turnkey Cyprus EAC & Tender Pack: E-100..E-301 DXF/SVG/PDF + 10-sec BOQ."""
+    from cyelec.render.board_designs import export_board_designs_deliverables
     from cyelec.render.details_dxf import export_details_notes
     from cyelec.render.eac_forms import export_eac_application_form
     from cyelec.render.eac_pack import (
@@ -855,6 +856,10 @@ def export_phase3_deliverables(
     # E-203 Log-Log Time-Current (I-t) Selectivity & IEC 60909 Coordination Sheet
     sel_out = export_selectivity_deliverables(result, out_dir, export_pdf=export_pdf)
     outputs.update(sel_out)
+
+    # E-204 Main & Secondary Distribution Board Front Elevations, IEC 61439 Specs & Door Schedules
+    boards_out = export_board_designs_deliverables(result, out_dir, export_pdf=export_pdf)
+    outputs.update(boards_out)
 
     # E-301 Construction Details, Earthing/Meter/Wet-Zone Sections & General Notes
     details_out = export_details_notes(result, out_dir)

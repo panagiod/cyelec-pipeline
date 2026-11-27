@@ -141,11 +141,11 @@ def _run_one_bundle(
     zf = zipfile.ZipFile(io.BytesIO(resp.content))
     names = zf.namelist()
     pdfs = [n for n in names if n.lower().endswith(".pdf")]
-    if expect_pdf and len(pdfs) < 11:
+    if expect_pdf and len(pdfs) < 12:
         return {
             "status": 500,
             "elapsed_s": round(elapsed, 3),
-            "error": f"Expected >=11 PDFs in ZIP, got {len(pdfs)}",
+            "error": f"Expected >=12 PDFs in ZIP, got {len(pdfs)}",
         }
     return {
         "status": 200,

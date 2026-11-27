@@ -966,6 +966,9 @@ def render_etek_workbench_html(
           <button class="tab" onclick="openTab('tabSelectivity', this)">
             I-t Selectivity (E-203)
           </button>
+          <button class="tab" onclick="openTab('tabBoards', this)">
+            Board Designs (E-204)
+          </button>
           <button class="tab" onclick="openTab('tabDetails', this)">
             Details &amp; Notes (E-301)
           </button>
@@ -1158,6 +1161,34 @@ def render_etek_workbench_html(
           </div>
           <div id="selectivitySvg" class="svg-box">
             Run a solve to render E-203 Log-Log Time-Current (I-t) Selectivity Curves.
+          </div>
+        </div>
+
+        <div id="tabBoards" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>
+              E-204 Main &amp; Secondary Distribution Board Front Elevations &amp; Door Schedules
+            </strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('boardsSvg', -25)">−</button>
+              <span id="zoomLbl_boardsSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('boardsSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('boardsSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('boardsSvg', 'E-204 Main & Secondary Board Designs')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('boardsSvg', 'E204_board_designs.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="boardsSvg" class="svg-box">
+            Run a solve to render E-204 Main &amp; Secondary Distribution Board Designs.
           </div>
         </div>
 
@@ -1918,6 +1949,9 @@ def render_etek_workbench_html(
       document.getElementById('selectivitySvg').innerHTML =
         data.selectivity_svg || 'E-203 Time-Current Selectivity sheet unavailable.';
       applyZoomToBox('selectivitySvg');
+      document.getElementById('boardsSvg').innerHTML =
+        data.boards_svg || 'E-204 Main &amp; Secondary Board Designs sheet unavailable.';
+      applyZoomToBox('boardsSvg');
       document.getElementById('detailsSvg').innerHTML =
         data.details_svg || 'Details sheet unavailable.';
       applyZoomToBox('detailsSvg');

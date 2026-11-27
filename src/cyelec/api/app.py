@@ -175,6 +175,7 @@ class SolvePreviewEnvelope(BaseModel):
     site_svg: str = ""
     riser_svg: str = ""
     selectivity_svg: str = ""
+    boards_svg: str = ""
     details_svg: str = ""
 
 
@@ -1206,6 +1207,7 @@ def create_app(
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
         from cyelec.pipeline import run_phase2_pipeline
+        from cyelec.render.board_designs import render_board_designs_svg
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
@@ -1239,6 +1241,7 @@ def create_app(
             site_svg=render_site_plan_svg(p2),
             riser_svg=render_riser_and_db_svg(p2),
             selectivity_svg=render_selectivity_curves_svg(p2.design),
+            boards_svg=render_board_designs_svg(p2),
             details_svg=render_details_notes_svg(p2),
         )
 
@@ -1361,6 +1364,7 @@ def create_app(
         layer_mapping_json: Annotated[str | None, Form()] = None,
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> SolvePreviewEnvelope:
+        from cyelec.render.board_designs import render_board_designs_svg
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
@@ -1396,6 +1400,7 @@ def create_app(
         sel_svg = await anyio.to_thread.run_sync(
             render_selectivity_curves_svg, envelope.result.design
         )
+        boards_svg = await anyio.to_thread.run_sync(render_board_designs_svg, envelope.result)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, envelope.result.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, envelope.result)
         return SolvePreviewEnvelope(
@@ -1410,6 +1415,7 @@ def create_app(
             site_svg=site_svg,
             riser_svg=riser_svg,
             selectivity_svg=sel_svg,
+            boards_svg=boards_svg,
             details_svg=dt_svg,
         )
 
@@ -1551,6 +1557,7 @@ def create_app(
                 raise
             raise HTTPException(status_code=422, detail=_sanitize_client_error(exc)) from exc
 
+        from cyelec.render.board_designs import render_board_designs_svg
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
@@ -1572,6 +1579,7 @@ def create_app(
         site_svg = await anyio.to_thread.run_sync(render_site_plan_svg, p2)
         riser_svg = await anyio.to_thread.run_sync(render_riser_and_db_svg, p2)
         sel_svg = await anyio.to_thread.run_sync(render_selectivity_curves_svg, p2.design)
+        boards_svg = await anyio.to_thread.run_sync(render_board_designs_svg, p2)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, p2)
         store.record_usage(
@@ -1589,6 +1597,7 @@ def create_app(
             site_svg=site_svg,
             riser_svg=riser_svg,
             selectivity_svg=sel_svg,
+            boards_svg=boards_svg,
             details_svg=dt_svg,
         )
 

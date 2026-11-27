@@ -314,6 +314,47 @@ class RoomLumenCheck(BaseModel):
     compliant: bool
 
 
+class BoardModuleSlot(BaseModel):
+    """Individual physical DIN-rail or MCCB module slot inside a distribution board."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slot_start_m: int = Field(ge=1)
+    width_m: int = Field(ge=1, le=36)
+    kind: Literal[
+        "incomer",
+        "rcd_s",
+        "spd",
+        "pv_isol",
+        "feeder",
+        "rcbo",
+        "knx",
+        "ats",
+        "meter",
+        "spare",
+    ]
+    code: str
+    label: str
+    phase: Literal["L1", "L2", "L3", "3P", "N/A"] = "N/A"
+    circuit_id: str | None = None
+    rating_a: int | None = None
+    power_loss_w: float = Field(default=0.0, ge=0.0)
+
+
+class BoardCircuitLegendRow(BaseModel):
+    """Printable inside-door circuit directory row per BS 7671 Reg 514.9.1 / EAC inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    way_no: int = Field(ge=1)
+    rail_no: int = Field(ge=1)
+    circuit_id: str
+    phase: str
+    device_spec: str
+    cable_spec: str
+    description: str
+
+
 class DinRailRow(BaseModel):
     """Single horizontal DIN rail inside a physical distribution board enclosure."""
 
@@ -323,21 +364,41 @@ class DinRailRow(BaseModel):
     modules_used: int = Field(ge=0)
     modules_capacity: int = Field(ge=12)
     items: list[str] = Field(default_factory=list)
+    slots: list[BoardModuleSlot] = Field(default_factory=list)
 
 
 class DinRailBoardLayout(BaseModel):
-    """Physical 18 mm DIN-rail module schedule, enclosure sizing & selectivity cascade."""
+    """Physical 18 mm DIN-rail / MCCB panelboard schedule, IEC 61439 specs & door directory."""
 
     model_config = ConfigDict(extra="forbid")
 
     board_id: str
     floor: str
+    board_role: Literal[
+        "main",
+        "secondary_floor",
+        "secondary_pool",
+        "secondary_eps",
+        "secondary_functional",
+    ] = "main"
+    parent_board_id: str | None = None
+    standard_ref: str = "IEC 61439-3 / BS 7671 Reg 421.1.201"
+    ip_rating: str = "IP40 / IK07"
+    busbar_rating_a: int = Field(default=100, ge=40)
+    incoming_supply_spec: str = ""
+    enclosure_dims_mm: str = ""
+    terminal_bars_spec: str = ""
+    power_dissipation_w: float = Field(default=0.0, ge=0.0)
+    max_enclosure_dissipation_w: float = Field(default=80.0, gt=0.0)
+    thermal_pass: bool = True
+    phase_loads_a: dict[str, float] = Field(default_factory=dict)
     total_modules_used: int = Field(ge=0)
     spare_modules: int = Field(ge=0)
     total_modules_capacity: int = Field(ge=12)
     spare_pct: float = Field(ge=0.0)
     enclosure_spec: str
     rows: list[DinRailRow] = Field(default_factory=list)
+    door_legend: list[BoardCircuitLegendRow] = Field(default_factory=list)
     incoming_ipf_ka: float = Field(gt=0.0)
     min_device_icu_ka: float = Field(gt=0.0)
     selectivity_pass: bool = True

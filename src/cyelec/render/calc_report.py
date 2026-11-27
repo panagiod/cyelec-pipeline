@@ -241,6 +241,27 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
                 f"**{b.selectivity_type.upper()}** |"
             )
 
+    if result.din_rail_boards:
+        lines.extend(
+            [
+                "",
+                "## 4d. Main & Secondary Distribution Board Designs (IEC 61439 / E-204)",
+                "",
+                "| Board | Role | Parent | Standard | Dims (mm) | IP | Busbar | "
+                "Ways Used / Cap | Thermal P_loss / P_max (W) |",
+                "| --- | --- | --- | --- | --- | :---: | ---: | :---: | :---: |",
+            ]
+        )
+        for bd in result.din_rail_boards:
+            lines.append(
+                f"| `{bd.board_id}` ({bd.floor}) | {bd.board_role} | "
+                f"{bd.parent_board_id or 'EAC Origin'} | {bd.standard_ref} | "
+                f"{bd.enclosure_dims_mm} | {bd.ip_rating} | {bd.busbar_rating_a} A | "
+                f"{bd.total_modules_used}/{bd.total_modules_capacity}M ({bd.spare_pct:.0f}% sp) | "
+                f"{bd.power_dissipation_w:.1f}/{bd.max_enclosure_dissipation_w:.0f} "
+                f"({'PASS' if bd.thermal_pass else '**FAIL**'}) |"
+            )
+
     if result.lumen_checks:
         lines.extend(
             [
@@ -822,6 +843,29 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
       )
       + '</tbody></table></section>'
   ]) if (result.selectivity_analysis and result.selectivity_analysis.boards) else ''}
+
+  {''.join([
+      '<section><h2>4d. Main &amp; Secondary Distribution Board Designs (IEC 61439 / E-204)</h2>'
+      '<table><thead><tr><th>Board</th><th>Role</th><th>Parent</th><th>Standard</th>'
+      '<th>Dimensions</th><th class="c">IP</th><th class="r">Busbar</th>'
+      '<th class="c">Modules (Spare)</th><th class="c">Thermal (W)</th></tr></thead><tbody>'
+      + ''.join(
+          f'<tr><td><strong>{esc(bd.board_id)}</strong> <small>({esc(bd.floor)})</small></td>'
+          f'<td>{esc(bd.board_role)}</td>'
+          f'<td>{esc(bd.parent_board_id or "EAC Origin")}</td>'
+          f'<td><small>{esc(bd.standard_ref)}</small></td>'
+          f'<td><small>{esc(bd.enclosure_dims_mm)}</small></td>'
+          f'<td class="c">{esc(bd.ip_rating)}</td>'
+          f'<td class="r">{bd.busbar_rating_a} A</td>'
+          f'<td class="c">{bd.total_modules_used}/{bd.total_modules_capacity}M '
+          f'({bd.spare_pct:.0f}%)</td>'
+          f'<td class="c"><span class="badge '
+          f'{"badge-pass" if bd.thermal_pass else "badge-fail"}">'
+          f'{bd.power_dissipation_w:.1f}/{bd.max_enclosure_dissipation_w:.0f}W</span></td></tr>'
+          for bd in result.din_rail_boards
+      )
+      + '</tbody></table></section>'
+  ]) if result.din_rail_boards else ''}
 
   {''.join([
       '<section><h2>4c. Point-by-Point 2D Photometric Illuminance &amp; Uniformity '

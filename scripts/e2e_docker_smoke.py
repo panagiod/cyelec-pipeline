@@ -91,10 +91,10 @@ def verify_zip_pack(zip_bytes: bytes) -> dict[str, Any]:
     bad_dxfs = {k: v for k, v in dxf_audit_errors.items() if v > 0}
     if bad_dxfs:
         raise AssertionError(f"Non-zero DXF audit errors in ZIP bundle: {bad_dxfs}")
-    if len(pdfs) < 11:
-        raise AssertionError(f"Expected >= 11 WeasyPrint PDFs in ZIP, found {len(pdfs)}: {pdfs}")
-    if len(dxfs) < 7:
-        raise AssertionError(f"Expected >= 7 DXF drawings in ZIP, found {len(dxfs)}: {dxfs}")
+    if len(pdfs) < 12:
+        raise AssertionError(f"Expected >= 12 WeasyPrint PDFs in ZIP, found {len(pdfs)}: {pdfs}")
+    if len(dxfs) < 8:
+        raise AssertionError(f"Expected >= 8 DXF drawings in ZIP, found {len(dxfs)}: {dxfs}")
 
     for required_name in (
         "eac_application_form.pdf",
@@ -107,6 +107,7 @@ def verify_zip_pack(zip_bytes: bytes) -> dict[str, Any]:
         "E201_single_line_diagram.pdf",
         "E202_riser_and_db_layout.pdf",
         "E203_selectivity_curves.pdf",
+        "E204_board_designs.pdf",
         "E301_details_notes.pdf",
         "tender_boq_10section.xlsx",
         "manifest.json",

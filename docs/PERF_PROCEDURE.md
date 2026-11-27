@@ -14,7 +14,7 @@ Hard safety ceilings automatically fail CI or block Production promotion. Aspira
 | **Tier 1 (CI Python)** | `villa_2storey` Turnkey Phase 2 solve / Phase 3 export | `< 5.0 s` / `< 10.0 s` | `< 2.0 s` / `< 4.0 s` | `~0.15 s` / `~1.65 s` | Every PR & `main` push |
 | **Tier 1 (CI Python)** | **48-Room / 4-Storey Large-CAD Stress Plan** (`720 m²`, 67 circuits, 757 devices) | `< 15.0 s` solve · `< 25.0 s` export · `0` stacked · `100%` lux · `0` DXF errors | `< 8.0 s` solve | `~3.02 s` solve / `~4.90 s` export | Every PR & `main` push |
 | **Tier 1 (CI Python)** | Python peak `tracemalloc` (`apartment_3bed`) & OS RSS delta (48-room stress) | `< 250 MiB` | `< 120 MiB` | `~2.9 MiB` / `~13.8 MiB` | Every PR & `main` push |
-| **Tier 2 (Docker `2 vCPU / 2 GiB`, zero swap)** | Single MIT binary `.dwg` + 11 WeasyPrint PDFs ZIP | `< 60.0 s` · `0` DXF errors | `< 25.0 s` | `~22.7 s` | `main` push + weekly + local |
+| **Tier 2 (Docker `2 vCPU / 2 GiB`, zero swap)** | Single MIT binary `.dwg` + 12 WeasyPrint PDFs ZIP | `< 60.0 s` · `0` DXF errors | `< 25.0 s` | `~22.7 s` | `main` push + weekly + local |
 | **Tier 2 (Docker `2 vCPU / 2 GiB`, zero swap)** | **4× Parallel Concurrent ZIP Downloads** | `0` OOM · `0` 5xx · p95 `< 90.0 s` · Peak RSS `< 1,500 MiB` | p95 `< 55.0 s` · RSS `< 1,100 MiB` | Enforced in CI | `main` push + weekly + local |
 | **Tier 2 (Docker `2 vCPU / 2 GiB`, zero swap)** | **30-Solve Warm Memory-Leak Soak** (`.dwg`/`.ifc`/benchmarks) | `30/30` HTTP 200 · RSS growth `< 150 MiB` | `< 60 MiB` | `~0.3 MiB` (Python) | `main` push + weekly + local |
 | **Tier 3 (Live EU Cloud Run)** | Cold-Start `/health` + first solve (`min_instances=0`) | `< 25.0 s` | `< 15.0 s` | Enforced per deploy | Every Staging & Prod deploy |

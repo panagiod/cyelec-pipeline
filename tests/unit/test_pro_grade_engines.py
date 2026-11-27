@@ -566,3 +566,101 @@ def test_uniformity_fill_downlights_refine_l_shaped_room_and_noop_when_compliant
     assert chk.achieved_lux >= chk.target_lux * 0.90
     assert chk.achieved_lux <= chk.target_lux * 1.40
 
+
+def test_main_and_secondary_board_designs_e204_and_e202_riser(tmp_path: Path) -> None:
+    """Verify Main & Secondary Board designs across single, 5-board turnkey & 200A commercial."""
+    import zipfile
+    from unittest.mock import patch
+
+    import ezdxf
+
+    from cyelec.models.electrical import DesignOverrides, ResidentialSystemsBrief
+    from cyelec.render.board_designs import (
+        export_board_designs_deliverables,
+        render_board_designs_dxf,
+        render_board_designs_svg,
+    )
+    from cyelec.render.eac_pack import build_submission_zip
+    from cyelec.render.riser_dxf import render_riser_and_db_svg
+
+    # 1. Single-floor residential -> 1 Main Board (DB1), no unnecessary secondary board
+    p2_apt = run_phase2_pipeline(generate_benchmark_dxf(BenchmarkTemplate.APARTMENT_3BED))
+    assert len(p2_apt.design.din_rail_boards) == 1
+    db1 = p2_apt.design.din_rail_boards[0]
+    assert db1.board_role == "main"
+    assert db1.parent_board_id is None
+    assert db1.thermal_pass is True
+    assert db1.power_dissipation_w > 0.0
+    assert len(db1.door_legend) >= len(p2_apt.design.circuits) + 2
+    for row in db1.rows:
+        assert sum(sl.width_m for sl in row.slots) == row.modules_capacity
+    apt_svg = render_board_designs_svg(p2_apt)
+    assert count_svg_text_bbox_overlaps(apt_svg) == 0
+    assert len(render_board_designs_dxf(p2_apt).audit().errors) == 0
+
+    # Verify E-204 PDF registration contract & ZIP packaging
+    def _fake_pdf(src: Path, dst: Path, **_kwargs: object) -> tuple[Path, None]:
+        assert src.name == "E204_board_designs.svg"
+        dst.write_bytes(b"%PDF-1.7\n" + b"0" * 2048)
+        return dst, None
+
+    with patch("cyelec.render.board_designs.export_svg_sheet_to_pdf", side_effect=_fake_pdf):
+        outs = export_board_designs_deliverables(p2_apt, tmp_path / "e204", export_pdf=True)
+    assert "e204_boards_dxf" in outs and "e204_boards_svg" in outs and "e204_boards_pdf" in outs
+    zp = build_submission_zip(outs, tmp_path / "e204.zip")
+    with zipfile.ZipFile(zp) as zf:
+        assert "E204_board_designs.pdf" in zf.namelist()
+        assert "E204_board_designs.dxf" in zf.namelist()
+
+    # 2. Multi-floor Turnkey Villa + Pool + PV/BESS/EPS -> 5 boards (MDB/GF/1F/POOL/EPS)
+    p2_v2 = run_phase2_pipeline(
+        generate_benchmark_dxf(BenchmarkTemplate.VILLA_2STOREY),
+        overrides=DesignOverrides(
+            pv_capacity_kva=10.0,
+            residential_brief=ResidentialSystemsBrief(
+                include_pool=True,
+                include_knx=True,
+                ev_charger_kw=11.0,
+                battery_storage_kwh=10.0,
+                include_eps_backup=True,
+            ),
+        ),
+    )
+    by_id = {bd.board_id: bd for bd in p2_v2.design.din_rail_boards}
+    assert set(by_id) == {"MDB", "DB-GF", "DB-1F", "DB-POOL", "DB-EPS"}
+    assert by_id["DB-POOL"].board_role == "secondary_pool"
+    assert "IP65" in by_id["DB-POOL"].ip_rating
+    assert by_id["DB-EPS"].board_role == "secondary_eps"
+    assert "EAC 2026 Storage EPS" in by_id["DB-EPS"].standard_ref
+    assert all(bd.thermal_pass for bd in by_id.values())
+
+    # E-202 riser must explicitly show MDB node & auxiliary secondary boards
+    e202_svg = render_riser_and_db_svg(p2_v2)
+    assert "MDB (80A MAIN)" in e202_svg or "MAIN (MDB)" in e202_svg
+    assert "DB-POOL" in e202_svg and "DB-EPS" in e202_svg
+    assert count_svg_text_bbox_overlaps(e202_svg) == 0
+
+    e204_v2_svg = render_board_designs_svg(p2_v2)
+    assert count_svg_text_bbox_overlaps(e204_v2_svg) == 0
+    e204_v2_dxf = tmp_path / "v2_e204.dxf"
+    render_board_designs_dxf(p2_v2).saveas(str(e204_v2_dxf))
+    assert len(ezdxf.readfile(str(e204_v2_dxf)).audit().errors) == 0
+
+    # 3. Commercial 200A CT-Metered Office -> IEC 61439-2 Form 2b MDB1 + SDB-LP + SDB-HVAC
+    p2_comm = run_phase2_pipeline(generate_benchmark_dxf(BenchmarkTemplate.COMMERCIAL_OFFICE))
+    comm_ids = {bd.board_id: bd for bd in p2_comm.design.din_rail_boards}
+    assert set(comm_ids) == {"MDB1", "SDB-LP", "SDB-HVAC"}
+    assert "IEC 61439-2 Form 2b" in comm_ids["MDB1"].standard_ref
+    assert comm_ids["MDB1"].busbar_rating_a >= 250
+    assert all(bd.thermal_pass for bd in comm_ids.values())
+    assert count_svg_text_bbox_overlaps(render_board_designs_svg(p2_comm)) == 0
+    assert len(render_board_designs_dxf(p2_comm).audit().errors) == 0
+
+    # 4. API preview returns E-204 boards_svg
+    app = create_app(db_path=tmp_path / "boards_api.db")
+    client = TestClient(app)
+    resp = client.post("/v1/solve/benchmark/villa_2storey", json={})
+    assert resp.status_code == 200
+    assert "E-204 MAIN" in resp.json()["boards_svg"]
+
+

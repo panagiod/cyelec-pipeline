@@ -59,8 +59,13 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
         dxfattribs={"layer": "E-RISER-PWR", "height": 2.9},
     ).set_placement((10.0, h_tot - 22.0))
 
+    has_multi_boards = len(boards) > 1
     floors = [sb.floor for sb in b.sub_boards] if b.sub_boards else ["GF"]
-    levels = ["SITE / STREET", *floors, "ROOF"]
+    levels = (
+        ["SITE / STREET", f"MAIN ({b.db_anchor.id})", *floors, "ROOF"]
+        if has_multi_boards
+        else ["SITE / STREET", *floors, "ROOF"]
+    )
     n_lvls = len(levels)
     y_bot, y_top = 24.0, h_tot - 36.0
     step_y = (y_top - y_bot) / max(n_lvls - 1, 1)
@@ -78,7 +83,13 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
     )
 
     sm_by_floor = {sm.floor: sm for sm in design.sub_mains}
+    aux_boards = [
+        bd
+        for bd in boards
+        if bd.board_role in ("secondary_pool", "secondary_eps", "secondary_functional")
+    ]
     tier_short = eac.recommended_supply_tier.split("(")[0].strip()
+    first_hab_idx = 2 if has_multi_boards else 1
     for idx, lvl in enumerate(levels):
         ly = y_bot + idx * step_y
         msp.add_line((10.0, ly), (204.0, ly), dxfattribs={"layer": "E-DIN-SPARE"})
@@ -97,6 +108,29 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
             msp.add_text(
                 "EARTH ROD/RING", dxfattribs={"layer": "E-RISER-EARTHING", "height": 2.0}
             ).set_placement((earth_x - 18.0, ly + 4.0))
+        elif lvl.startswith("MAIN ("):
+            mdb_lbl = f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A MAIN)"
+            msp.add_lwpolyline(
+                [
+                    (pwr_x - 24, ly + 2),
+                    (pwr_x + 30, ly + 2),
+                    (pwr_x + 30, ly + 11),
+                    (pwr_x - 24, ly + 11),
+                ],
+                close=True,
+                dxfattribs={"layer": "E-RISER-PWR"},
+            )
+            msp.add_text(
+                mdb_lbl[:30], dxfattribs={"layer": "E-RISER-PWR", "height": 2.0}
+            ).set_placement((pwr_x - 22.0, ly + 5.0))
+            if aux_boards:
+                aux_lbl = "AUX: " + ", ".join(bd.board_id for bd in aux_boards)
+                msp.add_text(
+                    aux_lbl[:34], dxfattribs={"layer": "E-RISER-PV", "height": 1.8}
+                ).set_placement((elv_x - 18.0, ly + 5.0))
+            msp.add_text(
+                "MET / 16mm2 MEC", dxfattribs={"layer": "E-RISER-EARTHING", "height": 1.9}
+            ).set_placement((earth_x - 16.0, ly + 5.0))
         elif lvl == "ROOF":
             pv_txt = (
                 f"PV {b.pv_capacity_kva:g}kVA + DC/AC ISOL"
@@ -112,11 +146,12 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
                 ).set_placement((earth_x - 24.0, ly + 3.0))
         else:
             sm = sm_by_floor.get(lvl)
-            lbl = (
-                f"{sm.board_id} ({sm.cable_mm2:g}mm2, {sm.breaker_in_a}A)"
-                if sm
-                else f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A)"
-            )
+            if sm:
+                lbl = f"{sm.board_id} ({sm.cable_mm2:g}mm2, {sm.breaker_in_a}A)"
+            elif has_multi_boards and aux_boards:
+                lbl = ", ".join(bd.board_id for bd in aux_boards[:2])
+            else:
+                lbl = f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A)"
             msp.add_lwpolyline(
                 [
                     (pwr_x - 22, ly + 2),
@@ -130,12 +165,12 @@ def render_riser_and_db_dxf(result: Phase2DesignResult | ElectricalDesignResult)
             msp.add_text(
                 lbl[:30], dxfattribs={"layer": "E-RISER-PWR", "height": 2.0}
             ).set_placement((pwr_x - 20.0, ly + 5.0))
-            elv_lbl = "9U RACK + ALARM + NVR" if idx == 1 else f"WIFI AP + DATA ({lvl})"
+            elv_lbl = "9U RACK + ALARM + NVR" if idx == first_hab_idx else f"WIFI AP + DATA ({lvl})"
             msp.add_text(elv_lbl, dxfattribs={"layer": "E-RISER-ELV", "height": 2.0}).set_placement(
                 (elv_x - 16.0, ly + 5.0)
             )
             msp.add_text(
-                "MET / 10mm2 BOND" if idx == 1 else "PE RISER",
+                "MET / 10mm2 BOND" if idx == first_hab_idx else "PE RISER",
                 dxfattribs={"layer": "E-RISER-EARTHING", "height": 1.9},
             ).set_placement((earth_x - 14.0, ly + 5.0))
 
@@ -249,14 +284,24 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
     b = design.building
     eac = design.eac_compliance
     boards = design.din_rail_boards
+    has_multi_boards = len(boards) > 1
     floors = [sb.floor for sb in b.sub_boards] if b.sub_boards else ["GF"]
-    levels = ["SITE / STREET", *floors, "ROOF"]
+    levels = (
+        ["SITE / STREET", f"MAIN ({b.db_anchor.id})", *floors, "ROOF"]
+        if has_multi_boards
+        else ["SITE / STREET", *floors, "ROOF"]
+    )
     sm_by_floor = {sm.floor: sm for sm in design.sub_mains}
+    aux_boards = [
+        bd
+        for bd in boards
+        if bd.board_role in ("secondary_pool", "secondary_eps", "secondary_functional")
+    ]
     tier_short = eac.recommended_supply_tier.split("(")[0].strip()
 
     # Pre-compute exact right-pane height so cards never clip at the bottom
     board_blocks: list[tuple[DinRailBoardLayout, list[str], float]] = []
-    total_boards_h = 112.0
+    total_boards_h = 128.0
     for brd in boards:
         sel_full = (
             f"Ipf={brd.incoming_ipf_ka:.1f} kA <= Icu={brd.min_device_icu_ka:.0f} kA | "
@@ -268,7 +313,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         total_boards_h += bh + 16.0
 
     svg_w = 1190
-    svg_h = int(max(760, total_boards_h + 24.0))
+    svg_h = int(max(760, total_boards_h + 30.0))
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
@@ -280,9 +325,9 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         "    .cy-e202 .hdr { font-size: 15px; font-weight: 700; fill: #1b365d; }",
         "    .cy-e202 .sub { font-size: 10px; fill: #4a5568; }",
         "    .cy-e202 .sec { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
-        "    .cy-e202 .lbl { font-size: 9px; font-weight: 700; }",
-        "    .cy-e202 .wlbl { font-size: 8.5px; font-weight: 700; fill: #ffffff; }",
-        "    .cy-e202 .txt { font-size: 8.7px; fill: #2d3748; }",
+        "    .cy-e202 .lbl { font-size: 8.6px; font-weight: 700; }",
+        "    .cy-e202 .wlbl { font-size: 8.3px; font-weight: 700; fill: #ffffff; }",
+        "    .cy-e202 .txt { font-size: 8.5px; fill: #2d3748; }",
         "  </style>",
         f'  <rect x="0" y="0" width="{svg_w}" height="{svg_h}" fill="#ffffff" />',
         (
@@ -296,7 +341,8 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         (
             f'  <text x="26" y="55" class="sub">Supply: {esc(eac.recommended_supply_tier)} | '
             f"Earthing: {esc(design.earthing_system.value)} | "
-            f"Ipf: {design.prospective_fault_current_ka:.1f} kA | Boards: {len(boards)}</text>"
+            f"Ipf: {design.prospective_fault_current_ka:.1f} kA | Boards: {len(boards)} "
+            "(See E-204 for Full Module Elevations &amp; Door Schedules)</text>"
         ),
         f'  <line x1="12" y1="66" x2="{svg_w - 12}" y2="66" stroke="#cbd5e0" stroke-width="1.5" />',
         (
@@ -312,7 +358,8 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
     y_top, y_bot = 135.0, min(680.0, svg_h - 60.0)
     step_y = (y_bot - y_top) / max(len(levels) - 1, 1)
     y_elv_top = y_bot - max(len(levels) - 2, 1) * step_y - 14.0
-    pwr_x, elv_x, ear_x = 185.0, 355.0, 488.0
+    pwr_x, elv_x, ear_x = 180.0, 356.0, 496.0
+    first_hab_idx = 2 if has_multi_boards else 1
 
     # Vertical riser bus lines (ELV stops cleanly at highest habitable floor, not dangling)
     parts.append(
@@ -332,7 +379,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         # Bottom-up rendering (SITE at bottom, ROOF at top)
         ly = y_bot - idx * step_y
         parts.append(
-            f'  <line x1="26" y1="{ly:.1f}" x2="544" y2="{ly:.1f}" '
+            f'  <line x1="26" y1="{ly:.1f}" x2="548" y2="{ly:.1f}" '
             'stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4,4" />'
         )
         parts.append(
@@ -340,7 +387,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
         )
         if lvl == "SITE / STREET":
             parts.append(
-                f'  <rect x="{pwr_x - 66}" y="{ly - 26}" width="132" height="24" '
+                f'  <rect x="{pwr_x - 68}" y="{ly - 26}" width="136" height="24" '
                 'rx="4" fill="#c53030" />'
             )
             parts.append(
@@ -348,7 +395,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 f"EAC METER ({esc(tier_short)})</text>"
             )
             parts.append(
-                f'  <rect x="{elv_x - 46}" y="{ly - 26}" width="92" height="24" '
+                f'  <rect x="{elv_x - 50}" y="{ly - 26}" width="100" height="24" '
                 'rx="4" fill="#2b6cb0" />'
             )
             parts.append(
@@ -363,6 +410,38 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 f'  <text x="{ear_x}" y="{ly - 11}" text-anchor="middle" class="wlbl">'
                 "EARTH ELECTRODE</text>"
             )
+        elif lvl.startswith("MAIN ("):
+            mdb_lbl = f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A MAIN)"
+            parts.append(
+                f'  <rect x="{pwr_x - 72}" y="{ly - 26}" width="144" height="24" rx="4" '
+                'fill="#1b365d" stroke="#0f172a" stroke-width="1.6" />'
+            )
+            parts.append(
+                f'  <text x="{pwr_x}" y="{ly - 11}" text-anchor="middle" class="wlbl">'
+                f"{esc(mdb_lbl)}</text>"
+            )
+            if aux_boards:
+                aux_lbl = " / ".join(bd.board_id for bd in aux_boards[:3])
+                parts.append(
+                    f'  <line x1="{pwr_x + 72}" y1="{ly - 14}" x2="{elv_x - 66}" y2="{ly - 14}" '
+                    'stroke="#0f766e" stroke-width="2" stroke-dasharray="4,2" />'
+                )
+                parts.append(
+                    f'  <rect x="{elv_x - 66}" y="{ly - 26}" width="132" height="24" rx="4" '
+                    'fill="#f0fdfa" stroke="#0f766e" stroke-width="1.4" />'
+                )
+                parts.append(
+                    f'  <text x="{elv_x}" y="{ly - 11}" text-anchor="middle" '
+                    f'class="lbl" style="fill:#0f766e;">{esc(aux_lbl)}</text>'
+                )
+            parts.append(
+                f'  <rect x="{ear_x - 48}" y="{ly - 26}" width="96" height="24" rx="4" '
+                'fill="#f0fff4" stroke="#2f855a" stroke-width="1.4" />'
+            )
+            parts.append(
+                f'  <text x="{ear_x}" y="{ly - 11}" text-anchor="middle" '
+                'class="lbl" style="fill:#22543d;">MET / 16mm² MEC</text>'
+            )
         elif lvl == "ROOF":
             pv_s = (
                 f"PV {b.pv_capacity_kva:g}kVA + ISOL"
@@ -370,7 +449,7 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 else "PV CONDUIT + SOLAR WH"
             )
             parts.append(
-                f'  <rect x="{pwr_x - 66}" y="{ly - 24}" width="132" height="22" '
+                f'  <rect x="{pwr_x - 68}" y="{ly - 24}" width="136" height="22" '
                 'rx="4" fill="#d69e2e" />'
             )
             parts.append(
@@ -392,29 +471,30 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             )
         else:
             sm = sm_by_floor.get(lvl)
-            p_lbl = (
-                f"{sm.board_id} ({sm.cable_mm2:g}mm² {sm.breaker_in_a}A)"
-                if sm
-                else f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A)"
-            )
+            if sm:
+                p_lbl = f"{sm.board_id} ({sm.cable_mm2:g}mm² {sm.breaker_in_a}A)"
+            elif has_multi_boards and aux_boards:
+                p_lbl = " + ".join(bd.board_id for bd in aux_boards[:2])
+            else:
+                p_lbl = f"{b.db_anchor.id} ({eac.recommended_main_breaker_a}A)"
             parts.append(
-                f'  <rect x="{pwr_x - 68}" y="{ly - 26}" width="136" height="24" rx="4" '
+                f'  <rect x="{pwr_x - 72}" y="{ly - 26}" width="144" height="24" rx="4" '
                 'fill="#fff5f5" stroke="#c53030" stroke-width="1.6" />'
             )
             parts.append(
                 f'  <text x="{pwr_x}" y="{ly - 11}" text-anchor="middle" '
                 f'class="lbl" style="fill:#9b2c2c;">{esc(p_lbl)}</text>'
             )
-            e_lbl = "9U RACK + NVR + ALARM" if idx == 1 else f"WIFI AP + DATA ({lvl})"
+            e_lbl = "9U RACK + NVR + ALARM" if idx == first_hab_idx else f"WIFI AP + DATA ({lvl})"
             parts.append(
-                f'  <rect x="{elv_x - 58}" y="{ly - 26}" width="116" height="24" rx="4" '
+                f'  <rect x="{elv_x - 68}" y="{ly - 26}" width="136" height="24" rx="4" '
                 'fill="#ebf8ff" stroke="#2b6cb0" stroke-width="1.4" />'
             )
             parts.append(
                 f'  <text x="{elv_x}" y="{ly - 11}" text-anchor="middle" '
                 f'class="lbl" style="fill:#2c5282;">{esc(e_lbl)}</text>'
             )
-            g_lbl = "MET / 10mm² BOND" if idx == 1 else "PE RISER 10mm²"
+            g_lbl = "MET / 10mm² BOND" if idx == first_hab_idx else "PE RISER 10mm²"
             parts.append(
                 f'  <rect x="{ear_x - 48}" y="{ly - 26}" width="96" height="24" rx="4" '
                 'fill="#f0fff4" stroke="#2f855a" stroke-width="1.4" />'
@@ -424,10 +504,10 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
                 f'class="lbl" style="fill:#22543d;">{esc(g_lbl)}</text>'
             )
 
-    # Right Pane: Physical 18mm DIN-Rail DB Elevations
+    # Right Pane: Physical 18mm DIN-Rail DB Summary (full scaled elevations on Sheet E-204)
     parts.append(
         '  <text x="580" y="90" class="sec">'
-        "B. PHYSICAL 18mm DIN-RAIL DB ELEVATION &amp; SELECTIVITY CASCADE</text>"
+        "B. MAIN &amp; SECONDARY DB SUMMARY (FULL ELEVATIONS ON SHEET E-204)</text>"
     )
     y_b = 108.0
     for brd, sel_lines, box_h in board_blocks:
@@ -435,13 +515,16 @@ def render_riser_and_db_svg(result: Phase2DesignResult | ElectricalDesignResult)
             f'  <rect x="580" y="{y_b:.1f}" width="584" height="{box_h:.1f}" rx="6" '
             'fill="#f8fafc" stroke="#cbd5e0" stroke-width="1.5" />'
         )
+        parent_tag = f" <- {brd.parent_board_id}" if brd.parent_board_id else " [MAIN]"
         parts.append(
             f'  <text x="594" y="{y_b + 19:.1f}" class="sec">'
-            f"{esc(brd.board_id)} ({esc(brd.floor)}) — {brd.total_modules_used}M / "
-            f"{brd.total_modules_capacity}M ({brd.spare_pct:.0f}% spare)</text>"
+            f"{esc(brd.board_id)} ({esc(brd.floor)}){esc(parent_tag)} — "
+            f"{brd.total_modules_used}M / {brd.total_modules_capacity}M "
+            f"({brd.spare_pct:.0f}% spare)</text>"
         )
         parts.append(
-            f'  <text x="594" y="{y_b + 35:.1f}" class="txt">{esc(brd.enclosure_spec)}</text>'
+            f'  <text x="594" y="{y_b + 35:.1f}" class="txt">'
+            f"{esc(brd.enclosure_spec)} | {esc(brd.enclosure_dims_mm)}</text>"
         )
         sel_col = "#2f855a" if brd.selectivity_pass else "#c53030"
         sy = y_b + 50.0

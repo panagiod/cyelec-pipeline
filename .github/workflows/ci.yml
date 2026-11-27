@@ -155,7 +155,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[api,dev]"
 
-      - name: Run Docker Container Integration Smoke (MIT .dwg + .ifc + 11 WeasyPrint PDFs)
+      - name: Run Docker Container Integration Smoke (MIT .dwg + .ifc + 12 WeasyPrint PDFs)
         run: |
           CID="$(docker run -d --rm -p 127.0.0.1:18080:8080 \
             -e CYELEC_ENV=staging \
