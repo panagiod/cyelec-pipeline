@@ -156,9 +156,10 @@ def balance_three_phase_loads(
     mean_est = base_current_a + sum(c.design_current_ib_a for c in single_phase) / 3.0
     lpt_imbalance_pct = (lpt_spread / max(mean_est, 1e-6)) * 100.0
 
-    # For larger boards (n > 12), if deterministic 2-swap already achieves <= 0.5% imbalance
-    # (20x tighter than EAC's 10% limit) or <= 0.25 A spread, skip multi-second HiGHS proving.
-    if n > 12 and (lpt_spread <= 0.25 or lpt_imbalance_pct <= 0.5):
+    # For larger boards (n > 12), if deterministic 2-swap already achieves <= 1.0% imbalance
+    # (10x tighter than EAC's 10% limit) or <= 0.25 A spread, use the 100% deterministic
+    # CPU-speed-independent partition rather than a wall-clock-truncated MILP tree.
+    if n > 12 and (lpt_spread <= 0.25 or lpt_imbalance_pct <= 1.0):
         chosen_phases = lpt_phases
         solver_status = "optimal_fast_partition"
     else:
@@ -167,10 +168,14 @@ def balance_three_phase_loads(
         idx_imax = 3 * n
         idx_imin = 3 * n + 1
 
-        # Objective: minimize I_max - I_min
+        # Objective: minimize I_max - I_min + negligible deterministic lexicographic tie-breaker
         c_obj = np.zeros(num_vars, dtype=float)
         c_obj[idx_imax] = 1.0
         c_obj[idx_imin] = -1.0
+        tie_scale = 1e-6 / max(float(n * n), 1.0)
+        for i in range(n):
+            for p in range(3):
+                c_obj[3 * i + p] = tie_scale * float((i + 1) * (p + 1))
 
         integrality = np.zeros(num_vars, dtype=int)
         integrality[: 3 * n] = 1  # binary x[i, p]
@@ -246,7 +251,7 @@ def balance_three_phase_loads(
             integrality=integrality,
             bounds=bounds,
             constraints=constraints,
-            options={"time_limit": 0.20, "mip_rel_gap": 1e-2},
+            options={"time_limit": 1.5, "mip_rel_gap": 1e-4},
         )
 
         if res.success and res.x is not None:
