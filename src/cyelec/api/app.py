@@ -169,10 +169,12 @@ class SolvePreviewEnvelope(BaseModel):
     floorplan_svg: str
     sld_svg: str
     lighting_svg: str = ""
+    lighting_heatmap_svg: str = ""
     power_svg: str = ""
     elv_svg: str = ""
     site_svg: str = ""
     riser_svg: str = ""
+    selectivity_svg: str = ""
     details_svg: str = ""
 
 
@@ -1207,6 +1209,7 @@ def create_app(
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.selectivity_svg import render_selectivity_curves_svg
         from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
         from cyelec.synth.benchmarks import generate_benchmark_dxf
@@ -1228,10 +1231,14 @@ def create_app(
             floorplan_svg=render_floorplan_svg(p2, discipline="combined"),
             sld_svg=render_sld_svg(p2.design),
             lighting_svg=render_floorplan_svg(p2, discipline="lighting"),
+            lighting_heatmap_svg=render_floorplan_svg(
+                p2, discipline="lighting", show_lux_heatmap=True
+            ),
             power_svg=render_floorplan_svg(p2, discipline="power"),
             elv_svg=render_floorplan_svg(p2, discipline="elv"),
             site_svg=render_site_plan_svg(p2),
             riser_svg=render_riser_and_db_svg(p2),
+            selectivity_svg=render_selectivity_curves_svg(p2.design),
             details_svg=render_details_notes_svg(p2),
         )
 
@@ -1310,7 +1317,9 @@ def create_app(
     @api.post("/v1/solve/dxf", response_model=SolveResponseEnvelope)
     async def solve_dxf_upload(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
+        file: Annotated[
+            UploadFile, File(description="Architectural .dxf, .dwg, .ifc, or vector .pdf plan")
+        ],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
@@ -1319,9 +1328,10 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".dwg", ".ifc"):
+        if suffix not in (".dxf", ".dwg", ".ifc", ".pdf"):
             raise HTTPException(
-                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+                status_code=400,
+                detail="Only .dxf, .dwg, .ifc, or vector .pdf uploads are supported.",
             )
 
         t0 = time.perf_counter()
@@ -1343,7 +1353,9 @@ def create_app(
     @api.post("/v1/solve/dxf/preview", response_model=SolvePreviewEnvelope)
     async def solve_dxf_preview(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
+        file: Annotated[
+            UploadFile, File(description="Architectural .dxf, .dwg, .ifc, or vector .pdf plan")
+        ],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
@@ -1352,6 +1364,7 @@ def create_app(
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.selectivity_svg import render_selectivity_curves_svg
         from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
 
@@ -1367,6 +1380,11 @@ def create_app(
         lt_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(envelope.result, discipline="lighting")
         )
+        lt_hm_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(
+                envelope.result, discipline="lighting", show_lux_heatmap=True
+            )
+        )
         pw_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(envelope.result, discipline="power")
         )
@@ -1375,6 +1393,9 @@ def create_app(
         )
         site_svg = await anyio.to_thread.run_sync(render_site_plan_svg, envelope.result)
         riser_svg = await anyio.to_thread.run_sync(render_riser_and_db_svg, envelope.result)
+        sel_svg = await anyio.to_thread.run_sync(
+            render_selectivity_curves_svg, envelope.result.design
+        )
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, envelope.result.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, envelope.result)
         return SolvePreviewEnvelope(
@@ -1383,17 +1404,21 @@ def create_app(
             floorplan_svg=fp_svg,
             sld_svg=sld_svg,
             lighting_svg=lt_svg,
+            lighting_heatmap_svg=lt_hm_svg,
             power_svg=pw_svg,
             elv_svg=elv_svg,
             site_svg=site_svg,
             riser_svg=riser_svg,
+            selectivity_svg=sel_svg,
             details_svg=dt_svg,
         )
 
     @api.post("/v1/solve/dxf/bundle")
     async def solve_dxf_bundle(
         request: Request,
-        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
+        file: Annotated[
+            UploadFile, File(description="Architectural .dxf, .dwg, .ifc, or vector .pdf plan")
+        ],
         overrides_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
@@ -1403,9 +1428,10 @@ def create_app(
         tid = _effective_tenant(request, x_tenant_id)
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".dwg", ".ifc"):
+        if suffix not in (".dxf", ".dwg", ".ifc", ".pdf"):
             raise HTTPException(
-                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+                status_code=400,
+                detail="Only .dxf, .dwg, .ifc, or vector .pdf uploads are supported.",
             )
 
         t0 = time.perf_counter()
@@ -1528,6 +1554,7 @@ def create_app(
         from cyelec.render.details_dxf import render_details_notes_svg
         from cyelec.render.floorplan_svg import render_floorplan_svg
         from cyelec.render.riser_dxf import render_riser_and_db_svg
+        from cyelec.render.selectivity_svg import render_selectivity_curves_svg
         from cyelec.render.site_plan_dxf import render_site_plan_svg
         from cyelec.render.sld import render_sld_svg
 
@@ -1535,12 +1562,16 @@ def create_app(
         lt_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(p2, discipline="lighting")
         )
+        lt_hm_svg = await anyio.to_thread.run_sync(
+            lambda: render_floorplan_svg(p2, discipline="lighting", show_lux_heatmap=True)
+        )
         pw_svg = await anyio.to_thread.run_sync(
             lambda: render_floorplan_svg(p2, discipline="power")
         )
         elv_svg = await anyio.to_thread.run_sync(lambda: render_floorplan_svg(p2, discipline="elv"))
         site_svg = await anyio.to_thread.run_sync(render_site_plan_svg, p2)
         riser_svg = await anyio.to_thread.run_sync(render_riser_and_db_svg, p2)
+        sel_svg = await anyio.to_thread.run_sync(render_selectivity_curves_svg, p2.design)
         sld_svg = await anyio.to_thread.run_sync(render_sld_svg, p2.design)
         dt_svg = await anyio.to_thread.run_sync(render_details_notes_svg, p2)
         store.record_usage(
@@ -1552,10 +1583,12 @@ def create_app(
             floorplan_svg=fp_svg,
             sld_svg=sld_svg,
             lighting_svg=lt_svg,
+            lighting_heatmap_svg=lt_hm_svg,
             power_svg=pw_svg,
             elv_svg=elv_svg,
             site_svg=site_svg,
             riser_svg=riser_svg,
+            selectivity_svg=sel_svg,
             details_svg=dt_svg,
         )
 
@@ -1824,7 +1857,9 @@ def create_app(
     async def create_project_revision_dxf(
         request: Request,
         project_id: str,
-        file: Annotated[UploadFile, File(description="Architectural .dxf, .dwg, or .ifc plan")],
+        file: Annotated[
+            UploadFile, File(description="Architectural .dxf, .dwg, .ifc, or vector .pdf plan")
+        ],
         overrides_json: Annotated[str | None, Form()] = None,
         layer_mapping_json: Annotated[str | None, Form()] = None,
         building_type: Annotated[BuildingType | None, Form()] = None,
@@ -1832,7 +1867,7 @@ def create_app(
         notes: Annotated[str, Form()] = "",
         x_tenant_id: Annotated[str, Header(alias="X-Tenant-ID")] = "anonymous",
     ) -> RevisionRecord:
-        """Upload a DXF/DWG/IFC revision, carry forward Pass-2 engineer overrides, and persist."""
+        """Upload a DXF/DWG/IFC/vector-PDF revision, carry forward overrides, and persist."""
         tid = _effective_tenant(request, x_tenant_id)
         safe_pid = _validate_safe_id(project_id, "project_id")
         if store.get_project(tid, safe_pid) is None:
@@ -1840,9 +1875,10 @@ def create_app(
 
         filename = file.filename or "upload.dxf"
         suffix = Path(filename).suffix.lower()
-        if suffix not in (".dxf", ".dwg", ".ifc"):
+        if suffix not in (".dxf", ".dwg", ".ifc", ".pdf"):
             raise HTTPException(
-                status_code=400, detail="Only .dxf, .dwg, or .ifc uploads are supported."
+                status_code=400,
+                detail="Only .dxf, .dwg, .ifc, or vector .pdf uploads are supported.",
             )
 
         t0 = time.perf_counter()

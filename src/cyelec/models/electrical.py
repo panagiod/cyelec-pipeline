@@ -289,7 +289,7 @@ class PvStorageEngineeringResult(BaseModel):
 
 
 class RoomLumenCheck(BaseModel):
-    """CIBSE / BS EN 12464-1 Lumen Method room photometric verification record."""
+    """Point-by-point 2D grid + CIBSE / BS EN 12464-1 photometric verification record."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -303,6 +303,12 @@ class RoomLumenCheck(BaseModel):
     lumens_per_fixture: int = Field(gt=0)
     target_lux: int = Field(gt=0)
     achieved_lux: float = Field(ge=0.0)
+    min_lux: float | None = Field(default=None, ge=0.0)
+    max_lux: float | None = Field(default=None, ge=0.0)
+    uniformity_u0: float | None = Field(default=None, ge=0.0, le=1.0)
+    u0_target: float = Field(default=0.40, ge=0.0, le=1.0)
+    u0_compliant: bool = True
+    grid_points_evaluated: int = Field(default=0, ge=0)
     utilization_factor: float = Field(gt=0.0, le=1.0)
     maintenance_factor: float = Field(gt=0.0, le=1.0)
     compliant: bool
@@ -403,6 +409,9 @@ class CircuitSpec(BaseModel):
     nominal_voltage_v: float = Field(default=230.0, gt=0.0)
     is_three_phase: bool = False
     length_m: float = Field(gt=0.0)
+    electrical_path_length_m: float | None = Field(default=None, gt=0.0)
+    distributed_vd_factor: float | None = Field(default=None, gt=0.0, le=1.0)
+    worst_case_node_id: str | None = None
     installation_method: Literal["B", "C"] = "B"
     insulation_type: Literal["pvc_70c", "xlpe_90c"] = "pvc_70c"
     ambient_temp_c: int = Field(default=40, ge=10, le=70)
@@ -418,7 +427,7 @@ class CircuitSpec(BaseModel):
 
 
 class SolvedCircuit(BaseModel):
-    """Fully verified BS 7671 final circuit calculation record."""
+    """Fully verified BS 7671 & IEC 60909 final circuit calculation record."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -427,8 +436,11 @@ class SolvedCircuit(BaseModel):
     breaker_in_a: int
     breaker_curve: BreakerCurve
     device_label: str
+    vendor_catalog_ref: str = ""
     cable_mm2: float
     cpc_mm2: float
+    electrical_path_length_m: float | None = None
+    worst_case_node_id: str | None = None
     ca: float
     cg: float
     ci: float
@@ -451,10 +463,49 @@ class SolvedCircuit(BaseModel):
     cpc_min_mm2: float
     cpc_adiabatic_pass: bool
     live_adiabatic_pass: bool = True
+    ik1_min_a: float | None = None
+    ipe_min_a: float | None = None
+    magnetic_trip_max_a: float | None = None
+    instantaneous_trip_pass: bool = True
     recommended_containment: str = "20mm PVC"
     overall_pass: bool
     upsize_reasons: list[str] = Field(default_factory=list)
     flags: list[ReviewFlag] = Field(default_factory=list)
+
+
+class BoardFaultAndSelectivity(BaseModel):
+    """IEC 60909 short-circuit fault profile & upstream-downstream selectivity per board."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    board_id: str
+    parent_board_id: str | None = None
+    upstream_device_label: str
+    downstream_max_device_label: str
+    ik3_max_ka: float = Field(gt=0.0)
+    ik1_min_ka: float = Field(gt=0.0)
+    device_icu_ka: float = Field(gt=0.0)
+    breaking_capacity_pass: bool
+    discrimination_limit_is_ka: float = Field(ge=0.0)
+    selectivity_type: Literal["total", "partial", "check_required"]
+    rcd_selectivity_pass: bool = True
+    vendor_coordination_ref: str = ""
+    note: str = ""
+
+
+class SelectivityAnalysisResult(BaseModel):
+    """Installation-wide IEC 60909 fault profile and time-current (I-t) selectivity summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    origin_ik3_max_ka: float = Field(gt=0.0)
+    origin_ik1_min_ka: float = Field(gt=0.0)
+    eac_main_fuse_a: int = Field(gt=0)
+    boards: list[BoardFaultAndSelectivity] = Field(default_factory=list)
+    all_breaking_capacity_pass: bool = True
+    all_instantaneous_trip_pass: bool = True
+    all_selectivity_pass: bool = True
+    standard_ref: str = "IEC 60909 / IEC 60898-1 / BS 7671 Reg 536.4"
 
 
 class SolvedSubMain(BaseModel):
@@ -580,6 +631,7 @@ class ElectricalDesignResult(BaseModel):
     din_rail_boards: list[DinRailBoardLayout] = Field(default_factory=list)
     lightning_risk: LightningRiskAssessment | None = None
     pv_storage_design: PvStorageEngineeringResult | None = None
+    selectivity_analysis: SelectivityAnalysisResult | None = None
     review_flags: list[ReviewFlag] = Field(default_factory=list)
     has_blockers: bool
     etek_signoff_required: bool = True

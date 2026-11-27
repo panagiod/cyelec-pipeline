@@ -56,6 +56,7 @@ def test_exact_match_golden_engineering_snapshot(
     assert inv["stacked_devices_lt_100mm"] == 0, f"{name}: stacked devices (<100mm) detected"
     assert inv["dxf_audit_errors"] == 0, f"{name}: ezdxf audit errors detected"
     assert inv["e201_subboard_overlaps"] == 0, f"{name}: overlapping SLD sub-board headers"
+    assert inv["svg_text_bbox_overlaps"] == 0, f"{name}: overlapping SVG floorplan text labels"
     assert inv["e301_scoped_css"] is True, f"{name}: E-301 missing scoped .cy-e301 CSS"
     assert inv["eac_html_has_literal_none"] is False, f"{name}: literal '>None<' in EAC HTML"
     assert actual["all_circuits_pass"] is True, f"{name}: failing BS 7671 circuit detected"

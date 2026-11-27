@@ -93,6 +93,16 @@ def classify_room_label(
         if seg in alias_lookup:
             exact_matches.append((len(seg), seg, alias_lookup[seg]))
     if exact_matches:
+        matched_types = {rt for _, _, rt in exact_matches}
+        if RoomType.KITCHEN in matched_types and RoomType.LIVING_ROOM in matched_types:
+            return RoomClassificationResult(
+                raw_label=raw_label,
+                cleaned_label=cleaned,
+                normalized_type=RoomType.KITCHEN_LIVING,
+                confidence=1.0,
+                matched_alias="kitchen+living",
+                method="tier1_exact",
+            )
         exact_matches.sort(key=lambda item: item[0], reverse=True)
         _, alias, rtype = exact_matches[0]
         return RoomClassificationResult(

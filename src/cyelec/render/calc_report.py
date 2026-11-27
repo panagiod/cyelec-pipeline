@@ -170,16 +170,17 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
         lines.append("")
 
     circuit_hdr = (
-        "| ID | Description | Ph | Topo | Ib (A) | Device | Cable/CPC (mm²) | "
-        "L (m) | Ca·Cg·Ci | Iz / Req (A) | ΔV (%) | EF Check | CPC Min (mm²) | Status |"
+        "| ID | Description | Ph | Topo | Ib (A) | Device (Cat. Ref) | Cable/CPC (mm²) | "
+        "L_mat / L_elec (m) | Ca·Cg·Ci | Iz / Req (A) | ΔV (%) | EF Check | "
+        "Ik1_min / Imag (A) | CPC Min (mm²) | Status |"
     )
     circuit_sep = (
         "| --- | --- | :---: | --- | ---: | --- | :---: | ---: | ---: | "
-        "---: | ---: | :---: | ---: | :---: |"
+        "---: | ---: | :---: | ---: | ---: | :---: |"
     )
     lines.extend(
         [
-            "## 4. BS 7671 Final Circuit Calculation Summary",
+            "## 4. BS 7671 Final Circuit Calculation Summary (Distributed Multi-Node)",
             "",
             circuit_hdr,
             circuit_sep,
@@ -197,13 +198,78 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
             )
         )
         status = "PASS" if c.overall_pass else "**FAIL**"
+        l_elec = (
+            c.electrical_path_length_m if c.electrical_path_length_m is not None else s.length_m
+        )
+        dev_str = (
+            f"{c.device_label} (`{c.vendor_catalog_ref}`)"
+            if c.vendor_catalog_ref
+            else c.device_label
+        )
+        ik_str = (
+            f"{c.ik1_min_a:.0f} / {c.magnetic_trip_max_a:.0f}"
+            if (c.ik1_min_a is not None and c.magnetic_trip_max_a is not None)
+            else "-"
+        )
         lines.append(
             f"| {s.circuit_id} | {s.description} | {c.phase.value} | {s.topology.value} | "
-            f"{s.design_current_ib_a:.2f} | {c.device_label} | "
-            f"{c.cable_mm2:g}/{c.cpc_mm2:g} | {s.length_m:.1f} | "
+            f"{s.design_current_ib_a:.2f} | {dev_str} | "
+            f"{c.cable_mm2:g}/{c.cpc_mm2:g} | {s.length_m:.1f} / {l_elec:.1f} | "
             f"{c.effective_derating:.3f} | {c.iz_derated_a:.1f}/{c.required_iz_a:.1f} | "
-            f"{c.voltage_drop_pct:.2f}% | {ef_str} | {c.cpc_min_mm2:.2f} | {status} |"
+            f"{c.voltage_drop_pct:.2f}% | {ef_str} | {ik_str} | {c.cpc_min_mm2:.2f} | {status} |"
         )
+
+    if result.selectivity_analysis is not None and result.selectivity_analysis.boards:
+        sel = result.selectivity_analysis
+        lines.extend(
+            [
+                "",
+                "## 4b. IEC 60909 Short-Circuit Profile & Time-Current Selectivity (E-203)",
+                "",
+                "| Board | Upstream Device | Downstream Max | Ik3_max / Ik1_min (kA) | "
+                "Icu (kA) | Is Limit (kA) | Vendor Ref | Selectivity |",
+                "| --- | --- | --- | ---: | ---: | ---: | --- | :---: |",
+            ]
+        )
+        for b in sel.boards:
+            lines.append(
+                f"| `{b.board_id}` | {b.upstream_device_label} | "
+                f"{b.downstream_max_device_label} | "
+                f"{b.ik3_max_ka:.2f} / {b.ik1_min_ka:.2f} | "
+                f"{b.device_icu_ka:g} ({'PASS' if b.breaking_capacity_pass else '**FAIL**'}) | "
+                f"{b.discrimination_limit_is_ka:.1f} | {b.vendor_coordination_ref or '-'} | "
+                f"**{b.selectivity_type.upper()}** |"
+            )
+
+    if result.lumen_checks:
+        lines.extend(
+            [
+                "",
+                "## 4c. Point-by-Point 2D Photometric Illuminance & Uniformity (BS EN 12464-1)",
+                "",
+                "| Room | Area (m²) | Fixtures | Target (lx) | E_avg (lx) | "
+                "E_min / E_max (lx) | U0 / Target | Grid Pts | Status |",
+                "| --- | ---: | :---: | ---: | ---: | ---: | ---: | ---: | :---: |",
+            ]
+        )
+        for lc in result.lumen_checks:
+            min_max = (
+                f"{lc.min_lux:.0f} / {lc.max_lux:.0f}"
+                if (lc.min_lux is not None and lc.max_lux is not None)
+                else "-"
+            )
+            u0_str = (
+                f"{lc.uniformity_u0:.2f} / {lc.u0_target:.2f}"
+                if lc.uniformity_u0 is not None
+                else "-"
+            )
+            p_st = "PASS" if (lc.compliant and lc.u0_compliant) else "CHECK"
+            lines.append(
+                f"| {lc.room_label} | {lc.area_m2:.1f} | "
+                f"{lc.luminaire_count} × {lc.watts_per_fixture:g}W | {lc.target_lux} | "
+                f"**{lc.achieved_lux:.0f}** | {min_max} | {u0_str} | "
+                f"{lc.grid_points_evaluated} | {p_st} |"
+            )
 
     lines.extend(
         [
@@ -304,6 +370,19 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         badge_cls = "badge-pass" if c.overall_pass else "badge-fail"
         status_txt = "PASS" if c.overall_pass else "FAIL"
         upsize_txt = ", ".join(c.upsize_reasons) if c.upsize_reasons else "-"
+        l_elec = (
+            c.electrical_path_length_m if c.electrical_path_length_m is not None else s.length_m
+        )
+        dev_html = (
+            f"{esc(c.device_label)}<br><small><code>{esc(c.vendor_catalog_ref)}</code></small>"
+            if c.vendor_catalog_ref
+            else esc(c.device_label)
+        )
+        ik_txt = (
+            f"{c.ik1_min_a:.0f}/{c.magnetic_trip_max_a:.0f}A"
+            if (c.ik1_min_a is not None and c.magnetic_trip_max_a is not None)
+            else "-"
+        )
         circuit_rows_html.append(
             "<tr>"
             f"<td><strong>{esc(s.circuit_id)}</strong></td>"
@@ -311,13 +390,13 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             f"<td class='c'>{esc(c.phase.value)}</td>"
             f"<td>{esc(s.topology.value)}</td>"
             f"<td class='r'>{s.design_current_ib_a:.2f}</td>"
-            f"<td>{esc(c.device_label)}</td>"
+            f"<td>{dev_html}</td>"
             f"<td class='c'>{c.cable_mm2:g} / {c.cpc_mm2:g}</td>"
-            f"<td class='r'>{s.length_m:.1f}</td>"
+            f"<td class='r'>{s.length_m:.1f} / {l_elec:.1f}</td>"
             f"<td class='r'>{c.ca:.2f} / {c.cg:.2f} / {c.ci:.2f}</td>"
             f"<td class='r'>{c.iz_derated_a:.1f} / {c.required_iz_a:.1f}</td>"
             f"<td class='r'>{c.voltage_drop_pct:.2f}%</td>"
-            f"<td class='c'>{esc(ef_str)}</td>"
+            f"<td class='c'>{esc(ef_str)}<br><small>{esc(ik_txt)}</small></td>"
             f"<td class='r'>{c.cpc_min_mm2:.2f}</td>"
             f"<td>{esc(upsize_txt)}</td>"
             f"<td class='c'><span class='badge {badge_cls}'>{status_txt}</span></td>"
@@ -704,15 +783,15 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
   {pv_storage_html}
 
   <section>
-    <h2>4. BS 7671 Final Circuit Calculations</h2>
+    <h2>4. BS 7671 Final Circuit Calculations (Distributed Multi-Node)</h2>
     <table>
       <thead>
         <tr>
           <th>ID</th><th>Description</th><th class="c">Ph</th><th>Topology</th>
-          <th class="r">Ib (A)</th><th>Device</th><th class="c">Cable/CPC (mm²)</th>
-          <th class="r">L (m)</th><th class="r">Ca / Cg / Ci</th>
+          <th class="r">Ib (A)</th><th>Device / Cat. Ref</th><th class="c">Cable/CPC (mm²)</th>
+          <th class="r">L_mat/L_el (m)</th><th class="r">Ca / Cg / Ci</th>
           <th class="r">Iz / Req (A)</th><th class="r">ΔV (%)</th>
-          <th class="c">Earth Fault</th><th class="r">CPC Min</th>
+          <th class="c">Earth Fault / Ik1</th><th class="r">CPC Min</th>
           <th>Upsize</th><th class="c">Status</th>
         </tr>
       </thead>
@@ -721,6 +800,55 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
       </tbody>
     </table>
   </section>
+
+  {''.join([
+      '<section><h2>4b. IEC 60909 Short-Circuit Profile &amp; Selectivity (E-203)</h2>'
+      '<table><thead><tr><th>Board</th><th>Upstream</th><th>Downstream Max</th>'
+      '<th class="r">Ik3 / Ik1 (kA)</th><th class="r">Icu (kA)</th>'
+      '<th class="r">Is Limit (kA)</th><th>Vendor Ref</th><th class="c">Selectivity</th>'
+      '</tr></thead><tbody>'
+      + ''.join(
+          f'<tr><td><strong>{esc(b.board_id)}</strong></td>'
+          f'<td>{esc(b.upstream_device_label)}</td>'
+          f'<td>{esc(b.downstream_max_device_label)}</td>'
+          f'<td class="r">{b.ik3_max_ka:.2f} / {b.ik1_min_ka:.2f}</td>'
+          f'<td class="r">{b.device_icu_ka:g}</td>'
+          f'<td class="r">{b.discrimination_limit_is_ka:.1f}</td>'
+          f'<td><small>{esc(b.vendor_coordination_ref or "-")}</small></td>'
+          f'<td class="c"><span class="badge '
+          f'{"badge-pass" if b.selectivity_type != "check_required" else "badge-warn"}">'
+          f'{esc(b.selectivity_type.upper())}</span></td></tr>'
+          for b in result.selectivity_analysis.boards
+      )
+      + '</tbody></table></section>'
+  ]) if (result.selectivity_analysis and result.selectivity_analysis.boards) else ''}
+
+  {''.join([
+      '<section><h2>4c. Point-by-Point 2D Photometric Illuminance &amp; Uniformity '
+      '(BS EN 12464-1)</h2>'
+      '<table><thead><tr><th>Room</th><th class="r">Area (m²)</th><th class="c">Fixtures</th>'
+      '<th class="r">Target (lx)</th><th class="r">E_avg (lx)</th>'
+      '<th class="r">E_min / E_max</th><th class="r">U0 / Target</th>'
+      '<th class="r">Grid Pts</th><th class="c">Status</th></tr></thead><tbody>'
+      + ''.join(
+          f'<tr><td>{esc(lc.room_label)}</td>'
+          f'<td class="r">{lc.area_m2:.1f}</td>'
+          f'<td class="c">{lc.luminaire_count} × {lc.watts_per_fixture:g}W</td>'
+          f'<td class="r">{lc.target_lux}</td>'
+          f'<td class="r"><strong>{lc.achieved_lux:.0f}</strong></td>'
+          f'<td class="r">'
+          f'{f"{lc.min_lux:.0f} / {lc.max_lux:.0f}" if lc.min_lux is not None else "-"}</td>'
+          f'<td class="r">'
+          f'{f"{lc.uniformity_u0:.2f}/{lc.u0_target:.2f}" if lc.uniformity_u0 is not None else "-"}'
+          '</td>'
+          f'<td class="r">{lc.grid_points_evaluated}</td>'
+          f'<td class="c"><span class="badge '
+          f'{"badge-pass" if (lc.compliant and lc.u0_compliant) else "badge-warn"}">'
+          f'{"PASS" if (lc.compliant and lc.u0_compliant) else "CHECK"}</span></td></tr>'
+          for lc in result.lumen_checks
+      )
+      + '</tbody></table></section>'
+  ]) if result.lumen_checks else ''}
 
   <section>
     <h2>5. ETEK Human Review Flags Register</h2>

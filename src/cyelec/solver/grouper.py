@@ -247,15 +247,21 @@ def _generate_board_circuits(
             )
         )
 
-    # 2. 32 A Socket Ring Finals (BS 7671 Appendix 15, <= 100 m²/ring)
+    # 2. 32 A Indoor Socket Ring Finals (BS 7671 Appendix 15, <= 100 m²/ring)
+    #    + Dedicated 16 A Outdoor / Veranda IP65 Socket Radial (45°C, 2.5 mm² — avoids
+    #      site-unrealistic 4.0 mm² upsizing of indoor BS 1363 ring finals!)
     kitchen_util_rooms: list[Room] = []
     general_socket_rooms: list[Room] = []
+    outdoor_socket_rooms: list[Room] = []
     for room in rooms:
         rt = tmpl_std.rooms[room.normalized_type]
         if rt.socket_group == "kitchen_utility":
             kitchen_util_rooms.append(room)
         elif rt.socket_group == "general":
-            general_socket_rooms.append(room)
+            if room.is_outdoor:
+                outdoor_socket_rooms.append(room)
+            else:
+                general_socket_rooms.append(room)
 
     if kitchen_util_rooms:
         ku_chunks = _chunk_by_max_area(kitchen_util_rooms, defaults.socket_ring_max_area_m2)
@@ -328,6 +334,41 @@ def _generate_board_circuits(
                     vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
                 )
             )
+
+    if outdoor_socket_rooms:
+        out_conn_w = round(min(3000.0, max(1200.0, 900.0 * len(outdoor_socket_rooms))), 1)
+        out_div_w = round(out_conn_w * 0.70, 1)
+        pf = defaults.socket_power_factor
+        out_ib = round(out_div_w / (u0 * pf), 2)
+        circuits.append(
+            CircuitSpec(
+                circuit_id=_next_id(),
+                board_id=board_id,
+                description=f"{floor_prefix}Outdoor / Veranda IP65 Socket Radial",
+                category=CircuitCategory.SOCKET_RADIAL,
+                topology=CircuitTopology.RADIAL,
+                room_ids=[r.id for r in outdoor_socket_rooms],
+                connected_load_w=out_conn_w,
+                diversity_factor=0.70,
+                diversified_load_w=out_div_w,
+                power_factor=pf,
+                design_current_ib_a=out_ib,
+                nominal_voltage_v=u0,
+                is_three_phase=False,
+                length_m=_estimate_radial_length_m(
+                    db, outdoor_socket_rooms, defaults.vertical_drop_allowance_m
+                ),
+                installation_method=method,
+                ambient_temp_c=_resolve_ambient_c(outdoor_socket_rooms, standards, overrides),
+                grouping_count=1,
+                preferred_curve=BreakerCurve.B,
+                min_breaker_in_a=16,
+                min_cable_mm2=2.5,
+                rcd_protected=True,
+                rcd_idn_ma=rcd_idn,
+                vd_limit_pct=eac_std.voltage_drop_limits_pct.power,
+            )
+        )
 
     # 3. Dedicated Cyprus Split A/C Radials (Curve C, 0.85 diversity — when hvac_mode=split_ac)
     brief = (
@@ -589,11 +630,15 @@ def generate_circuits(
         water_room = building.rooms[0]
         div_w = 3000.0
         ib = round(div_w / u0, 2)
+        base_wh_len = _estimate_radial_length_m(
+            primary_db, [water_room], defaults.vertical_drop_allowance_m
+        )
+        wh_roof_len = round(max(16.0, base_wh_len + 11.5), 2)
         circuits.append(
             CircuitSpec(
                 circuit_id=_next_id(),
                 board_id=primary_board_id,
-                description="Immersion / Solar Water Heater Booster",
+                description="Immersion / Solar Water Heater Booster (Roof Tank, 20A DP)",
                 category=CircuitCategory.WATER_HEATER,
                 topology=CircuitTopology.RADIAL,
                 room_ids=[water_room.id],
@@ -604,9 +649,7 @@ def generate_circuits(
                 design_current_ib_a=ib,
                 nominal_voltage_v=u0,
                 is_three_phase=False,
-                length_m=_estimate_radial_length_m(
-                    primary_db, [water_room], defaults.vertical_drop_allowance_m
-                ),
+                length_m=wh_roof_len,
                 installation_method=method,
                 ambient_temp_c=_resolve_ambient_c([water_room], standards, overrides),
                 grouping_count=1,

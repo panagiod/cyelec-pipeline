@@ -89,7 +89,7 @@ def test_w1_switching_legs_mounting_heights_and_cyprus_fixed_accessories(
     lums = [d for d in devs if d.device_type == DeviceType.LUMINAIRE]
     assert len(lums) >= len(p2.design.building.rooms)
     assert all((d.luminaire_wattage_w or 0.0) > 0.0 for d in lums)
-    assert all((d.target_lux or 0) >= 100 for d in lums)
+    assert all((d.target_lux or 0) >= 50 for d in lums)
 
     # 3. Cyprus wet-room & kitchen/water-heater fixed accessories
     mirrors = [d for d in devs if d.device_type == DeviceType.MIRROR_LIGHT]

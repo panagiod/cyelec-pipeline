@@ -141,10 +141,14 @@ def _evaluate_cable(
     thermal_pass = iz_a >= required_iz_a - 1e-9
 
     mv_a_m = _mv_per_a_per_m(entry, spec.is_three_phase)
-    effective_length_m = (
-        spec.length_m / 4.0 if spec.topology == CircuitTopology.RING_FINAL else spec.length_m
-    )
-    vd_v = (mv_a_m * spec.design_current_ib_a * effective_length_m) / 1000.0
+    if spec.electrical_path_length_m is not None:
+        effective_length_m = spec.electrical_path_length_m
+    else:
+        effective_length_m = (
+            spec.length_m / 4.0 if spec.topology == CircuitTopology.RING_FINAL else spec.length_m
+        )
+    vd_dist = spec.distributed_vd_factor if spec.distributed_vd_factor is not None else 1.0
+    vd_v = (mv_a_m * spec.design_current_ib_a * effective_length_m * vd_dist) / 1000.0
     vd_pct = (vd_v / spec.nominal_voltage_v) * 100.0
     vd_pass = vd_pct <= spec.vd_limit_pct + 1e-9
 
@@ -615,6 +619,11 @@ def solve_circuit(
             )
         )
 
+    from cyelec.solver.fault_selectivity import (
+        compute_circuit_fault_currents,
+        lookup_vendor_catalog_ref,
+    )
+
     assigned_phase = (
         PhaseAssignment.THREE_PHASE
         if eff_spec.is_three_phase
@@ -626,14 +635,52 @@ def solve_circuit(
         grouping_count=eff_spec.grouping_count,
     )
 
+    chosen_entry = cables_std.get_cable(chosen.cable_mm2)
+    is_xlpe_final = eff_spec.insulation_type == "xlpe_90c"
+    temp_mult_final = (
+        cables_std.constants.temp_resistance_multiplier_90c
+        if is_xlpe_final
+        else cables_std.constants.temp_resistance_multiplier_70c
+    )
+    eff_path_m = (
+        eff_spec.electrical_path_length_m
+        if eff_spec.electrical_path_length_m is not None
+        else (
+            eff_spec.length_m / 4.0
+            if eff_spec.topology == CircuitTopology.RING_FINAL
+            else eff_spec.length_m
+        )
+    )
+    ik1_min_a, ipe_min_a, mag_max_a, inst_pass = compute_circuit_fault_currents(
+        u0_v=eac_std.system_nominal.u0_v,
+        ze_or_ra_ohm=resolved_ze_ra,
+        earthing_system=earthing_system,
+        r1_mohm_m=chosen_entry.r20_mohm_per_m,
+        r2_mohm_m=cables_std.get_r20_mohm_per_m(chosen.cpc_mm2),
+        effective_length_m=eff_path_m,
+        temp_mult=temp_mult_final,
+        breaker_in_a=breaker_in_a,
+        curve=curve,
+    )
+    vendor_ref = lookup_vendor_catalog_ref(
+        breaker_in_a=breaker_in_a,
+        curve=curve,
+        rcd_protected=eff_spec.rcd_protected,
+        rcd_idn_ma=eff_spec.rcd_idn_ma,
+        is_three_phase=eff_spec.is_three_phase,
+    )
+
     return SolvedCircuit(
         spec=eff_spec,
         phase=assigned_phase,
         breaker_in_a=breaker_in_a,
         breaker_curve=curve,
         device_label=device_label,
+        vendor_catalog_ref=vendor_ref,
         cable_mm2=chosen.cable_mm2,
         cpc_mm2=chosen.cpc_mm2,
+        electrical_path_length_m=round(eff_path_m, 2),
+        worst_case_node_id=eff_spec.worst_case_node_id,
         ca=round(ca, 4),
         cg=round(cg, 4),
         ci=round(ci, 4),
@@ -658,6 +705,10 @@ def solve_circuit(
         cpc_min_mm2=round(chosen.cpc_min_mm2, 3),
         cpc_adiabatic_pass=chosen.cpc_adiabatic_pass,
         live_adiabatic_pass=chosen.live_adiabatic_pass,
+        ik1_min_a=ik1_min_a,
+        ipe_min_a=ipe_min_a,
+        magnetic_trip_max_a=mag_max_a,
+        instantaneous_trip_pass=inst_pass,
         recommended_containment=containment,
         overall_pass=chosen.all_pass,
         upsize_reasons=upsize_reasons,

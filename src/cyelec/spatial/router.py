@@ -612,6 +612,10 @@ def route_circuits(
                 else:
                     drop_m = max(0.3, (ceiling_mm - dev.mounting_height_mm) / 1000.0)
                     vertical_m += drop_m
+            # Cyprus rooftop solar water heater immersion tank sits on roof slab (~13-16 m run)
+            if spec.category == CircuitCategory.WATER_HEATER:
+                floors_above = max(1, len({r.floor for r in building.rooms}))
+                vertical_m += round(floors_above * (ceiling_mm / 1000.0) + 8.5, 2)
 
         circuit_edge_sets[spec.circuit_id] = used_edges
         for ekey in used_edges:

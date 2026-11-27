@@ -42,6 +42,7 @@ from cyelec.solver.boq import generate_boq
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
 from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circuits
+from cyelec.solver.network_solver import enrich_specs_with_distributed_network
 from cyelec.solver.residential_engineering import (
     compute_din_rail_layouts,
     compute_lightning_risk_iec62305,
@@ -332,7 +333,17 @@ def run_phase1_pipeline(
         etek_signoff_required=True,
     )
     din_rail_boards = compute_din_rail_layouts(result)
-    result = result.model_copy(update={"din_rail_boards": din_rail_boards})
+    from cyelec.solver.fault_selectivity import evaluate_fault_and_selectivity
+
+    selectivity_analysis, sel_flags = evaluate_fault_and_selectivity(result)
+    all_flags = [*result.review_flags, *sel_flags]
+    result = result.model_copy(
+        update={
+            "din_rail_boards": din_rail_boards,
+            "selectivity_analysis": selectivity_analysis,
+            "review_flags": all_flags,
+        }
+    )
     boq = generate_boq(
         result,
         standards,
@@ -483,9 +494,20 @@ def run_phase2_pipeline(
                 tier2_fallback=tier2_fallback,
             )
             spatial_flags.extend(ingest_flags)
+        elif suffix == ".pdf":
+            from cyelec.ingest.pdf_vector_ingest import ingest_vector_pdf
+
+            building, ingest_flags = ingest_vector_pdf(
+                source,
+                standards=standards,
+                project_name=project_name,
+                building_type=building_type,
+            )
+            spatial_flags.extend(ingest_flags)
         else:
             raise ValueError(
-                f"Unsupported architectural input format: '{suffix}' (use .dxf/.dwg/.ifc)"
+                f"Unsupported architectural input format: '{suffix}' "
+                "(use .dxf / .dwg / .ifc / vector .pdf)"
             )
     else:
         building = source
@@ -612,6 +634,11 @@ def run_phase2_pipeline(
             )
         )
 
+    # 4c. Solve distributed multi-node radial tree & Kirchhoff ring final network metrics
+    specs = enrich_specs_with_distributed_network(
+        building, specs, bound_devices, routed_circuits
+    )
+
     # 5. Feed true NetworkX routed lengths and precomputed specs into Phase 1 solvers
     design = run_phase1_pipeline(
         building,
@@ -719,6 +746,7 @@ def export_phase3_deliverables(
     from cyelec.render.pdf_export import export_html_to_pdf, export_svg_sheet_to_pdf
     from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
     from cyelec.render.riser_dxf import export_riser_and_db_deliverables
+    from cyelec.render.selectivity_svg import export_selectivity_deliverables
     from cyelec.render.site_plan_dxf import export_site_plan_deliverables
     from cyelec.render.sld import export_sld_deliverables
     from cyelec.render.tender_boq_xlsx import export_tender_boq_10section_xlsx
@@ -773,10 +801,17 @@ def export_phase3_deliverables(
         if dwg_ctx is not None:
             dwg_ctx.cleanup()
 
-    # Vector SVG Sheets: E-101 Lighting, E-102 Power, E-103 ELV, and E-100 Combined
+    # Vector SVG Sheets: E-101 Lighting (+ 2D Lux Heatmap), E-102 Power, E-103 ELV, E-100 Combined
     e101_svg_path = out_dir / "E101_lighting_layout.svg"
     e101_svg_path.write_text(render_floorplan_svg(result, discipline="lighting"), encoding="utf-8")
     outputs["e101_lighting_svg"] = e101_svg_path
+
+    e101_hm_path = out_dir / "E101_lighting_heatmap.svg"
+    e101_hm_path.write_text(
+        render_floorplan_svg(result, discipline="lighting", show_lux_heatmap=True),
+        encoding="utf-8",
+    )
+    outputs["e101_lighting_heatmap_svg"] = e101_hm_path
 
     e102_svg_path = out_dir / "E102_power_layout.svg"
     e102_svg_path.write_text(render_floorplan_svg(result, discipline="power"), encoding="utf-8")
@@ -816,6 +851,10 @@ def export_phase3_deliverables(
     # E-202 Vertical Riser Diagram & Physical 18mm DIN-Rail DB Elevation + Selectivity
     riser_out = export_riser_and_db_deliverables(result, out_dir)
     outputs.update(riser_out)
+
+    # E-203 Log-Log Time-Current (I-t) Selectivity & IEC 60909 Coordination Sheet
+    sel_out = export_selectivity_deliverables(result, out_dir, export_pdf=export_pdf)
+    outputs.update(sel_out)
 
     # E-301 Construction Details, Earthing/Meter/Wet-Zone Sections & General Notes
     details_out = export_details_notes(result, out_dir)

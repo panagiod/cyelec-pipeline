@@ -259,6 +259,8 @@ def _place_room_switch(
     room_doors: list[DoorOpening],
     valid_walls: list[_WallSegmentCandidate],
     wet_zone: RoomWetZones | None,
+    *,
+    indoor_union: BaseGeometry | None = None,
 ) -> tuple[Point2D, float]:
     """Place light switch on latch side of entry door (outside wet rooms; indoors for verandas)."""
     poly = Polygon([(p.x_mm, p.y_mm) for p in room.polygon_mm])
@@ -273,12 +275,27 @@ def _place_room_switch(
         sx = hx + dist * math.cos(rad)
         sy = hy + dist * math.sin(rad)
 
-        # For wet rooms & outdoor verandas with a doorway, offset 120 mm outward (indoor/corridor)
+        # For wet rooms & outdoor verandas with a doorway, offset 120 mm into the indoor side
         if room.is_wet_room or room.is_outdoor:
             nx, ny = -math.sin(rad), math.cos(rad)
             cand_a = Point(sx + 120.0 * nx, sy + 120.0 * ny)
             cand_b = Point(sx - 120.0 * nx, sy - 120.0 * ny)
-            chosen = cand_a if not poly.contains(cand_a) else cand_b
+            if indoor_union is not None and not indoor_union.is_empty:
+                a_in = indoor_union.contains(cand_a)
+                b_in = indoor_union.contains(cand_b)
+                if a_in and not b_in:
+                    chosen = cand_a
+                elif b_in and not a_in:
+                    chosen = cand_b
+                else:
+                    chosen = (
+                        cand_a
+                        if float(indoor_union.distance(cand_a))
+                        <= float(indoor_union.distance(cand_b))
+                        else cand_b
+                    )
+            else:
+                chosen = cand_a if not poly.contains(cand_a) else cand_b
             return (
                 Point2D(x_mm=round(float(chosen.x), 1), y_mm=round(float(chosen.y), 1)),
                 round(door.angle_deg % 360.0, 1),
@@ -293,11 +310,39 @@ def _place_room_switch(
         ):
             return cand_pt, round(door.angle_deg % 360.0, 1)
 
+    # For outdoor verandas without a hinged door symbol (e.g. sliding terrace doors),
+    # anchor the switch strictly indoors on the shared wall with the adjacent indoor room!
+    if room.is_outdoor and indoor_union is not None and not indoor_union.is_empty:
+        shared = boundary.intersection(indoor_union.buffer(80.0))
+        shared_lines = _extract_linestrings(shared)
+        if shared_lines:
+            best_seg = max(shared_lines, key=lambda ls: ls.length)
+            c0 = best_seg.coords[0]
+            c1 = best_seg.coords[-1]
+            seg_ang = round(math.degrees(math.atan2(c1[1] - c0[1], c1[0] - c0[0])) % 360.0, 1)
+            mid = best_seg.interpolate(0.35, normalized=True)
+            rad = math.radians(seg_ang)
+            nx, ny = -math.sin(rad), math.cos(rad)
+            cand_a = Point(mid.x + 140.0 * nx, mid.y + 140.0 * ny)
+            cand_b = Point(mid.x - 140.0 * nx, mid.y - 140.0 * ny)
+            chosen = (
+                cand_a
+                if float(indoor_union.distance(cand_a)) <= float(indoor_union.distance(cand_b))
+                else cand_b
+            )
+            return (
+                Point2D(x_mm=round(float(chosen.x), 1), y_mm=round(float(chosen.y), 1)),
+                seg_ang,
+            )
+
     if valid_walls:
-        pt = valid_walls[0].line.interpolate(0.15, normalized=True)
+        # Prefer interior partition walls over exterior window/railing walls when no door is matched
+        interior_walls = [w for w in valid_walls if not w.is_exterior]
+        chosen_wall = interior_walls[0] if interior_walls else valid_walls[0]
+        pt = chosen_wall.line.interpolate(0.18, normalized=True)
         return (
             Point2D(x_mm=round(float(pt.x), 1), y_mm=round(float(pt.y), 1)),
-            valid_walls[0].angle_deg,
+            chosen_wall.angle_deg,
         )
 
     c = room.centroid_mm()
@@ -322,6 +367,12 @@ def place_electrical_devices(
     # Exact building outer boundary via unary_union (accurate on L- and U-shaped floorplans)
     all_room_polys = [Polygon([(p.x_mm, p.y_mm) for p in r.polygon_mm]) for r in building.rooms]
     outer_ring: BaseGeometry = unary_union(all_room_polys).boundary
+    indoor_polys = [
+        Polygon([(p.x_mm, p.y_mm) for p in r.polygon_mm])
+        for r in building.rooms
+        if not r.is_outdoor and not r.is_wet_room
+    ]
+    indoor_union: BaseGeometry = unary_union(indoor_polys) if indoor_polys else Polygon()
 
     devices: list[PlacedDevice] = []
     flags: list[ReviewFlag] = []
@@ -446,6 +497,25 @@ def place_electrical_devices(
                     target_lux=target_lux,
                 )
             )
+
+        # Closed-loop 2D working-plane photometric calibration (DIALux-style):
+        # verify the placed ceiling luminaires achieve target_lux under true 2D point-by-point
+        # inverse-square cosine-cubed + cavity inter-reflection physics, stepping up fixture
+        # lumen package cleanly (105 lm/W LED) if direct geometry under-illuminates the plane.
+        room_ceils = [d for d in devices if d.device_id in room_lum_ids]
+        if room_ceils:
+            from cyelec.solver.photometrics import evaluate_room_photometrics_2d
+
+            grid_chk = evaluate_room_photometrics_2d(room, room_ceils, grid_step_mm=350.0)
+            if 0.0 < grid_chk.avg_lux < target_lux * 0.98:
+                scale_req = min(3.2, (target_lux * 1.04) / grid_chk.avg_lux)
+                new_lm = int(math.ceil((lum_lm * scale_req) / 50.0) * 50)
+                new_w = round(new_lm / 105.0, 1)
+                for idx_d, dev in enumerate(devices):
+                    if dev.device_id in room_lum_ids:
+                        devices[idx_d] = dev.model_copy(
+                            update={"lumens": new_lm, "luminaire_wattage_w": new_w}
+                        )
 
         # Furniture-aware Feature Pendant snapped over detected dining table
         dining_furn = next(
@@ -603,10 +673,15 @@ def place_electrical_devices(
             )
 
         # 2. Room Light Switch(es) with deterministic 1G1W / 2G1W / 1G2W (2-way αλέ-ρετούρ)
-        sw_pt, sw_ang = _place_room_switch(room, room_doors, valid_walls, room_wz)
+        sw_pt, sw_ang = _place_room_switch(
+            room, room_doors, valid_walls, room_wz, indoor_union=indoor_union
+        )
+        sw_is_indoors = not indoor_union.is_empty and float(
+            indoor_union.distance(Point(sw_pt.x_mm, sw_pt.y_mm))
+        ) <= 180.0
         sw_ip = (
             "IP20"
-            if (room.is_outdoor and room_doors)
+            if (room.is_outdoor and (room_doors or sw_is_indoors))
             else ("IP65" if room.is_outdoor else "IP20")
         )
 
@@ -650,11 +725,21 @@ def place_electrical_devices(
                     controlled_device_ids=ctrl_ids,
                 )
             )
-            # 3-Pole Fan Isolator outside wet room beside switch at H=+2200mm
+            # 3-Pole Fan Isolator outside wet room beside switch at H=+2200mm (clear of DB1)
             if fan_id is not None:
-                fi_cand = _offset_along_wall(sw_pt, sw_ang, 280.0)
-                if rpoly.contains(Point(fi_cand.x_mm, fi_cand.y_mm)):
-                    fi_cand = _offset_along_wall(sw_pt, sw_ang, -280.0)
+                db_loc = building.db_anchor.location_mm
+                fi_pos = _offset_along_wall(sw_pt, sw_ang, 320.0)
+                fi_neg = _offset_along_wall(sw_pt, sw_ang, -320.0)
+                pos_ok = not rpoly.contains(Point(fi_pos.x_mm, fi_pos.y_mm))
+                neg_ok = not rpoly.contains(Point(fi_neg.x_mm, fi_neg.y_mm))
+                d_pos = math.hypot(fi_pos.x_mm - db_loc.x_mm, fi_pos.y_mm - db_loc.y_mm)
+                d_neg = math.hypot(fi_neg.x_mm - db_loc.x_mm, fi_neg.y_mm - db_loc.y_mm)
+                if pos_ok and neg_ok:
+                    fi_cand = fi_pos if d_pos >= d_neg else fi_neg
+                elif pos_ok:
+                    fi_cand = fi_pos
+                else:
+                    fi_cand = fi_neg
                 devices.append(
                     PlacedDevice(
                         device_id=_next_dev("FI"),
@@ -700,25 +785,40 @@ def place_electrical_devices(
             need_far_sw = (
                 room.area_m2 >= 30.0 or len(room_doors) >= 3 or is_two_way_multi_entry
             )
-            if need_far_sw and valid_walls:
-                far_cand = max(
-                    valid_walls,
-                    key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
-                        c.line.interpolate(0.5, normalized=True)
-                    ),
-                )
-                far_pt = far_cand.line.interpolate(0.5, normalized=True)
+            if need_far_sw and (len(room_doors) >= 2 or valid_walls):
+                if len(room_doors) >= 2:
+                    far_door = max(
+                        room_doors[1:],
+                        key=lambda d: math.hypot(
+                            d.hinge.x_mm - sw_pt.x_mm, d.hinge.y_mm - sw_pt.y_mm
+                        ),
+                    )
+                    far_loc, far_ang = _place_room_switch(
+                        room, [far_door], valid_walls, room_wz, indoor_union=indoor_union
+                    )
+                else:
+                    interior_cands = [c for c in valid_walls if not c.is_exterior]
+                    pool = interior_cands if interior_cands else valid_walls
+                    far_cand = max(
+                        pool,
+                        key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
+                            c.line.interpolate(0.5, normalized=True)
+                        ),
+                    )
+                    far_pt = far_cand.line.interpolate(0.5, normalized=True)
+                    far_loc = Point2D(
+                        x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1)
+                    )
+                    far_ang = far_cand.angle_deg
                 devices.append(
                     PlacedDevice(
                         device_id=_next_dev("SW"),
                         room_id=room.id,
                         device_type=DeviceType.SWITCH,
                         label=f"1G2W Secondary 2-Way Switch ({room.raw_label})",
-                        location_mm=Point2D(
-                            x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1)
-                        ),
+                        location_mm=far_loc,
                         mounting_height_mm=1200.0,
-                        wall_angle_deg=far_cand.angle_deg,
+                        wall_angle_deg=far_ang,
                         ip_rating=sw_ip,
                         switch_group="a",
                         switch_type="1G2W",
@@ -742,9 +842,21 @@ def place_electrical_devices(
                     controlled_device_ids=room_lum_ids,
                 )
             )
-            # Secondary 2-way switch snapped to bed headboard wall, second doorway, or far wall
+            # Secondary 2-way switch snapped to bed headboard wall, second doorway, or interior wall
             if is_two_way_bedroom and bed_furn is not None:
-                sw2_loc, sw2_ang, _bed_edge = _snap_to_room_edge(room, bed_furn.centroid_mm)
+                # Snap to nearest valid solid wall segment beside the bed (never over a window!)
+                bed_pt_sh = Point(bed_furn.centroid_mm.x_mm, bed_furn.centroid_mm.y_mm)
+                if valid_walls:
+                    best_vw = min(valid_walls, key=lambda c: float(c.line.distance(bed_pt_sh)))
+                    proj_pt = best_vw.line.interpolate(best_vw.line.project(bed_pt_sh))
+                    sw2_loc = Point2D(
+                        x_mm=round(float(proj_pt.x), 1), y_mm=round(float(proj_pt.y), 1)
+                    )
+                    sw2_ang = best_vw.angle_deg
+                else:
+                    b_loc, b_ang, _bed_edge = _snap_to_room_edge(room, bed_furn.centroid_mm)
+                    sw2_loc = b_loc
+                    sw2_ang = b_ang
             elif is_two_way_multi_entry and len(room_doors) >= 2:
                 far_door = max(
                     room_doors[1:],
@@ -752,17 +864,34 @@ def place_electrical_devices(
                         d.hinge.x_mm - sw_pt.x_mm, d.hinge.y_mm - sw_pt.y_mm
                     ),
                 )
-                sw2_loc, sw2_ang = _place_room_switch(room, [far_door], valid_walls, room_wz)
-            elif valid_walls:
-                far_cand = max(
-                    valid_walls,
-                    key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
-                        c.line.interpolate(0.5, normalized=True)
-                    ),
+                sw2_loc, sw2_ang = _place_room_switch(
+                    room, [far_door], valid_walls, room_wz, indoor_union=indoor_union
                 )
-                far_pt = far_cand.line.interpolate(0.5, normalized=True)
-                sw2_loc = Point2D(x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1))
-                sw2_ang = far_cand.angle_deg
+            elif valid_walls:
+                if is_two_way_bedroom:
+                    # Prefer solid interior headboard wall over distant exterior window walls
+                    int_walls = [
+                        c for c in valid_walls if not c.is_exterior and c.line.length >= 900.0
+                    ]
+                    pool = int_walls if int_walls else valid_walls
+                    bed_wall = max(pool, key=lambda c: c.line.length)
+                    bed_pt = bed_wall.line.interpolate(0.45, normalized=True)
+                    sw2_loc = Point2D(
+                        x_mm=round(float(bed_pt.x), 1), y_mm=round(float(bed_pt.y), 1)
+                    )
+                    sw2_ang = bed_wall.angle_deg
+                else:
+                    far_cand = max(
+                        valid_walls,
+                        key=lambda c: Point(sw_pt.x_mm, sw_pt.y_mm).distance(
+                            c.line.interpolate(0.5, normalized=True)
+                        ),
+                    )
+                    far_pt = far_cand.line.interpolate(0.5, normalized=True)
+                    sw2_loc = Point2D(
+                        x_mm=round(float(far_pt.x), 1), y_mm=round(float(far_pt.y), 1)
+                    )
+                    sw2_ang = far_cand.angle_deg
             else:
                 sw2_loc = _offset_along_wall(sw_pt, sw_ang, 1200.0)
                 sw2_ang = sw_ang

@@ -46,7 +46,7 @@ cables:
     mv_per_a_per_m_3p: 9.5
     r20_mohm_per_m: 4.61
   - size_mm2: 6.0
-    default_cpc_mm2: 6.0
+    default_cpc_mm2: 4.0
     method_b_1p_a: 41.0
     method_b_3p_a: 36.0
     method_c_1p_a: 47.0
@@ -55,7 +55,7 @@ cables:
     mv_per_a_per_m_3p: 6.4
     r20_mohm_per_m: 3.08
   - size_mm2: 10.0
-    default_cpc_mm2: 10.0
+    default_cpc_mm2: 6.0
     method_b_1p_a: 57.0
     method_b_3p_a: 50.0
     method_c_1p_a: 64.0
@@ -64,7 +64,7 @@ cables:
     mv_per_a_per_m_3p: 3.8
     r20_mohm_per_m: 1.83
   - size_mm2: 16.0
-    default_cpc_mm2: 16.0
+    default_cpc_mm2: 10.0
     method_b_1p_a: 76.0
     method_b_3p_a: 68.0
     method_c_1p_a: 85.0

@@ -22,6 +22,11 @@ from shapely import set_precision
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import polygonize, snap, unary_union
 
+from cyelec.ingest.messy_cad_recovery import (
+    extract_parallel_double_wall_lines,
+    score_room_detection_confidence,
+    strip_mtext_formatting,
+)
 from cyelec.ingest.plan_splitter import split_side_by_side_plans
 from cyelec.ingest.room_classifier import (
     RoomClassifierFallback,
@@ -262,11 +267,13 @@ def _extract_poly_coords(entity: DXFGraphic, scale: float) -> list[tuple[float, 
 
 def _extract_text_item(entity: DXFGraphic, scale: float) -> tuple[str, tuple[float, float]] | None:
     if isinstance(entity, MText):
-        text = str(entity.plain_text()).strip()
+        raw = str(entity.plain_text()).strip()
+        text = strip_mtext_formatting(raw) or raw
         ins = entity.dxf.insert
         return (text, (float(ins.x) * scale, float(ins.y) * scale)) if text else None
     if isinstance(entity, Text):
-        text = str(entity.dxf.text).strip()
+        raw = str(entity.dxf.text).strip()
+        text = strip_mtext_formatting(raw) or raw
         ins = entity.dxf.insert
         return (text, (float(ins.x) * scale, float(ins.y) * scale)) if text else None
     return None
@@ -964,7 +971,11 @@ def ingest_dxf(
 
     # Fallback: drawings with walls drawn purely on layer "0" (legacy homeowner/AutoCAD plans)
     if not room_raw_polys and not wall_lines and layer0_lines:
-        wall_lines = layer0_lines
+        if len(layer0_lines) >= 80:
+            paired_walls = extract_parallel_double_wall_lines(layer0_lines)
+            wall_lines = paired_walls if len(paired_walls) >= 16 else layer0_lines
+        else:
+            wall_lines = layer0_lines
         flags.append(
             ReviewFlag(
                 code="WALLS_INFERRED_FROM_LAYER_0",
@@ -1266,6 +1277,13 @@ def ingest_dxf(
         ]
         area_m2 = round(float(poly.area) / 1_000_000.0, 4)
 
+        used_wall_poly = any(f.code == "ROOMS_POLYGONIZED_FROM_WALLS" for f in flags)
+        det_conf = score_room_detection_confidence(
+            poly,
+            has_matched_text_label=bool(inside_texts),
+            from_explicit_room_layer=not used_wall_poly,
+            from_pdf_vector=False,
+        )
         rooms.append(
             Room(
                 id=rid,
@@ -1279,6 +1297,7 @@ def ingest_dxf(
                     std.eac_rules.ambient_defaults_c.roof_outdoor_c if rt.is_outdoor else None
                 ),
                 fixtures=[],
+                detection_confidence=det_conf,
             )
         )
 

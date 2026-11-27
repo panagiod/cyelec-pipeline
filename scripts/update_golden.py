@@ -112,9 +112,15 @@ def compute_scenario_snapshot(
             doc = ezdxf.readfile(str(dxf_out))
             dxf_audit_errors += len(doc.audit().errors)
 
+        from cyelec.render.label_layout import count_svg_text_bbox_overlaps
+
         sld_svg = outputs["e201_sld_svg"].read_text(encoding="utf-8")
         e301_svg = outputs["e301_details_svg"].read_text(encoding="utf-8")
         eac_html = (pack_dir / "eac_application_form.html").read_text(encoding="utf-8")
+        svg_text_bbox_overlaps = sum(
+            count_svg_text_bbox_overlaps(outputs[k].read_text(encoding="utf-8"))
+            for k in ("e101_lighting_svg", "e102_power_svg", "e103_elv_svg")
+        )
 
         d = p2.design
         sp = p2.spatial
@@ -182,6 +188,7 @@ def compute_scenario_snapshot(
                 "stacked_devices_lt_100mm": _count_stacked_devices_lt_100mm(p2),
                 "dxf_audit_errors": dxf_audit_errors,
                 "e201_subboard_overlaps": _count_e201_subboard_overlaps(sld_svg),
+                "svg_text_bbox_overlaps": svg_text_bbox_overlaps,
                 "e301_scoped_css": 'class="cy-e301"' in e301_svg,
                 "eac_html_has_literal_none": ">None<" in eac_html,
             },

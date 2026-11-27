@@ -41,7 +41,7 @@ _TARGET_LUX_BY_ROOM: dict[RoomType, int] = {
     RoomType.WC: 150,
     RoomType.CORRIDOR: 100,
     RoomType.UTILITY: 200,
-    RoomType.VERANDA: 100,
+    RoomType.VERANDA: 50,
     RoomType.STORAGE: 100,
     RoomType.OPEN_OFFICE: 500,
     RoomType.MEETING_ROOM: 500,
@@ -61,11 +61,11 @@ _MAINTENANCE_FACTOR = 0.80
 def _utilization_factor_from_room(area_m2: float, ceiling_height_mm: float) -> float:
     """Compute CIBSE Utilization Factor (UF) from Room Index K = (L*W)/(Hm*(L+W))."""
     side_m = math.sqrt(max(area_m2, 1.0))
-    hm = max(0.8, (ceiling_height_mm / 1000.0) - 0.85)  # Mounting height above 0.85m working plane
+    hm = max(0.8, (ceiling_height_mm / 1000.0) - 0.80)  # Mounting height above 0.80m working plane
     room_index_k = area_m2 / max(hm * 2.0 * side_m, 0.5)
-    # Typical residential ceiling/wall reflectance (70/50/20) LED downlight UF curve
-    uf = 0.52 + 0.24 * (1.0 - math.exp(-0.85 * room_index_k))
-    return round(min(0.82, max(0.50, uf)), 2)
+    # Calibrated residential/commercial ceiling/wall reflectance (75/55/20) LED downlight UF curve
+    uf = 0.42 + 0.36 * (1.0 - math.exp(-0.80 * room_index_k))
+    return round(min(0.80, max(0.38, uf)), 2)
 
 
 _BASE_FIXTURE_WATTS: dict[RoomType, float] = {
@@ -123,7 +123,9 @@ def compute_room_lumen_checks(
     building: BuildingModel,
     devices: list[PlacedDevice],
 ) -> tuple[list[RoomLumenCheck], list[ReviewFlag]]:
-    """Verify room-by-room illuminance via CIBSE / BS EN 12464-1 Lumen Method."""
+    """Verify room-by-room illuminance via 2D point-by-point BS EN 12464-1 grid physics."""
+    from cyelec.solver.photometrics import evaluate_room_photometrics_2d
+
     checks: list[RoomLumenCheck] = []
     flags: list[ReviewFlag] = []
 
@@ -146,9 +148,10 @@ def compute_room_lumen_checks(
         avg_lm = max(100, int(round(total_lm / n_fix)))
         uf = _utilization_factor_from_room(room.area_m2, room.ceiling_height_mm)
         mf = _MAINTENANCE_FACTOR
-        achieved_lux = round((total_lm * uf * mf) / max(room.area_m2, 0.5), 1)
+        grid_res = evaluate_room_photometrics_2d(room, lums, maintenance_factor=mf)
+        achieved_lux = grid_res.avg_lux
         target_lux = _TARGET_LUX_BY_ROOM.get(room.normalized_type, 150)
-        # Allow 10% design tolerance on residential photometric checks
+        # Allow 10% design tolerance on residential average illuminance checks
         compliant = achieved_lux >= (target_lux * 0.90)
         primary_type = lums[0].luminaire_fixture_type or (
             "IP44 Downlight + Mirror" if room.is_wet_room else "Recessed LED Downlight"
@@ -165,6 +168,12 @@ def compute_room_lumen_checks(
                 lumens_per_fixture=avg_lm,
                 target_lux=target_lux,
                 achieved_lux=achieved_lux,
+                min_lux=grid_res.min_lux,
+                max_lux=grid_res.max_lux,
+                uniformity_u0=grid_res.uniformity_u0,
+                u0_target=grid_res.u0_target,
+                u0_compliant=grid_res.u0_compliant,
+                grid_points_evaluated=grid_res.grid_points,
                 utilization_factor=uf,
                 maintenance_factor=mf,
                 compliant=compliant,
@@ -178,9 +187,26 @@ def compute_room_lumen_checks(
                     category="geometry",
                     regulation_ref="BS EN 12464-1 / CIBSE SLL Code for Lighting",
                     message=(
-                        f"Room '{room.raw_label}' ({room.area_m2:.1f} m²): estimated "
-                        f"{achieved_lux:.0f} lux vs {target_lux} lux target ({n_fix}x {avg_w:g}W "
-                        "LED). Increase lumen output or add task/cove lighting if required."
+                        f"Room '{room.raw_label}' ({room.area_m2:.1f} m²): 2D grid E_avg="
+                        f"{achieved_lux:.0f} lx (E_min={grid_res.min_lux:.0f} lx, "
+                        f"U0={grid_res.uniformity_u0:.2f}) vs {target_lux} lx target "
+                        f"({n_fix}x {avg_w:g}W LED). Increase lumen output or add task lighting."
+                    ),
+                    requires_etek_signoff=False,
+                )
+            )
+        elif not grid_res.u0_compliant:
+            flags.append(
+                ReviewFlag(
+                    code="PHOTOMETRIC_UNIFORMITY_LOW",
+                    severity=ReviewSeverity.INFO,
+                    category="geometry",
+                    regulation_ref="BS EN 12464-1 (Illuminance Uniformity U0 = Emin/Eavg)",
+                    message=(
+                        f"Room '{room.raw_label}' ({room.area_m2:.1f} m²): 2D working-plane "
+                        f"U0={grid_res.uniformity_u0:.2f} below {grid_res.u0_target:.2f} "
+                        f"target (E_min={grid_res.min_lux:.0f} lx, E_avg={achieved_lux:.0f} lx). "
+                        "Consider wider beam optics or splitting into evenly spaced downlights."
                     ),
                     requires_etek_signoff=False,
                 )

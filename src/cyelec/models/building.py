@@ -151,6 +151,7 @@ class Room(BaseModel):
     is_wet_room: bool = False
     is_outdoor: bool = False
     ambient_temp_c: int | None = None
+    detection_confidence: Literal["high", "medium", "low"] = "high"
     fixtures: list[PlumbingFixture] = Field(default_factory=list)
     furniture: list[FurnitureItem] = Field(default_factory=list)
 

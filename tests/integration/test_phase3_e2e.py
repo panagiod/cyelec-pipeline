@@ -131,12 +131,17 @@ def test_stateless_multitenant_saas_api_endpoints(tmp_path: Path) -> None:
     assert "load_schedule.xlsx" in znames
     assert "manifest.json" in znames
 
-    # 5. Reject unsupported file extensions
+    # 5. Reject unsupported file extensions (400) and corrupt vector PDFs (422)
     resp_bad = client.post(
         "/v1/solve/dxf",
-        files={"file": ("bad.pdf", b"%PDF-1.4", "application/pdf")},
+        files={"file": ("bad.png", b"\x89PNG\r\n\x1a\n", "image/png")},
     )
     assert resp_bad.status_code == 400
+    resp_bad_pdf = client.post(
+        "/v1/solve/dxf",
+        files={"file": ("corrupt.pdf", b"%PDF-1.4", "application/pdf")},
+    )
+    assert resp_bad_pdf.status_code == 422
 
     # 6. Interactive ETEK Review Workbench UI & observability middleware headers
     ui_resp = client.get("/")

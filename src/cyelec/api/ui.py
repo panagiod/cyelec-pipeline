@@ -32,6 +32,7 @@ def render_etek_workbench_html(
         exts.append(".dwg")
     if ifc_available:
         exts.append(".ifc")
+    exts.append(".pdf")
     upload_accept = ",".join(exts)
     fmt_list = " / ".join(exts)
     mf_exts = ".dxf/.dwg" if dwg_available else ".dxf"
@@ -962,6 +963,9 @@ def render_etek_workbench_html(
           <button class="tab" onclick="openTab('tabRiser', this)">
             Riser &amp; DIN-Rail DB (E-202)
           </button>
+          <button class="tab" onclick="openTab('tabSelectivity', this)">
+            I-t Selectivity (E-203)
+          </button>
           <button class="tab" onclick="openTab('tabDetails', this)">
             Details &amp; Notes (E-301)
           </button>
@@ -1016,6 +1020,8 @@ def render_etek_workbench_html(
               onclick="selectDrawingSheet('combined')">E-100 Combined</button>
             <button id="btnSheetLighting" class="btn btn-secondary btn-sm"
               onclick="selectDrawingSheet('lighting')">E-101 Lighting</button>
+            <button id="btnSheetHeatmap" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('heatmap')">E-101 Lux Heatmap</button>
             <button id="btnSheetPower" class="btn btn-secondary btn-sm"
               onclick="selectDrawingSheet('power')">E-102 Power &amp; Plant</button>
             <button id="btnSheetElv" class="btn btn-secondary btn-sm"
@@ -1126,6 +1132,32 @@ def render_etek_workbench_html(
           </div>
           <div id="riserSvg" class="svg-box">
             Run a solve to render E-202 Vertical Riser Diagram &amp; 18mm DIN-Rail DB Elevation.
+          </div>
+        </div>
+
+        <div id="tabSelectivity" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-203 Time-Current (I-t) Selectivity &amp; IEC 60909 Coordination</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('selectivitySvg', -25)">−</button>
+              <span id="zoomLbl_selectivitySvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('selectivitySvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('selectivitySvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('selectivitySvg', 'E-203 Time-Current Selectivity')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('selectivitySvg', 'E203_selectivity_curves.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="selectivitySvg" class="svg-box">
+            Run a solve to render E-203 Log-Log Time-Current (I-t) Selectivity Curves.
           </div>
         </div>
 
@@ -1637,7 +1669,7 @@ def render_etek_workbench_html(
     }}
 
     function selectDrawingSheet(sheetKey) {{
-      const valid = ['combined', 'lighting', 'power', 'elv'];
+      const valid = ['combined', 'lighting', 'heatmap', 'power', 'elv'];
       const key = valid.includes(sheetKey) ? sheetKey : 'combined';
       window._cyelecActiveSheet = key;
       const sheets = window._cyelecSheets || {{}};
@@ -1647,6 +1679,7 @@ def render_etek_workbench_html(
       const btnMap = {{
         combined: 'btnSheetCombined',
         lighting: 'btnSheetLighting',
+        heatmap: 'btnSheetHeatmap',
         power: 'btnSheetPower',
         elv: 'btnSheetElv',
       }};
@@ -1715,29 +1748,37 @@ def render_etek_workbench_html(
         const lRows = lumens.map(lc => {{
           const cnt = Number(lc.luminaire_count || 0);
           const watts = Number(lc.watts_per_fixture || 0);
-          const totLm = Math.round(cnt * Number(lc.lumens_per_fixture || 0));
+          const minMax = (lc.min_lux != null && lc.max_lux != null)
+            ? `${{Number(lc.min_lux).toFixed(0)}} / ${{Number(lc.max_lux).toFixed(0)}} lx`
+            : '—';
+          const u0Tgt = Number(lc.u0_target || 0.4).toFixed(2);
+          const u0Str = (lc.uniformity_u0 != null)
+            ? `${{Number(lc.uniformity_u0).toFixed(2)}} (≥${{u0Tgt}})`
+            : '—';
+          const passAll = Boolean(lc.compliant && (lc.u0_compliant !== false));
           return `<tr>
           <td>${{escapeHtml(lc.room_label)}}</td>
           <td class="r">${{Number(lc.area_m2).toFixed(1)}} m²</td>
           <td class="c">${{cnt}} × ${{watts.toFixed(0)}}W</td>
-          <td class="r">${{totLm}} lm</td>
           <td class="r">${{lc.target_lux}} lx</td>
           <td class="r"><strong>${{Number(lc.achieved_lux).toFixed(0)}} lx</strong></td>
-          <td class="c"><span class="badge ${{lc.compliant ? 'b-pass' : 'b-warn'}}">
-            ${{lc.compliant ? 'PASS' : 'LOW'}}</span></td>
+          <td class="r">${{minMax}}</td>
+          <td class="r">${{u0Str}}</td>
+          <td class="c"><span class="badge ${{passAll ? 'b-pass' : 'b-warn'}}">
+            ${{passAll ? 'PASS' : 'CHECK'}}</span></td>
         </tr>`;
         }}).join('');
         luxHtml = `<details style="margin-top:6px;border:1px solid var(--border);
             border-radius:5px;padding:6px 10px;background:#f8fafc;">
           <summary style="cursor:pointer;font-weight:700;font-size:11.5px;color:var(--navy);">
-            CIBSE / BS EN 12464-1 Room Photometrics (Lumen Method):
+            Point-by-Point 2D Photometrics &amp; Uniformity U₀ (BS EN 12464-1):
             <span class="badge ${{lCls}}">${{okCnt}}/${{lumens.length}} Compliant</span>
           </summary>
           <div class="tbl-wrap" style="margin-top:8px;">
             <table><thead><tr>
               <th>Room</th><th class="r">Area</th><th class="c">Luminaires</th>
-              <th class="r">Flux</th><th class="r">Target</th><th class="r">Achieved</th>
-              <th class="c">Check</th>
+              <th class="r">Target</th><th class="r">E_avg</th><th class="r">E_min / E_max</th>
+              <th class="r">U₀ (Emin/Eavg)</th><th class="c">Check</th>
             </tr></thead><tbody>${{lRows}}</tbody></table>
           </div>
         </details>`;
@@ -1861,6 +1902,7 @@ def render_etek_workbench_html(
       window._cyelecSheets = {{
         combined: data.floorplan_svg || '',
         lighting: data.lighting_svg || data.floorplan_svg || '',
+        heatmap: data.lighting_heatmap_svg || data.lighting_svg || '',
         power: data.power_svg || data.floorplan_svg || '',
         elv: data.elv_svg || data.floorplan_svg || '',
       }};
@@ -1873,6 +1915,9 @@ def render_etek_workbench_html(
       document.getElementById('riserSvg').innerHTML =
         data.riser_svg || 'E-202 Riser & DIN-Rail DB sheet unavailable.';
       applyZoomToBox('riserSvg');
+      document.getElementById('selectivitySvg').innerHTML =
+        data.selectivity_svg || 'E-203 Time-Current Selectivity sheet unavailable.';
+      applyZoomToBox('selectivitySvg');
       document.getElementById('detailsSvg').innerHTML =
         data.details_svg || 'Details sheet unavailable.';
       applyZoomToBox('detailsSvg');
