@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -246,14 +247,33 @@ class WorkspaceStore:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=30.0,
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=30000;")
         self._init_schema()
 
     def _init_schema(self) -> None:
         with self._lock:
+            for attempt in range(10):
+                try:
+                    self._init_schema_once()
+                    return
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if ("locked" in msg or "busy" in msg) and attempt < 9:
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    raise
+
+    def _init_schema_once(self) -> None:
+        with self._lock:
             self._conn.executescript(
                 """
+                PRAGMA busy_timeout=30000;
                 PRAGMA journal_mode=WAL;
                 PRAGMA foreign_keys=ON;
 
