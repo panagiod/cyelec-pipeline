@@ -153,7 +153,7 @@ jobs:
       - name: Install client dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[api]"
+          pip install -e ".[api,dev]"
 
       - name: Run Docker Container Integration Smoke (MIT .dwg + .ifc + 10 WeasyPrint PDFs)
         run: |

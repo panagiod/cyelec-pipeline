@@ -258,7 +258,7 @@ jobs:
       - name: Install client dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[api]"
+          pip install -e ".[api,dev]"
 
       - name: Live EU Production E2E, Tier-3 Perf & GDPR Art. 17 Cleanup Gate
         env:
