@@ -22,7 +22,7 @@ from cyelec.api.ui import render_etek_workbench_html
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SRC_ROOT = _REPO_ROOT / "src" / "cyelec"
-_PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]{3,}__")
+_PLACEHOLDER_RE = re.compile(r"__[A-Z][A-Z0-9_]{2,}[A-Z0-9]__")
 
 
 def _iter_src_py_files() -> list[Path]:
@@ -131,8 +131,33 @@ def test_type_ignore_and_production_assert_ratchets() -> None:
     assert print_calls == [], f"Direct print() calls found in src/cyelec: {print_calls}"
 
 
+def _cyclomatic_complexity(node: ast.AST) -> int:
+    """Compute McCabe cyclomatic complexity for a Python function AST node."""
+    score = 1
+    for child in ast.walk(node):
+        if isinstance(
+            child,
+            (
+                ast.If,
+                ast.For,
+                ast.AsyncFor,
+                ast.While,
+                ast.ExceptHandler,
+                ast.With,
+                ast.AsyncWith,
+                ast.IfExp,
+            ),
+        ):
+            score += 1
+        elif isinstance(child, ast.BoolOp):
+            score += len(child.values) - 1
+        elif isinstance(child, ast.comprehension):
+            score += 1 + len(child.ifs)
+    return score
+
+
 def test_monolith_size_ratchets() -> None:
-    """Keep decomposed API composition root, UI renderers, and core functions bounded."""
+    """Keep decomposed API composition root, UI/report renderers & core functions bounded."""
     app_loc = len((_SRC_ROOT / "api" / "app.py").read_text(encoding="utf-8").splitlines())
     ui_loc = len((_SRC_ROOT / "api" / "ui.py").read_text(encoding="utf-8").splitlines())
     docs_loc = len((_SRC_ROOT / "api" / "docs_ui.py").read_text(encoding="utf-8").splitlines())
@@ -141,14 +166,19 @@ def test_monolith_size_ratchets() -> None:
     assert docs_loc <= 100, f"api/docs_ui.py regrew to {docs_loc} LOC"
 
     oversized: list[str] = []
+    high_cc: list[str] = []
     for f in _iter_src_py_files():
         tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 flen = (node.end_lineno or node.lineno) - node.lineno + 1
-                if flen > 700:
+                if flen > 400:
                     oversized.append(f"{f.relative_to(_REPO_ROOT)}:{node.name} ({flen} LOC)")
-    assert oversized == [], f"Functions exceeding 700 LOC ratchet: {oversized}"
+                cc = _cyclomatic_complexity(node)
+                if cc > 85:
+                    high_cc.append(f"{f.relative_to(_REPO_ROOT)}:{node.name} (CC={cc})")
+    assert oversized == [], f"Functions exceeding 400 LOC ratchet: {oversized}"
+    assert high_cc == [], f"Functions exceeding CC=85 complexity ratchet: {high_cc}"
 
 
 def test_packaged_templates_load_and_render_without_leaked_tokens() -> None:
@@ -172,6 +202,43 @@ def test_packaged_templates_load_and_render_without_leaked_tokens() -> None:
     assert set(_PLACEHOLDER_RE.findall(guide)) == set()
     guide_tab = render_workbench_guide_tab_html()
     assert set(_PLACEHOLDER_RE.findall(guide_tab)) == set()
+
+
+def test_packaged_render_templates_load_and_render_without_leaked_tokens(tmp_path: Path) -> None:
+    """All print-ready HTML/CSS report templates load and leave zero __TOKEN__ placeholders."""
+    from cyelec.pipeline import run_phase2_pipeline
+    from cyelec.render.calc_report import render_calc_report_html
+    from cyelec.render.eac_forms import render_eac_application_form_html
+    from cyelec.render.eac_pack import render_eac_submission_pack_html
+    from cyelec.render.sld import render_sld_svg
+    from cyelec.render.templates import load_template as load_render_template
+    from cyelec.synth.benchmarks import build_cyprus_3bed_model
+
+    for name in (
+        "eac_application_form.html",
+        "eac_application_form.css",
+        "calc_report.html",
+        "calc_report.css",
+        "eac_submission_pack.html",
+        "eac_submission_pack.css",
+    ):
+        assert len(load_render_template(name)) > 100
+
+    res = run_phase2_pipeline(build_cyprus_3bed_model())
+    for label, html_out in (
+        ("eac_application_form", render_eac_application_form_html(res)),
+        ("calc_report", render_calc_report_html(res.design)),
+        (
+            "eac_submission_pack",
+            render_eac_submission_pack_html(
+                res,
+                sld_svg=render_sld_svg(res.design),
+                deliverables={"dummy": tmp_path / "missing.pdf"},
+            ),
+        ),
+    ):
+        leaked = set(_PLACEHOLDER_RE.findall(html_out))
+        assert leaked == set(), f"Unreplaced template tokens in {label}: {leaked}"
 
 
 def test_workbench_js_passes_node_syntax_check() -> None:

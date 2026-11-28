@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="__HTML_LANG__">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" type="image/svg+xml" href="__DEFAULT_LOGO_URI__" />
+  <title>__REPORT_TITLE__ — __PROJECT_NAME__</title>
+  <style>
+__CALC_REPORT_CSS__
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hdr-brand">
+      <img src="__HEADER_LOGO_URI__" alt="CyElec Logo" class="hdr-logo" />
+      <h1>__REPORT_TITLE__ — __PROJECT_NAME__</h1>
+    </div>
+    <div>
+      <code>cyelec-pipeline v__PIPELINE_VERSION__</code> | __TIMESTAMP_UTC__
+    </div>
+  </header>
+
+  __BRANDING_HTML__
+
+  <div class="notice">
+    <strong>Statutory ETEK Review Notice:</strong> __STATUTORY_NOTICE__
+  </div>
+
+  <div class="meta-grid">
+    <div><strong>Building Type:</strong> __BUILDING_TYPE__</div>
+    <div><strong>Floor Area:</strong> __FLOOR_AREA_M2__ m²</div>
+    <div><strong>EAC Profile:</strong> __EAC_PROFILE__</div>
+    <div><strong>Bathroom Exclusion:</strong> __BATHROOM_EXCLUSION_M__ m</div>
+    <div><strong>Earthing:</strong> __EARTHING_TXT__</div>
+    <div>
+      <strong>Recommended Supply:</strong>
+      __RECOMMENDED_SUPPLY_TIER__ (__SUPPLY_UTILIZATION_PCT__%)
+    </div>
+    <div><strong>Diversified / Connected:</strong> __DEMAND_TXT__</div>
+    <div><strong>Input SHA-256:</strong> <code>__INPUT_SHA16__</code></div>
+  </div>
+
+  __BALANCE_SECTION__
+  __SUBMAINS_SECTION__
+  __PV_STORAGE_HTML__
+
+  <section>
+    <h2>4. BS 7671 Final Circuit Calculations (Distributed Multi-Node)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>Description</th><th class="c">Ph</th><th>Topology</th>
+          <th class="r">Ib (A)</th><th>Device / Cat. Ref</th><th class="c">Cable/CPC (mm²)</th>
+          <th class="r">L_mat/L_el (m)</th><th class="r">Ca / Cg / Ci</th>
+          <th class="r">Iz / Req (A)</th><th class="r">ΔV (%)</th>
+          <th class="c">Earth Fault / Ik1</th><th class="r">CPC Min</th>
+          <th>Upsize</th><th class="c">Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        __CIRCUIT_ROWS_HTML__
+      </tbody>
+    </table>
+  </section>
+
+  __SELECTIVITY_SECTION__
+
+  __BOARDS_SECTION__
+
+  __LUMEN_SECTION__
+
+  <section>
+    <h2>5. ETEK Human Review Flags Register</h2>
+    <table>
+      <thead>
+        <tr>
+          <th class="c">Severity</th><th>Code</th><th>Category</th><th class="c">Circuit</th>
+          <th>Regulation</th><th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        __FLAG_ROWS_HTML__
+      </tbody>
+    </table>
+  </section>
+
+  __BOQ_SECTION__
+
+  <section class="signoff">
+    <strong>6. __ETEK_SIGNOFF_TITLE__</strong>
+    <div class="signoff-grid">
+      <div class="sig-line">__ENG_NAME__</div>
+      <div class="sig-line">__ETEK_NO__</div>
+      <div class="sig-line">Signature &amp; Official Stamp</div>
+      <div class="sig-line">Date</div>
+    </div>
+  </section>
+
+  <footer>
+    Standards Provenance: __STANDARDS_LIST__
+  </footer>
+</body>
+</html>

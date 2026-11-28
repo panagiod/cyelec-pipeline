@@ -8,85 +8,21 @@ from pathlib import Path
 from cyelec.assets import get_logo_svg_data_uri
 from cyelec.models.electrical import ElectricalDesignResult, ReviewSeverity
 from cyelec.render.i18n import format_branding_line, t
+from cyelec.render.templates import load_indented_css, render_template
+
+
+def _esc(val: object) -> str:
+    return html.escape(str(val))
 
 
 def _severity_order(sev: ReviewSeverity) -> int:
     return {ReviewSeverity.BLOCKER: 0, ReviewSeverity.WARNING: 1, ReviewSeverity.INFO: 2}[sev]
 
 
-def render_calc_report_md(result: ElectricalDesignResult) -> str:
-    """Render deterministic auditable BS 7671 & EAC calculation report in Markdown."""
-    eac = result.eac_compliance
-    prov = result.provenance
-    lang = result.report_language
-    branding_line = format_branding_line(result.branding)
-    ordered_flags = sorted(
-        result.review_flags,
-        key=lambda f: (_severity_order(f.severity), f.code, f.circuit_id or ""),
-    )
-
-    profile_detail = (
-        f"`{eac.eac_profile.value}` "
-        f"(Bathroom socket exclusion: `{eac.bathroom_socket_exclusion_m:.1f} m`)"
-    )
-    supply_detail = (
-        f"`{eac.supply_phases}-Phase` "
-        f"(`Mandatory 3P: {'Yes' if eac.mandatory_three_phase else 'No'}`)"
-    )
-    blocker_flag_txt = "YES — ACTION REQUIRED" if result.has_blockers else "No"
-
-    lines: list[str] = [
-        f"# {t('report_title', lang)} — {result.building.project_name}",
-        "",
-        *(
-            [f"**Consulting Practice:** {branding_line}", ""]
-            if branding_line
-            else []
-        ),
-        f"> **STATUTORY NOTICE:** {t('statutory_notice', lang)}",
-        "",
-        "## 1. Provenance & Design Basis",
-        "",
-        "| Field | Value |",
-        "| --- | --- |",
-        f"| Pipeline Version | `{prov.pipeline_version}` |",
-        f"| Timestamp (UTC) | `{prov.timestamp_utc}` |",
-        f"| Input SHA-256 | `{prov.input_sha256}` |",
-        f"| Building Type | `{result.building.building_type.value}` |",
-        f"| Total Floor Area | `{result.building.total_floor_area_m2:.2f} m²` |",
-        f"| EAC Profile | {profile_detail} |",
-        f"| Earthing System | `{result.earthing_system.value}` "
-        f"(`Ze/Ra = {result.ze_or_ra_ohm:.2f} Ω`) |",
-        f"| PV Capacity | `{result.building.pv_capacity_kva:.2f} kVA` |",
-        f"| Overrides Applied | `{'Yes' if prov.overrides_applied else 'No'}` |",
-        f"| Blocker Flags Present | `{blocker_flag_txt}` |",
-        "",
-        "**Standards Versions:**",
-        *[f"- `{k}`: `{v}`" for k, v in sorted(prov.standards_versions.items())],
-        "",
-        "## 2. Cyprus EAC Supply Determination",
-        "",
-        "| Parameter | Value |",
-        "| --- | --- |",
-        f"| Supply Phases | {supply_detail} |",
-        f"| Recommended EAC Supply Tier | **{eac.recommended_supply_tier}** "
-        f"(`{eac.supply_tier_utilization_pct:.1f}%` utilized) |",
-        f"| Total Connected Demand | `{eac.total_connected_kva:.2f} kVA` |",
-        f"| Total Diversified Demand | `{eac.total_diversified_kva:.2f} kVA` |",
-        f"| Peak Phase Demand | `{eac.max_phase_demand_a:.2f} A` |",
-        f"| CT Metering Required (`>100 A/phase`) | "
-        f"`{'YES' if eac.ct_metering_required else 'No'}` |",
-        f"| Substation Warning (`>=100 kVA`) | `{'YES' if eac.substation_warning else 'No'}` |",
-        "| Substation Consultation Blocker (`>=150 kVA`) | "
-        f"`{'YES' if eac.substation_consultation_required else 'No'}` |",
-        "",
-    ]
-
-    if eac.three_phase_reasons:
-        lines.append("**3-Phase Determination Reasons:**")
-        lines.extend(f"- {reason}" for reason in eac.three_phase_reasons)
-        lines.append("")
-
+def _append_md_pv_balance_submains(
+    lines: list[str], result: ElectricalDesignResult
+) -> None:
+    """Append Markdown sections 2b (PV/BESS), 3 (3-phase balance) and 3b (sub-mains)."""
     if result.pv_storage_design is not None:
         pvs = result.pv_storage_design
         lines.extend(
@@ -169,6 +105,11 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
             )
         lines.append("")
 
+
+def _append_md_circuits_and_studies(
+    lines: list[str], result: ElectricalDesignResult
+) -> None:
+    """Append Markdown sections 4 (circuits), 4b (selectivity), 4d (boards) and 4c (lux)."""
     circuit_hdr = (
         "| ID | Description | Ph | Topo | Ib (A) | Device (Cat. Ref) | Cable/CPC (mm²) | "
         "L_mat / L_elec (m) | Ca·Cg·Ci | Iz / Req (A) | ΔV (%) | EF Check | "
@@ -292,6 +233,83 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
                 f"{lc.grid_points_evaluated} | {p_st} |"
             )
 
+
+def render_calc_report_md(result: ElectricalDesignResult) -> str:
+    """Render deterministic auditable BS 7671 & EAC calculation report in Markdown."""
+    eac = result.eac_compliance
+    prov = result.provenance
+    lang = result.report_language
+    branding_line = format_branding_line(result.branding)
+    ordered_flags = sorted(
+        result.review_flags,
+        key=lambda f: (_severity_order(f.severity), f.code, f.circuit_id or ""),
+    )
+
+    profile_detail = (
+        f"`{eac.eac_profile.value}` "
+        f"(Bathroom socket exclusion: `{eac.bathroom_socket_exclusion_m:.1f} m`)"
+    )
+    supply_detail = (
+        f"`{eac.supply_phases}-Phase` "
+        f"(`Mandatory 3P: {'Yes' if eac.mandatory_three_phase else 'No'}`)"
+    )
+    blocker_flag_txt = "YES — ACTION REQUIRED" if result.has_blockers else "No"
+
+    lines: list[str] = [
+        f"# {t('report_title', lang)} — {result.building.project_name}",
+        "",
+        *(
+            [f"**Consulting Practice:** {branding_line}", ""]
+            if branding_line
+            else []
+        ),
+        f"> **STATUTORY NOTICE:** {t('statutory_notice', lang)}",
+        "",
+        "## 1. Provenance & Design Basis",
+        "",
+        "| Field | Value |",
+        "| --- | --- |",
+        f"| Pipeline Version | `{prov.pipeline_version}` |",
+        f"| Timestamp (UTC) | `{prov.timestamp_utc}` |",
+        f"| Input SHA-256 | `{prov.input_sha256}` |",
+        f"| Building Type | `{result.building.building_type.value}` |",
+        f"| Total Floor Area | `{result.building.total_floor_area_m2:.2f} m²` |",
+        f"| EAC Profile | {profile_detail} |",
+        f"| Earthing System | `{result.earthing_system.value}` "
+        f"(`Ze/Ra = {result.ze_or_ra_ohm:.2f} Ω`) |",
+        f"| PV Capacity | `{result.building.pv_capacity_kva:.2f} kVA` |",
+        f"| Overrides Applied | `{'Yes' if prov.overrides_applied else 'No'}` |",
+        f"| Blocker Flags Present | `{blocker_flag_txt}` |",
+        "",
+        "**Standards Versions:**",
+        *[f"- `{k}`: `{v}`" for k, v in sorted(prov.standards_versions.items())],
+        "",
+        "## 2. Cyprus EAC Supply Determination",
+        "",
+        "| Parameter | Value |",
+        "| --- | --- |",
+        f"| Supply Phases | {supply_detail} |",
+        f"| Recommended EAC Supply Tier | **{eac.recommended_supply_tier}** "
+        f"(`{eac.supply_tier_utilization_pct:.1f}%` utilized) |",
+        f"| Total Connected Demand | `{eac.total_connected_kva:.2f} kVA` |",
+        f"| Total Diversified Demand | `{eac.total_diversified_kva:.2f} kVA` |",
+        f"| Peak Phase Demand | `{eac.max_phase_demand_a:.2f} A` |",
+        f"| CT Metering Required (`>100 A/phase`) | "
+        f"`{'YES' if eac.ct_metering_required else 'No'}` |",
+        f"| Substation Warning (`>=100 kVA`) | `{'YES' if eac.substation_warning else 'No'}` |",
+        "| Substation Consultation Blocker (`>=150 kVA`) | "
+        f"`{'YES' if eac.substation_consultation_required else 'No'}` |",
+        "",
+    ]
+
+    if eac.three_phase_reasons:
+        lines.append("**3-Phase Determination Reasons:**")
+        lines.extend(f"- {reason}" for reason in eac.three_phase_reasons)
+        lines.append("")
+
+    _append_md_pv_balance_submains(lines, result)
+    _append_md_circuits_and_studies(lines, result)
+
     lines.extend(
         [
             "",
@@ -364,18 +382,14 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
     return "\n".join(lines)
 
 
-def render_calc_report_html(result: ElectricalDesignResult) -> str:
-    """Render print-ready A4-landscape HTML BS 7671 calculation & ETEK review register."""
-    eac = result.eac_compliance
-    prov = result.provenance
+def _render_html_circuit_and_flag_rows(
+    result: ElectricalDesignResult,
+) -> tuple[str, str]:
+    """Render HTML tbody rows for final circuit calculations and ETEK review flags."""
     ordered_flags = sorted(
         result.review_flags,
         key=lambda f: (_severity_order(f.severity), f.code, f.circuit_id or ""),
     )
-
-    def esc(val: object) -> str:
-        return html.escape(str(val))
-
     circuit_rows_html: list[str] = []
     for c in result.circuits:
         s = c.spec
@@ -395,9 +409,9 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             c.electrical_path_length_m if c.electrical_path_length_m is not None else s.length_m
         )
         dev_html = (
-            f"{esc(c.device_label)}<br><small><code>{esc(c.vendor_catalog_ref)}</code></small>"
+            f"{_esc(c.device_label)}<br><small><code>{_esc(c.vendor_catalog_ref)}</code></small>"
             if c.vendor_catalog_ref
-            else esc(c.device_label)
+            else _esc(c.device_label)
         )
         ik_txt = (
             f"{c.ik1_min_a:.0f}/{c.magnetic_trip_max_a:.0f}A"
@@ -406,10 +420,10 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         )
         circuit_rows_html.append(
             "<tr>"
-            f"<td><strong>{esc(s.circuit_id)}</strong></td>"
-            f"<td>{esc(s.description)}</td>"
-            f"<td class='c'>{esc(c.phase.value)}</td>"
-            f"<td>{esc(s.topology.value)}</td>"
+            f"<td><strong>{_esc(s.circuit_id)}</strong></td>"
+            f"<td>{_esc(s.description)}</td>"
+            f"<td class='c'>{_esc(c.phase.value)}</td>"
+            f"<td>{_esc(s.topology.value)}</td>"
             f"<td class='r'>{s.design_current_ib_a:.2f}</td>"
             f"<td>{dev_html}</td>"
             f"<td class='c'>{c.cable_mm2:g} / {c.cpc_mm2:g}</td>"
@@ -417,9 +431,9 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             f"<td class='r'>{c.ca:.2f} / {c.cg:.2f} / {c.ci:.2f}</td>"
             f"<td class='r'>{c.iz_derated_a:.1f} / {c.required_iz_a:.1f}</td>"
             f"<td class='r'>{c.voltage_drop_pct:.2f}%</td>"
-            f"<td class='c'>{esc(ef_str)}<br><small>{esc(ik_txt)}</small></td>"
+            f"<td class='c'>{_esc(ef_str)}<br><small>{_esc(ik_txt)}</small></td>"
             f"<td class='r'>{c.cpc_min_mm2:.2f}</td>"
-            f"<td>{esc(upsize_txt)}</td>"
+            f"<td>{_esc(upsize_txt)}</td>"
             f"<td class='c'><span class='badge {badge_cls}'>{status_txt}</span></td>"
             "</tr>"
         )
@@ -431,18 +445,24 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             ReviewSeverity.WARNING: "badge-warn",
             ReviewSeverity.INFO: "badge-info",
         }[f.severity]
-        sev_badge = f"<span class='badge {sev_cls}'>{esc(f.severity.value.upper())}</span>"
+        sev_badge = f"<span class='badge {sev_cls}'>{_esc(f.severity.value.upper())}</span>"
         flag_rows_html.append(
             "<tr>"
             f"<td class='c'>{sev_badge}</td>"
-            f"<td><code>{esc(f.code)}</code></td>"
-            f"<td>{esc(f.category)}</td>"
-            f"<td class='c'>{esc(f.circuit_id or '-')}</td>"
-            f"<td>{esc(f.regulation_ref or '-')}</td>"
-            f"<td>{esc(f.message)}</td>"
+            f"<td><code>{_esc(f.code)}</code></td>"
+            f"<td>{_esc(f.category)}</td>"
+            f"<td class='c'>{_esc(f.circuit_id or '-')}</td>"
+            f"<td>{_esc(f.regulation_ref or '-')}</td>"
+            f"<td>{_esc(f.message)}</td>"
             "</tr>"
         )
+    return "".join(circuit_rows_html), "".join(flag_rows_html)
 
+
+def _render_html_balance_submains_pv(
+    result: ElectricalDesignResult,
+) -> tuple[str, str, str]:
+    """Render optional HTML sections 3 (balance), 3b (sub-mains) and 2b (PV/BESS)."""
     balance_section = ""
     if result.phase_balance is not None:
         pb = result.phase_balance
@@ -493,12 +513,12 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             s_lbl = "PASS" if sm.overall_pass else "FAIL"
             sm_rows.append(
                 "<tr>"
-                f"<td><strong>{esc(sm.board_id)}</strong></td>"
-                f"<td>{esc(sm.parent_board_id)}</td>"
-                f'<td class="c">{esc(sm.floor)}</td>'
+                f"<td><strong>{_esc(sm.board_id)}</strong></td>"
+                f"<td>{_esc(sm.parent_board_id)}</td>"
+                f'<td class="c">{_esc(sm.floor)}</td>'
                 f'<td class="r">{sm.diversified_kva:.2f}</td>'
                 f'<td class="r">{sm.design_current_ib_a:.2f}</td>'
-                f"<td>{esc(sm.device_label)}</td>"
+                f"<td>{_esc(sm.device_label)}</td>"
                 f'<td class="c">{sm.cable_mm2:g}/{sm.cpc_mm2:g}</td>'
                 f'<td class="r">{sm.length_m:.1f}</td>'
                 f'<td class="r">{sm.voltage_drop_pct:.2f}%</td>'
@@ -526,72 +546,6 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         </section>
         """
 
-    lang = result.report_language
-    branding_line = format_branding_line(result.branding)
-    eng_name = (result.branding.engineer_name or "") if result.branding else ""
-    etek_no = (result.branding.etek_reg_no or "") if result.branding else ""
-    branding_html = (
-        f'<div style="background:#edf2f7;border-left:4px solid #1b365d;padding:5px 10px;'
-        f'margin-bottom:8px;font-weight:600;color:#1b365d;">{esc(branding_line)}</div>'
-        if branding_line
-        else ""
-    )
-
-    boq_section = ""
-    if result.boq is not None and result.boq.items:
-        boq = result.boq
-        b_rows: list[str] = []
-        for it in boq.items:
-            desc = (
-                it.description_el
-                if lang.value == "el"
-                else (
-                    f"{it.description_en} / {it.description_el}"
-                    if lang.value == "bilingual"
-                    else it.description_en
-                )
-            )
-            b_rows.append(
-                "<tr>"
-                f"<td><code>{esc(it.item_no)}</code></td>"
-                f"<td>{esc(it.category)}</td>"
-                f"<td>{esc(desc)}</td>"
-                f'<td class="c">{esc(it.unit)}</td>'
-                f'<td class="r">{it.quantity:.2f}</td>'
-                f'<td class="r">€{it.unit_rate_eur:,.2f}</td>'
-                f'<td class="r">€{it.total_eur:,.2f}</td>'
-                "</tr>"
-            )
-        vat_pct = round(boq.vat_rate * 100)
-        boq_section = f"""
-  <section>
-    <h2>5b. {esc(t('boq_title', lang))}</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Item</th><th>Category</th><th>Description</th><th class="c">Unit</th>
-          <th class="r">Qty</th><th class="r">Unit Rate</th><th class="r">Total (EUR)</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(b_rows)}
-        <tr>
-          <td colspan="6" class="r"><strong>Subtotal (excl. VAT)</strong></td>
-          <td class="r"><strong>€{boq.subtotal_eur:,.2f}</strong></td>
-        </tr>
-        <tr>
-          <td colspan="6" class="r"><strong>Cyprus VAT ({vat_pct}%)</strong></td>
-          <td class="r"><strong>€{boq.vat_eur:,.2f}</strong></td>
-        </tr>
-        <tr>
-          <td colspan="6" class="r"><strong>GRAND TOTAL (EUR incl. VAT)</strong></td>
-          <td class="r"><strong>€{boq.grand_total_eur:,.2f}</strong></td>
-        </tr>
-      </tbody>
-    </table>
-  </section>
-"""
-
     pv_storage_html = ""
     if result.pv_storage_design is not None:
         pvs = result.pv_storage_design
@@ -600,16 +554,16 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
             bess_tr = (
                 "<tr><td><strong>Battery Storage (BESS)</strong></td>"
                 f"<td>{pvs.battery_nominal_kwh:g} kWh ({pvs.battery_usable_kwh:g} kWh usable, "
-                f"{esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC, "
+                f"{_esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC, "
                 f"max {pvs.battery_max_power_kw:g} kW / {pvs.battery_max_current_a:g} A)</td></tr>"
                 "<tr><td><strong>BESS Protection &amp; Cabling</strong></td>"
-                f"<td>{esc(pvs.battery_dc_breaker_spec)} · "
-                f"{esc(pvs.battery_dc_cable_spec)}</td></tr>"
+                f"<td>{_esc(pvs.battery_dc_breaker_spec)} · "
+                f"{_esc(pvs.battery_dc_cable_spec)}</td></tr>"
             )
             if pvs.eps_backup_enabled:
                 bess_tr += (
                     "<tr><td><strong>EPS Critical-Load Backup</strong></td>"
-                    f"<td>{esc(pvs.eps_changeover_spec)}</td></tr>"
+                    f"<td>{_esc(pvs.eps_changeover_spec)}</td></tr>"
                 )
         voc_st = "PASS" if pvs.voc_cold_pass else "FAIL"
         mppt_st = "PASS" if pvs.mppt_window_pass else "CHECK"
@@ -640,25 +594,192 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         </tr>
         <tr>
           <td><strong>Solar DC Cabling &amp; ΔV</strong></td>
-          <td>{esc(pvs.dc_cable_spec)} ({pvs.dc_run_length_m:.1f} m,
+          <td>{_esc(pvs.dc_cable_spec)} ({pvs.dc_run_length_m:.1f} m,
             ΔV_DC = {pvs.dc_voltage_drop_pct:.2f}%)</td>
         </tr>
         <tr>
           <td><strong>DC Protection &amp; Grid Control</strong></td>
-          <td>{esc(pvs.dc_isolator_spec)} · {esc(pvs.dc_spd_spec)} ·
-            {esc(pvs.eac_2026_drg_ref)}</td>
+          <td>{_esc(pvs.dc_isolator_spec)} · {_esc(pvs.dc_spd_spec)} ·
+            {_esc(pvs.eac_2026_drg_ref)}</td>
         </tr>
         {bess_tr}
       </tbody>
     </table>
   </section>
 """
+    return balance_section, submains_section, pv_storage_html
+
+
+def _render_html_studies_and_boq(
+    result: ElectricalDesignResult,
+) -> tuple[str, str, str, str]:
+    """Render optional HTML sections 4b (selectivity), 4d (boards), 4c (lux) and 5b (BOQ)."""
+    lang = result.report_language
+    selectivity_section = (
+        '<section><h2>4b. IEC 60909 Short-Circuit Profile &amp; Selectivity (E-203)</h2>'
+        '<table><thead><tr><th>Board</th><th>Upstream</th><th>Downstream Max</th>'
+        '<th class="r">Ik3 / Ik1 (kA)</th><th class="r">Icu (kA)</th>'
+        '<th class="r">Is Limit (kA)</th><th>Vendor Ref</th><th class="c">Selectivity</th>'
+        "</tr></thead><tbody>"
+        + "".join(
+            f"<tr><td><strong>{_esc(b.board_id)}</strong></td>"
+            f"<td>{_esc(b.upstream_device_label)}</td>"
+            f"<td>{_esc(b.downstream_max_device_label)}</td>"
+            f'<td class="r">{b.ik3_max_ka:.2f} / {b.ik1_min_ka:.2f}</td>'
+            f'<td class="r">{b.device_icu_ka:g}</td>'
+            f'<td class="r">{b.discrimination_limit_is_ka:.1f}</td>'
+            f'<td><small>{_esc(b.vendor_coordination_ref or "-")}</small></td>'
+            f'<td class="c"><span class="badge '
+            f'{"badge-pass" if b.selectivity_type != "check_required" else "badge-warn"}">'
+            f"{_esc(b.selectivity_type.upper())}</span></td></tr>"
+            for b in result.selectivity_analysis.boards
+        )
+        + "</tbody></table></section>"
+        if (result.selectivity_analysis and result.selectivity_analysis.boards)
+        else ""
+    )
+
+    boards_section = (
+        "<section><h2>4d. Main &amp; Secondary Distribution Board Designs (IEC 61439 / E-204)</h2>"
+        "<table><thead><tr><th>Board</th><th>Role</th><th>Parent</th><th>Standard</th>"
+        '<th>Dimensions</th><th class="c">IP</th><th class="r">Busbar</th>'
+        '<th class="c">Modules (Spare)</th><th class="c">Thermal (W)</th></tr></thead><tbody>'
+        + "".join(
+            f"<tr><td><strong>{_esc(bd.board_id)}</strong> <small>({_esc(bd.floor)})</small></td>"
+            f"<td>{_esc(bd.board_role)}</td>"
+            f'<td>{_esc(bd.parent_board_id or "EAC Origin")}</td>'
+            f"<td><small>{_esc(bd.standard_ref)}</small></td>"
+            f"<td><small>{_esc(bd.enclosure_dims_mm)}</small></td>"
+            f'<td class="c">{_esc(bd.ip_rating)}</td>'
+            f'<td class="r">{bd.busbar_rating_a} A</td>'
+            f'<td class="c">{bd.total_modules_used}/{bd.total_modules_capacity}M '
+            f"({bd.spare_pct:.0f}%)</td>"
+            f'<td class="c"><span class="badge '
+            f'{"badge-pass" if bd.thermal_pass else "badge-fail"}">'
+            f"{bd.power_dissipation_w:.1f}/{bd.max_enclosure_dissipation_w:.0f}W</span></td></tr>"
+            for bd in result.din_rail_boards
+        )
+        + "</tbody></table></section>"
+        if result.din_rail_boards
+        else ""
+    )
+
+    lumen_section = (
+        "<section><h2>4c. Point-by-Point 2D Photometric Illuminance &amp; Uniformity "
+        "(BS EN 12464-1)</h2>"
+        '<table><thead><tr><th>Room</th><th class="r">Area (m²)</th><th class="c">Fixtures</th>'
+        '<th class="r">Target (lx)</th><th class="r">E_avg (lx)</th>'
+        '<th class="r">E_min / E_max</th><th class="r">U0 / Target</th>'
+        '<th class="r">Grid Pts</th><th class="c">Status</th></tr></thead><tbody>'
+        + "".join(
+            f"<tr><td>{_esc(lc.room_label)}</td>"
+            f'<td class="r">{lc.area_m2:.1f}</td>'
+            f'<td class="c">{lc.luminaire_count} × {lc.watts_per_fixture:g}W</td>'
+            f'<td class="r">{lc.target_lux}</td>'
+            f'<td class="r"><strong>{lc.achieved_lux:.0f}</strong></td>'
+            f'<td class="r">'
+            f'{f"{lc.min_lux:.0f} / {lc.max_lux:.0f}" if lc.min_lux is not None else "-"}</td>'
+            '<td class="r">'
+            + (
+                f"{lc.uniformity_u0:.2f}/{lc.u0_target:.2f}"
+                if lc.uniformity_u0 is not None
+                else "-"
+            )
+            + "</td>"
+            f'<td class="r">{lc.grid_points_evaluated}</td>'
+            f'<td class="c"><span class="badge '
+            f'{"badge-pass" if (lc.compliant and lc.u0_compliant) else "badge-warn"}">'
+            f'{"PASS" if (lc.compliant and lc.u0_compliant) else "CHECK"}</span></td></tr>'
+            for lc in result.lumen_checks
+        )
+        + "</tbody></table></section>"
+        if result.lumen_checks
+        else ""
+    )
+
+    boq_section = ""
+    if result.boq is not None and result.boq.items:
+        boq = result.boq
+        b_rows: list[str] = []
+        for it in boq.items:
+            desc = (
+                it.description_el
+                if lang.value == "el"
+                else (
+                    f"{it.description_en} / {it.description_el}"
+                    if lang.value == "bilingual"
+                    else it.description_en
+                )
+            )
+            b_rows.append(
+                "<tr>"
+                f"<td><code>{_esc(it.item_no)}</code></td>"
+                f"<td>{_esc(it.category)}</td>"
+                f"<td>{_esc(desc)}</td>"
+                f'<td class="c">{_esc(it.unit)}</td>'
+                f'<td class="r">{it.quantity:.2f}</td>'
+                f'<td class="r">€{it.unit_rate_eur:,.2f}</td>'
+                f'<td class="r">€{it.total_eur:,.2f}</td>'
+                "</tr>"
+            )
+        vat_pct = round(boq.vat_rate * 100)
+        boq_section = f"""
+  <section>
+    <h2>5b. {_esc(t('boq_title', lang))}</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Item</th><th>Category</th><th>Description</th><th class="c">Unit</th>
+          <th class="r">Qty</th><th class="r">Unit Rate</th><th class="r">Total (EUR)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(b_rows)}
+        <tr>
+          <td colspan="6" class="r"><strong>Subtotal (excl. VAT)</strong></td>
+          <td class="r"><strong>€{boq.subtotal_eur:,.2f}</strong></td>
+        </tr>
+        <tr>
+          <td colspan="6" class="r"><strong>Cyprus VAT ({vat_pct}%)</strong></td>
+          <td class="r"><strong>€{boq.vat_eur:,.2f}</strong></td>
+        </tr>
+        <tr>
+          <td colspan="6" class="r"><strong>GRAND TOTAL (EUR incl. VAT)</strong></td>
+          <td class="r"><strong>€{boq.grand_total_eur:,.2f}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+"""
+    return selectivity_section, boards_section, lumen_section, boq_section
+
+
+def render_calc_report_html(result: ElectricalDesignResult) -> str:
+    """Render print-ready A4-landscape HTML BS 7671 calculation & ETEK review register."""
+    eac = result.eac_compliance
+    prov = result.provenance
+    lang = result.report_language
+    branding_line = format_branding_line(result.branding)
+    eng_name = (result.branding.engineer_name or "") if result.branding else ""
+    etek_no = (result.branding.etek_reg_no or "") if result.branding else ""
+    branding_html = (
+        f'<div style="background:#edf2f7;border-left:4px solid #1b365d;padding:5px 10px;'
+        f'margin-bottom:8px;font-weight:600;color:#1b365d;">{_esc(branding_line)}</div>'
+        if branding_line
+        else ""
+    )
+
+    circuit_rows_html, flag_rows_html = _render_html_circuit_and_flag_rows(result)
+    balance_section, submains_section, pv_storage_html = _render_html_balance_submains_pv(result)
+    selectivity_section, boards_section, lumen_section, boq_section = _render_html_studies_and_boq(
+        result
+    )
 
     standards_list = " | ".join(
-        f"{esc(k)}: <code>{esc(v)}</code>"
+        f"{_esc(k)}: <code>{_esc(v)}</code>"
         for k, v in sorted(prov.standards_versions.items())
     )
-    earthing_txt = f"{esc(result.earthing_system.value)} (Ze/Ra={result.ze_or_ra_ohm:.2f} Ω)"
+    earthing_txt = f"{_esc(result.earthing_system.value)} (Ze/Ra={result.ze_or_ra_ohm:.2f} Ω)"
     demand_txt = f"{eac.total_diversified_kva:.2f} / {eac.total_connected_kva:.2f} kVA"
     default_logo_uri = get_logo_svg_data_uri()
     header_logo_uri = (
@@ -667,266 +788,43 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
         else default_logo_uri
     )
 
-    return f"""<!DOCTYPE html>
-<html lang="{esc(lang.value if lang.value != 'bilingual' else 'en')}">
-<head>
-  <meta charset="utf-8" />
-  <link rel="icon" type="image/svg+xml" href="{default_logo_uri}" />
-  <title>{esc(t('report_title', lang))} — {esc(result.building.project_name)}</title>
-  <style>
-    @page {{ size: A4 landscape; margin: 12mm; }}
-    body {{
-      font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif;
-      font-size: 9.5pt;
-      color: #1a202c;
-      margin: 0;
-      padding: 16px;
-      background: #ffffff;
-    }}
-    header {{
-      border-bottom: 3px solid #1b365d;
-      padding-bottom: 8px;
-      margin-bottom: 14px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }}
-    .hdr-brand {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }}
-    .hdr-logo {{
-      width: 30px;
-      height: 30px;
-      border-radius: 5px;
-      object-fit: contain;
-    }}
-    h1 {{ font-size: 14pt; color: #1b365d; margin: 0; }}
-    h2 {{
-      font-size: 11pt;
-      color: #1b365d;
-      margin: 14px 0 6px 0;
-      border-bottom: 1px solid #cbd5e0;
-      padding-bottom: 2px;
-    }}
-    .meta-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 8px;
-      background: #f7fafc;
-      border: 1px solid #e2e8f0;
-      padding: 8px 10px;
-      border-radius: 4px;
-      font-size: 8.5pt;
-    }}
-    .notice {{
-      background: #ebf8ff;
-      border-left: 4px solid #2b6cb0;
-      padding: 6px 10px;
-      margin: 8px 0 12px 0;
-      font-size: 8.5pt;
-    }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 8.2pt; }}
-    table.compact {{ width: 65%; }}
-    th, td {{ border: 1px solid #cbd5e0; padding: 4px 6px; vertical-align: middle; }}
-    th {{ background: #1b365d; color: #ffffff; font-weight: 600; text-align: left; }}
-    tbody tr:nth-child(even) {{ background: #f8fafc; }}
-    .r {{ text-align: right; font-variant-numeric: tabular-nums; }}
-    .c {{ text-align: center; }}
-    .badge {{
-      display: inline-block;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-weight: 700;
-      font-size: 7.5pt;
-    }}
-    .badge-pass {{ background: #d4edda; color: #155724; }}
-    .badge-warn {{ background: #fff3cd; color: #856404; }}
-    .badge-fail {{ background: #f8d7da; color: #721c24; }}
-    .badge-info {{ background: #d9e2ec; color: #1b365d; }}
-    .signoff {{
-      margin-top: 16px;
-      border: 1px solid #1b365d;
-      padding: 10px;
-      page-break-inside: avoid;
-    }}
-    .signoff-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 16px;
-      margin-top: 18px;
-    }}
-    .sig-line {{ border-top: 1px solid #4a5568; padding-top: 4px; font-size: 8pt; color: #4a5568; }}
-    code {{ font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }}
-    footer {{
-      margin-top: 12px;
-      font-size: 7.5pt;
-      color: #718096;
-      border-top: 1px solid #e2e8f0;
-      padding-top: 4px;
-    }}
-  </style>
-</head>
-<body>
-  <header>
-    <div class="hdr-brand">
-      <img src="{esc(header_logo_uri)}" alt="CyElec Logo" class="hdr-logo" />
-      <h1>{esc(t('report_title', lang))} — {esc(result.building.project_name)}</h1>
-    </div>
-    <div>
-      <code>cyelec-pipeline v{esc(prov.pipeline_version)}</code> | {esc(prov.timestamp_utc)}
-    </div>
-  </header>
-
-  {branding_html}
-
-  <div class="notice">
-    <strong>Statutory ETEK Review Notice:</strong> {esc(t('statutory_notice', lang))}
-  </div>
-
-  <div class="meta-grid">
-    <div><strong>Building Type:</strong> {esc(result.building.building_type.value)}</div>
-    <div><strong>Floor Area:</strong> {result.building.total_floor_area_m2:.2f} m²</div>
-    <div><strong>EAC Profile:</strong> {esc(eac.eac_profile.value)}</div>
-    <div><strong>Bathroom Exclusion:</strong> {eac.bathroom_socket_exclusion_m:.1f} m</div>
-    <div><strong>Earthing:</strong> {earthing_txt}</div>
-    <div>
-      <strong>Recommended Supply:</strong>
-      {esc(eac.recommended_supply_tier)} ({eac.supply_tier_utilization_pct:.1f}%)
-    </div>
-    <div><strong>Diversified / Connected:</strong> {demand_txt}</div>
-    <div><strong>Input SHA-256:</strong> <code>{esc(prov.input_sha256[:16])}</code></div>
-  </div>
-
-  {balance_section}
-  {submains_section}
-  {pv_storage_html}
-
-  <section>
-    <h2>4. BS 7671 Final Circuit Calculations (Distributed Multi-Node)</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th><th>Description</th><th class="c">Ph</th><th>Topology</th>
-          <th class="r">Ib (A)</th><th>Device / Cat. Ref</th><th class="c">Cable/CPC (mm²)</th>
-          <th class="r">L_mat/L_el (m)</th><th class="r">Ca / Cg / Ci</th>
-          <th class="r">Iz / Req (A)</th><th class="r">ΔV (%)</th>
-          <th class="c">Earth Fault / Ik1</th><th class="r">CPC Min</th>
-          <th>Upsize</th><th class="c">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(circuit_rows_html)}
-      </tbody>
-    </table>
-  </section>
-
-  {''.join([
-      '<section><h2>4b. IEC 60909 Short-Circuit Profile &amp; Selectivity (E-203)</h2>'
-      '<table><thead><tr><th>Board</th><th>Upstream</th><th>Downstream Max</th>'
-      '<th class="r">Ik3 / Ik1 (kA)</th><th class="r">Icu (kA)</th>'
-      '<th class="r">Is Limit (kA)</th><th>Vendor Ref</th><th class="c">Selectivity</th>'
-      '</tr></thead><tbody>'
-      + ''.join(
-          f'<tr><td><strong>{esc(b.board_id)}</strong></td>'
-          f'<td>{esc(b.upstream_device_label)}</td>'
-          f'<td>{esc(b.downstream_max_device_label)}</td>'
-          f'<td class="r">{b.ik3_max_ka:.2f} / {b.ik1_min_ka:.2f}</td>'
-          f'<td class="r">{b.device_icu_ka:g}</td>'
-          f'<td class="r">{b.discrimination_limit_is_ka:.1f}</td>'
-          f'<td><small>{esc(b.vendor_coordination_ref or "-")}</small></td>'
-          f'<td class="c"><span class="badge '
-          f'{"badge-pass" if b.selectivity_type != "check_required" else "badge-warn"}">'
-          f'{esc(b.selectivity_type.upper())}</span></td></tr>'
-          for b in result.selectivity_analysis.boards
-      )
-      + '</tbody></table></section>'
-  ]) if (result.selectivity_analysis and result.selectivity_analysis.boards) else ''}
-
-  {''.join([
-      '<section><h2>4d. Main &amp; Secondary Distribution Board Designs (IEC 61439 / E-204)</h2>'
-      '<table><thead><tr><th>Board</th><th>Role</th><th>Parent</th><th>Standard</th>'
-      '<th>Dimensions</th><th class="c">IP</th><th class="r">Busbar</th>'
-      '<th class="c">Modules (Spare)</th><th class="c">Thermal (W)</th></tr></thead><tbody>'
-      + ''.join(
-          f'<tr><td><strong>{esc(bd.board_id)}</strong> <small>({esc(bd.floor)})</small></td>'
-          f'<td>{esc(bd.board_role)}</td>'
-          f'<td>{esc(bd.parent_board_id or "EAC Origin")}</td>'
-          f'<td><small>{esc(bd.standard_ref)}</small></td>'
-          f'<td><small>{esc(bd.enclosure_dims_mm)}</small></td>'
-          f'<td class="c">{esc(bd.ip_rating)}</td>'
-          f'<td class="r">{bd.busbar_rating_a} A</td>'
-          f'<td class="c">{bd.total_modules_used}/{bd.total_modules_capacity}M '
-          f'({bd.spare_pct:.0f}%)</td>'
-          f'<td class="c"><span class="badge '
-          f'{"badge-pass" if bd.thermal_pass else "badge-fail"}">'
-          f'{bd.power_dissipation_w:.1f}/{bd.max_enclosure_dissipation_w:.0f}W</span></td></tr>'
-          for bd in result.din_rail_boards
-      )
-      + '</tbody></table></section>'
-  ]) if result.din_rail_boards else ''}
-
-  {''.join([
-      '<section><h2>4c. Point-by-Point 2D Photometric Illuminance &amp; Uniformity '
-      '(BS EN 12464-1)</h2>'
-      '<table><thead><tr><th>Room</th><th class="r">Area (m²)</th><th class="c">Fixtures</th>'
-      '<th class="r">Target (lx)</th><th class="r">E_avg (lx)</th>'
-      '<th class="r">E_min / E_max</th><th class="r">U0 / Target</th>'
-      '<th class="r">Grid Pts</th><th class="c">Status</th></tr></thead><tbody>'
-      + ''.join(
-          f'<tr><td>{esc(lc.room_label)}</td>'
-          f'<td class="r">{lc.area_m2:.1f}</td>'
-          f'<td class="c">{lc.luminaire_count} × {lc.watts_per_fixture:g}W</td>'
-          f'<td class="r">{lc.target_lux}</td>'
-          f'<td class="r"><strong>{lc.achieved_lux:.0f}</strong></td>'
-          f'<td class="r">'
-          f'{f"{lc.min_lux:.0f} / {lc.max_lux:.0f}" if lc.min_lux is not None else "-"}</td>'
-          f'<td class="r">'
-          f'{f"{lc.uniformity_u0:.2f}/{lc.u0_target:.2f}" if lc.uniformity_u0 is not None else "-"}'
-          '</td>'
-          f'<td class="r">{lc.grid_points_evaluated}</td>'
-          f'<td class="c"><span class="badge '
-          f'{"badge-pass" if (lc.compliant and lc.u0_compliant) else "badge-warn"}">'
-          f'{"PASS" if (lc.compliant and lc.u0_compliant) else "CHECK"}</span></td></tr>'
-          for lc in result.lumen_checks
-      )
-      + '</tbody></table></section>'
-  ]) if result.lumen_checks else ''}
-
-  <section>
-    <h2>5. ETEK Human Review Flags Register</h2>
-    <table>
-      <thead>
-        <tr>
-          <th class="c">Severity</th><th>Code</th><th>Category</th><th class="c">Circuit</th>
-          <th>Regulation</th><th>Details</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(flag_rows_html)}
-      </tbody>
-    </table>
-  </section>
-
-  {boq_section}
-
-  <section class="signoff">
-    <strong>6. {esc(t('etek_signoff', lang))}</strong>
-    <div class="signoff-grid">
-      <div class="sig-line">{esc(eng_name or 'ETEK Electrical Engineer Name')}</div>
-      <div class="sig-line">{esc(etek_no or 'ETEK Registration Number')}</div>
-      <div class="sig-line">Signature &amp; Official Stamp</div>
-      <div class="sig-line">Date</div>
-    </div>
-  </section>
-
-  <footer>
-    Standards Provenance: {standards_list}
-  </footer>
-</body>
-</html>
-"""
+    return render_template(
+        "calc_report.html",
+        {
+            "__HTML_LANG__": _esc(lang.value if lang.value != "bilingual" else "en"),
+            "__DEFAULT_LOGO_URI__": default_logo_uri,
+            "__REPORT_TITLE__": _esc(t("report_title", lang)),
+            "__PROJECT_NAME__": _esc(result.building.project_name),
+            "__CALC_REPORT_CSS__": load_indented_css("calc_report.css"),
+            "__HEADER_LOGO_URI__": _esc(header_logo_uri),
+            "__PIPELINE_VERSION__": _esc(prov.pipeline_version),
+            "__TIMESTAMP_UTC__": _esc(prov.timestamp_utc),
+            "__BRANDING_HTML__": branding_html,
+            "__STATUTORY_NOTICE__": _esc(t("statutory_notice", lang)),
+            "__BUILDING_TYPE__": _esc(result.building.building_type.value),
+            "__FLOOR_AREA_M2__": f"{result.building.total_floor_area_m2:.2f}",
+            "__EAC_PROFILE__": _esc(eac.eac_profile.value),
+            "__BATHROOM_EXCLUSION_M__": f"{eac.bathroom_socket_exclusion_m:.1f}",
+            "__EARTHING_TXT__": earthing_txt,
+            "__RECOMMENDED_SUPPLY_TIER__": _esc(eac.recommended_supply_tier),
+            "__SUPPLY_UTILIZATION_PCT__": f"{eac.supply_tier_utilization_pct:.1f}",
+            "__DEMAND_TXT__": demand_txt,
+            "__INPUT_SHA16__": _esc(prov.input_sha256[:16]),
+            "__BALANCE_SECTION__": balance_section,
+            "__SUBMAINS_SECTION__": submains_section,
+            "__PV_STORAGE_HTML__": pv_storage_html,
+            "__CIRCUIT_ROWS_HTML__": circuit_rows_html,
+            "__SELECTIVITY_SECTION__": selectivity_section,
+            "__BOARDS_SECTION__": boards_section,
+            "__LUMEN_SECTION__": lumen_section,
+            "__FLAG_ROWS_HTML__": flag_rows_html,
+            "__BOQ_SECTION__": boq_section,
+            "__ETEK_SIGNOFF_TITLE__": _esc(t("etek_signoff", lang)),
+            "__ENG_NAME__": _esc(eng_name or "ETEK Electrical Engineer Name"),
+            "__ETEK_NO__": _esc(etek_no or "ETEK Registration Number"),
+            "__STANDARDS_LIST__": standards_list,
+        },
+    )
 
 
 def export_calc_reports(

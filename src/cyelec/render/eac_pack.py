@@ -12,6 +12,7 @@ from cyelec.assets import get_logo_svg_data_uri
 from cyelec.models.electrical import ReviewSeverity
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.render.i18n import format_branding_line, t
+from cyelec.render.templates import load_indented_css, render_template
 
 
 def compute_file_sha256(path: Path) -> str:
@@ -127,180 +128,41 @@ def render_eac_submission_pack_html(
         else default_logo_uri
     )
 
-    return f"""<!DOCTYPE html>
-<html lang="{esc(lang.value if lang.value != 'bilingual' else 'en')}">
-<head>
-  <meta charset="utf-8" />
-  <link rel="icon" type="image/svg+xml" href="{default_logo_uri}" />
-  <title>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</title>
-  <style>
-    @page {{ size: A4 landscape; margin: 12mm; }}
-    body {{
-      font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif;
-      font-size: 9.5pt;
-      color: #1a202c;
-      margin: 0;
-      padding: 16px;
-      background: #ffffff;
-    }}
-    header {{
-      border-bottom: 3px solid #1b365d;
-      padding-bottom: 8px;
-      margin-bottom: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }}
-    .hdr-brand {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }}
-    .hdr-logo {{
-      width: 30px;
-      height: 30px;
-      border-radius: 5px;
-      object-fit: contain;
-    }}
-    h1 {{ font-size: 14pt; color: #1b365d; margin: 0; }}
-    h2 {{
-      font-size: 11pt;
-      color: #1b365d;
-      margin: 14px 0 6px 0;
-      border-bottom: 1px solid #cbd5e0;
-      padding-bottom: 2px;
-    }}
-    .brand-bar {{
-      background: #edf2f7;
-      border-left: 4px solid #1b365d;
-      padding: 5px 10px;
-      margin-bottom: 10px;
-      font-size: 8.8pt;
-      font-weight: 600;
-      color: #1b365d;
-    }}
-    .cards {{
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 10px;
-      margin-bottom: 12px;
-    }}
-    .card {{
-      background: #f7fafc;
-      border: 1px solid #cbd5e0;
-      border-left: 4px solid #1b365d;
-      padding: 8px 10px;
-      border-radius: 4px;
-    }}
-    .card-k {{ font-size: 7.8pt; color: #4a5568; text-transform: uppercase; }}
-    .card-v {{ font-size: 10.5pt; font-weight: 700; color: #1b365d; margin-top: 2px; }}
-    .sld-frame {{
-      border: 1px solid #cbd5e0;
-      padding: 6px;
-      background: #ffffff;
-      overflow: hidden;
-      page-break-inside: avoid;
-    }}
-    .sld-frame svg {{ width: 100%; height: auto; display: block; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 8.5pt; }}
-    th, td {{ border: 1px solid #cbd5e0; padding: 5px 7px; }}
-    th {{ background: #1b365d; color: #ffffff; text-align: left; }}
-    .r {{ text-align: right; font-variant-numeric: tabular-nums; }}
-    .signoff {{
-      margin-top: 14px;
-      border: 1.5px solid #1b365d;
-      padding: 10px;
-      page-break-inside: avoid;
-    }}
-    .signoff-grid {{
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 16px;
-      margin-top: 20px;
-    }}
-    .sig-line {{ border-top: 1px solid #4a5568; padding-top: 4px; font-size: 8pt; color: #4a5568; }}
-    code {{ font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }}
-    code.sha {{ font-size: 6.5pt; word-break: break-all; overflow-wrap: anywhere; }}
-  </style>
-</head>
-<body>
-  <header>
-    <div class="hdr-brand">
-      <img src="{esc(header_logo_uri)}" alt="CyElec Logo" class="hdr-logo" />
-      <h1>{esc(t('eac_pack_title', lang))} — {esc(design.building.project_name)}</h1>
-    </div>
-    <div>
-      <code>cyelec-pipeline v{esc(prov.pipeline_version)}</code> | {esc(prov.timestamp_utc)}
-    </div>
-  </header>
-
-  {branding_banner}
-
-  <div class="cards">
-    <div class="card">
-      <div class="card-k">Recommended EAC Supply</div>
-      <div class="card-v">{esc(eac.recommended_supply_tier)}</div>
-    </div>
-    <div class="card">
-      <div class="card-k">Earthing &amp; Profile</div>
-      <div class="card-v">{esc(design.earthing_system.value)} | {esc(eac.eac_profile.value)}</div>
-    </div>
-    <div class="card">
-      <div class="card-k">Spatial Layout</div>
-      <div class="card-v">{len(sp.devices)} Devices | {sp.total_conduit_m:.1f} m Conduit</div>
-    </div>
-    <div class="card">
-      <div class="card-k">Indicative BOQ Total</div>
-      <div class="card-v">{esc(boq_txt)}</div>
-    </div>
-    <div class="card">
-      <div class="card-k">Review Gate Status</div>
-      <div class="card-v">{blockers} Blockers / {warnings} Warn / {infos} Info</div>
-    </div>
-  </div>
-
-  <p>
-    <strong>Floor Area:</strong> {design.building.total_floor_area_m2:.2f} m² |
-    <strong>Circuits:</strong> {len(design.circuits)} |
-    <strong>Demand:</strong> {eac.total_diversified_kva:.2f} kVA diversified
-    ({eac.total_connected_kva:.2f} kVA connected) |
-    <strong>Balance:</strong> {esc(bal_summary)} |
-    <strong>Input SHA-256:</strong> <code>{esc(prov.input_sha256[:16])}</code>
-  </p>
-
-  {floorplan_section}
-
-  <section>
-    <h2>2. {esc(t('sld_title', lang))} — {esc(design.building.db_anchor.id)}</h2>
-    <div class="sld-frame">
-      {sld_svg}
-    </div>
-  </section>
-
-  <section>
-    <h2>3. Submission Deliverable Manifest (SHA-256 Verified)</h2>
-    <table>
-      <thead>
-        <tr><th>Artifact Key</th><th>Filename</th><th class="r">Size</th><th>SHA-256</th></tr>
-      </thead>
-      <tbody>
-        {''.join(file_rows)}
-      </tbody>
-    </table>
-  </section>
-
-  <section class="signoff">
-    <strong>4. {esc(t('etek_signoff', lang))}</strong>
-    <div class="signoff-grid">
-      <div class="sig-line">{esc(eng_name or 'ETEK Electrical Engineer Name')}</div>
-      <div class="sig-line">{esc(etek_no or 'ETEK Registration Number')}</div>
-      <div class="sig-line">Signature &amp; Official Stamp</div>
-      <div class="sig-line">Date</div>
-    </div>
-  </section>
-</body>
-</html>
-"""
+    return render_template(
+        "eac_submission_pack.html",
+        {
+            "__HTML_LANG__": esc(lang.value if lang.value != "bilingual" else "en"),
+            "__DEFAULT_LOGO_URI__": default_logo_uri,
+            "__PACK_TITLE__": esc(t("eac_pack_title", lang)),
+            "__PROJECT_NAME__": esc(design.building.project_name),
+            "__EAC_PACK_CSS__": load_indented_css("eac_submission_pack.css"),
+            "__HEADER_LOGO_URI__": esc(header_logo_uri),
+            "__PIPELINE_VERSION__": esc(prov.pipeline_version),
+            "__TIMESTAMP_UTC__": esc(prov.timestamp_utc),
+            "__BRANDING_BANNER__": branding_banner,
+            "__SUPPLY_TIER__": esc(eac.recommended_supply_tier),
+            "__EARTHING_PROFILE__": (
+                f"{esc(design.earthing_system.value)} | {esc(eac.eac_profile.value)}"
+            ),
+            "__SPATIAL_LAYOUT__": f"{len(sp.devices)} Devices | {sp.total_conduit_m:.1f} m Conduit",
+            "__BOQ_TOTAL__": esc(boq_txt),
+            "__REVIEW_STATUS__": f"{blockers} Blockers / {warnings} Warn / {infos} Info",
+            "__FLOOR_AREA_M2__": f"{design.building.total_floor_area_m2:.2f}",
+            "__CIRCUIT_COUNT__": str(len(design.circuits)),
+            "__DIVERSIFIED_KVA__": f"{eac.total_diversified_kva:.2f}",
+            "__CONNECTED_KVA__": f"{eac.total_connected_kva:.2f}",
+            "__BAL_SUMMARY__": esc(bal_summary),
+            "__INPUT_SHA16__": esc(prov.input_sha256[:16]),
+            "__FLOORPLAN_SECTION__": floorplan_section,
+            "__SLD_TITLE__": esc(t("sld_title", lang)),
+            "__DB_ANCHOR_ID__": esc(design.building.db_anchor.id),
+            "__SLD_SVG__": sld_svg,
+            "__FILE_ROWS__": "".join(file_rows),
+            "__ETEK_SIGNOFF_TITLE__": esc(t("etek_signoff", lang)),
+            "__ENG_NAME__": esc(eng_name or "ETEK Electrical Engineer Name"),
+            "__ETEK_NO__": esc(etek_no or "ETEK Registration Number"),
+        },
+    )
 
 
 def build_submission_zip(files: dict[str, Path], out_zip: Path) -> Path:

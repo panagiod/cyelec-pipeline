@@ -386,6 +386,229 @@ def _extract_cavities_from_lines(
     return cavities
 
 
+def _extract_pdf_wall_cavities(
+    all_segs_mm: list[tuple[Point2D, Point2D, float]],
+    labels: list[tuple[str, Point2D, bool]],
+    room_hint_pts: list[Point],
+    *,
+    page_idx: int,
+    scale_n: int,
+) -> tuple[list[Polygon], list[tuple[str, Point2D, bool]], str]:
+    """Separate structural walls, isolate main floorplan island, and polygonize room cavities."""
+    thick_segs = [(p0, p1) for p0, p1, lw in all_segs_mm if lw >= 0.35]
+    if len(thick_segs) >= 30:
+        struct_segs = thick_segs
+        wall_method = "CAD pen-weight (>=0.35 pt)"
+    else:
+        plain_segs = [(p0, p1) for p0, p1, _lw in all_segs_mm]
+        paired = extract_parallel_double_wall_lines(plain_segs)
+        struct_segs = paired if len(paired) >= 16 else plain_segs
+        wall_method = "parallel double-wall cavity pairing"
+
+    struct_lines = [
+        LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)])
+        for p0, p1 in struct_segs
+        if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 60.0
+    ]
+    if not struct_lines:
+        raise ValueError("No structural wall line segments recovered from PDF vector geometry.")
+
+    island_union = unary_union([ln.buffer(750.0, cap_style=2) for ln in struct_lines])
+    islands = (
+        list(island_union.geoms)
+        if isinstance(island_union, MultiPolygon)
+        else ([island_union] if isinstance(island_union, Polygon) else [])
+    )
+
+    filtered_labels = labels
+    if len(islands) > 1:
+        def _island_score(isl: Polygon) -> float:
+            hits = sum(1 for pt in room_hint_pts if isl.buffer(400.0).contains(pt))
+            return float(hits * 1000.0 + (float(isl.area) / 1_000_000.0))
+
+        plan_island = max(islands, key=_island_score)
+        keep_zone = Polygon(plan_island.exterior).buffer(650.0)
+        struct_segs = [
+            (p0, p1)
+            for p0, p1 in struct_segs
+            if keep_zone.intersects(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
+        ]
+        struct_lines = [
+            LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)])
+            for p0, p1 in struct_segs
+            if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 60.0
+        ]
+        filtered_labels = [
+            (txt, pt, hint)
+            for txt, pt, hint in labels
+            if keep_zone.contains(Point(pt.x_mm, pt.y_mm))
+        ]
+
+    wall_union_thin = unary_union([ln.buffer(160.0) for ln in struct_lines])
+    bridging_thin: list[LineString] = []
+    for p0, p1, lw in all_segs_mm:
+        if lw >= 0.35:
+            continue
+        seg_len = math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm)
+        if not (550.0 <= seg_len <= 2800.0):
+            continue
+        if wall_union_thin.contains(Point(p0.x_mm, p0.y_mm)) and wall_union_thin.contains(
+            Point(p1.x_mm, p1.y_mm)
+        ):
+            bridging_thin.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
+
+    gap_bridges = bridge_nearby_wall_endpoints(struct_segs, min_gap_mm=10.0, max_gap_mm=150.0)
+    gap_lines = [LineString([(a.x_mm, a.y_mm), (b.x_mm, b.y_mm)]) for a, b in gap_bridges]
+    combined_lines = struct_lines + bridging_thin + gap_lines
+
+    tight_polys = _extract_cavities_from_lines(
+        combined_lines, buffer_mm=160.0, subtract_thin_mm=65.0
+    )
+    bridged_polys = _extract_cavities_from_lines(
+        combined_lines, buffer_mm=480.0, subtract_thin_mm=75.0
+    )
+
+    def _eval_polys(polys: list[Polygon]) -> tuple[int, float]:
+        if not polys:
+            return (0, 0.0)
+        matched_hints = sum(
+            1 for pt in room_hint_pts if any(p.buffer(150.0).contains(pt) for p in polys)
+        )
+        return (matched_hints * 10 + len(polys), sum(p.area for p in polys))
+
+    raw_polys = (
+        bridged_polys
+        if _eval_polys(bridged_polys) >= _eval_polys(tight_polys)
+        else tight_polys
+    )
+    if not raw_polys:
+        raw_polys = tight_polys or bridged_polys
+    if not raw_polys:
+        raise ValueError(
+            f"Vector PDF page {page_idx + 1} parsed {len(struct_segs)} wall segments "
+            f"(scale 1:{scale_n}), but no enclosed architectural rooms (>=1.2 m²) could be "
+            "polygonized. Verify the PDF contains closed floor-plan wall geometry."
+        )
+    return raw_polys, filtered_labels, wall_method
+
+
+def _build_pdf_rooms_and_walls(
+    raw_polys: list[Polygon],
+    labels: list[tuple[str, Point2D, bool]],
+    std: StandardsBundle,
+) -> tuple[list[Room], list[WallSegment], list[str]]:
+    """Shift PDF room cavities to (0, 0), match text labels, infer cavities & derive walls."""
+    all_x = [c[0] for p in raw_polys for c in p.exterior.coords]
+    all_y = [c[1] for p in raw_polys for c in p.exterior.coords]
+    ox, oy = min(all_x), min(all_y)
+
+    shifted_polys = [
+        Polygon([(x - ox, y - oy) for x, y in list(p.exterior.coords)[:-1]]) for p in raw_polys
+    ]
+    shifted_labels = [
+        (txt, Point2D(x_mm=round(pt.x_mm - ox, 1), y_mm=round(pt.y_mm - oy, 1)), hint)
+        for txt, pt, hint in labels
+    ]
+
+    poly_labels: dict[int, list[str]] = {i: [] for i in range(len(shifted_polys))}
+    for txt, pt, is_hint in shifted_labels:
+        if not is_hint:
+            continue
+        sp = Point(pt.x_mm, pt.y_mm)
+        containing = [i for i, p in enumerate(shifted_polys) if p.contains(sp)]
+        if containing:
+            idx_best = min(containing, key=lambda i: shifted_polys[i].area)
+            if txt not in poly_labels[idx_best]:
+                poly_labels[idx_best].append(txt)
+        else:
+            dists = [(float(p.distance(sp)), i) for i, p in enumerate(shifted_polys)]
+            min_d, idx_near = min(dists)
+            if min_d <= 850.0 and txt not in poly_labels[idx_near]:
+                poly_labels[idx_near].append(txt)
+
+    rooms: list[Room] = []
+    low_conf_rooms: list[str] = []
+    for idx, poly in enumerate(shifted_polys, start=1):
+        coords = list(poly.exterior.coords)[:-1]
+        if len(coords) < 3:
+            continue
+        pts_mm = [Point2D(x_mm=round(x, 1), y_mm=round(y, 1)) for x, y in coords]
+        area_m2 = poly.area / 1_000_000.0
+        matched = poly_labels.get(idx - 1, [])
+        if matched:
+            raw_lbl = clean_room_label(" / ".join(matched))
+            norm_type = classify_room_label(raw_lbl, std.room_templates).normalized_type
+            has_text = True
+        else:
+            bx0, by0, bx1, by1 = poly.bounds
+            aspect = max(bx1 - bx0, by1 - by0) / max(min(bx1 - bx0, by1 - by0), 1.0)
+            if area_m2 <= 4.5 and aspect >= 1.9:
+                raw_lbl = f"Corridor (Inferred {idx})"
+                norm_type = RoomType.CORRIDOR
+            elif 2.5 <= area_m2 <= 8.0:
+                raw_lbl = f"Bathroom / Wet Room (Inferred {idx})"
+                norm_type = RoomType.BATHROOM
+            elif area_m2 >= 9.0:
+                raw_lbl = f"Room {idx} (Unlabelled)"
+                norm_type = RoomType.BEDROOM
+            else:
+                raw_lbl = f"Storage / Utility (Inferred {idx})"
+                norm_type = RoomType.STORAGE
+            has_text = False
+
+        conf: Literal["high", "medium", "low"] = score_room_detection_confidence(
+            poly,
+            has_matched_text_label=has_text,
+            from_explicit_room_layer=False,
+            from_pdf_vector=True,
+        )
+        if conf == "low":
+            low_conf_rooms.append(raw_lbl)
+
+        rt = std.room_templates.rooms[norm_type]
+        rooms.append(
+            Room(
+                id=f"R{idx}",
+                raw_label=raw_lbl,
+                normalized_type=norm_type,
+                polygon_mm=pts_mm,
+                area_m2=round(area_m2, 2),
+                ceiling_height_mm=2900.0,
+                is_wet_room=rt.is_wet_room,
+                is_outdoor=rt.is_outdoor,
+                ambient_temp_c=(
+                    std.eac_rules.ambient_defaults_c.roof_outdoor_c if rt.is_outdoor else None
+                ),
+                floor="GF",
+                detection_confidence=conf,
+            )
+        )
+
+    if not rooms:
+        raise ValueError("Vector PDF ingestion recovered zero valid rooms after polygon cleanup.")
+
+    outer_ring = unary_union(shifted_polys).boundary
+    walls: list[WallSegment] = []
+    seen_edges: set[tuple[int, int, int, int]] = set()
+    for r in rooms:
+        rpts = r.polygon_mm
+        for i in range(len(rpts)):
+            a, b = rpts[i], rpts[(i + 1) % len(rpts)]
+            if math.hypot(b.x_mm - a.x_mm, b.y_mm - a.y_mm) < 120.0:
+                continue
+            k1 = (round(a.x_mm / 50), round(a.y_mm / 50), round(b.x_mm / 50), round(b.y_mm / 50))
+            k2 = (k1[2], k1[3], k1[0], k1[1])
+            if k1 in seen_edges or k2 in seen_edges:
+                continue
+            seen_edges.add(k1)
+            mid = Point((a.x_mm + b.x_mm) * 0.5, (a.y_mm + b.y_mm) * 0.5)
+            is_ext = float(outer_ring.distance(mid)) < 90.0
+            walls.append(
+                WallSegment(id=f"W{len(walls) + 1}", start=a, end=b, is_exterior=is_ext)
+            )
+    return rooms, walls, low_conf_rooms
+
+
 def ingest_vector_pdf(
     pdf_path: Path,
     *,
@@ -440,240 +663,26 @@ def ingest_vector_pdf(
             )
         )
 
-    # Convert all segments to architectural mm (Y flipped so North is up)
-    all_segs_mm: list[tuple[Point2D, Point2D, float]] = []
-    for (x0, y0), (x1, y1), lw in raw_segs_pt:
-        p0 = Point2D(x_mm=round(x0 * mm_per_pt, 1), y_mm=round((page_h_pt - y0) * mm_per_pt, 1))
-        p1 = Point2D(x_mm=round(x1 * mm_per_pt, 1), y_mm=round((page_h_pt - y1) * mm_per_pt, 1))
-        all_segs_mm.append((p0, p1, lw))
-
-    # Extract merged Greek/English room text labels
+    all_segs_mm: list[tuple[Point2D, Point2D, float]] = [
+        (
+            Point2D(x_mm=round(x0 * mm_per_pt, 1), y_mm=round((page_h_pt - y0) * mm_per_pt, 1)),
+            Point2D(x_mm=round(x1 * mm_per_pt, 1), y_mm=round((page_h_pt - y1) * mm_per_pt, 1)),
+            lw,
+        )
+        for (x0, y0), (x1, y1), lw in raw_segs_pt
+    ]
     labels = _merge_room_words(words, page_h_pt, mm_per_pt)
     room_hint_pts = [Point(pt.x_mm, pt.y_mm) for _txt, pt, is_hint in labels if is_hint]
 
-    # Identify structural walls via CAD pen-weight separation (>= 0.35 pt) or double-wall pairing
-    thick_segs = [(p0, p1) for p0, p1, lw in all_segs_mm if lw >= 0.35]
-    if len(thick_segs) >= 30:
-        struct_segs = thick_segs
-        wall_method = "CAD pen-weight (>=0.35 pt)"
-    else:
-        plain_segs = [(p0, p1) for p0, p1, _lw in all_segs_mm]
-        paired = extract_parallel_double_wall_lines(plain_segs)
-        struct_segs = paired if len(paired) >= 16 else plain_segs
-        wall_method = "parallel double-wall cavity pairing"
-
-    # Isolate the floor-plan spatial island (separating ΚΑΤΟΨΗ from elevations/sections on page!)
-    struct_lines = [
-        LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)])
-        for p0, p1 in struct_segs
-        if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 60.0
-    ]
-    if not struct_lines:
-        raise ValueError("No structural wall line segments recovered from PDF vector geometry.")
-
-    island_union = unary_union([ln.buffer(750.0, cap_style=2) for ln in struct_lines])
-    islands = (
-        list(island_union.geoms)
-        if isinstance(island_union, MultiPolygon)
-        else ([island_union] if isinstance(island_union, Polygon) else [])
+    raw_polys, labels, wall_method = _extract_pdf_wall_cavities(
+        all_segs_mm, labels, room_hint_pts, page_idx=page_idx, scale_n=scale_n
     )
+    rooms, walls, low_conf_rooms = _build_pdf_rooms_and_walls(raw_polys, labels, std)
 
-    if len(islands) > 1:
-        def _island_score(isl: Polygon) -> float:
-            hits = sum(1 for pt in room_hint_pts if isl.buffer(400.0).contains(pt))
-            return float(hits * 1000.0 + (float(isl.area) / 1_000_000.0))
-
-        plan_island = max(islands, key=_island_score)
-        keep_zone = Polygon(plan_island.exterior).buffer(650.0)
-        struct_segs = [
-            (p0, p1)
-            for p0, p1 in struct_segs
-            if keep_zone.intersects(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
-        ]
-        struct_lines = [
-            LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)])
-            for p0, p1 in struct_segs
-            if math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm) >= 60.0
-        ]
-        # Keep only labels inside the floorplan island
-        labels = [
-            (txt, pt, hint)
-            for txt, pt, hint in labels
-            if keep_zone.contains(Point(pt.x_mm, pt.y_mm))
-        ]
-
-    # Include thin structural window/door sill lines bridging between wall endpoints
-    wall_union_thin = unary_union([ln.buffer(160.0) for ln in struct_lines])
-    bridging_thin: list[LineString] = []
-    for p0, p1, lw in all_segs_mm:
-        if lw >= 0.35:
-            continue
-        seg_len = math.hypot(p1.x_mm - p0.x_mm, p1.y_mm - p0.y_mm)
-        if not (550.0 <= seg_len <= 2800.0):
-            continue
-        pt_a = Point(p0.x_mm, p0.y_mm)
-        pt_b = Point(p1.x_mm, p1.y_mm)
-        if wall_union_thin.contains(pt_a) and wall_union_thin.contains(pt_b):
-            bridging_thin.append(LineString([(p0.x_mm, p0.y_mm), (p1.x_mm, p1.y_mm)]))
-
-    # Also close micro drafting gaps (10–150 mm) cleanly
-    gap_bridges = bridge_nearby_wall_endpoints(struct_segs, min_gap_mm=10.0, max_gap_mm=150.0)
-    gap_lines = [LineString([(a.x_mm, a.y_mm), (b.x_mm, b.y_mm)]) for a, b in gap_bridges]
-
-    combined_lines = struct_lines + bridging_thin + gap_lines
-
-    # Extract rooms: test tight wall-cavity closing (160mm) vs doorway-gap closing (500mm)
-    tight_polys = _extract_cavities_from_lines(
-        combined_lines, buffer_mm=160.0, subtract_thin_mm=65.0
-    )
-    bridged_polys = _extract_cavities_from_lines(
-        combined_lines, buffer_mm=480.0, subtract_thin_mm=75.0
-    )
-
-    def _eval_polys(polys: list[Polygon]) -> tuple[int, float]:
-        if not polys:
-            return (0, 0.0)
-        matched_hints = sum(
-            1 for pt in room_hint_pts if any(p.buffer(150.0).contains(pt) for p in polys)
-        )
-        return (matched_hints * 10 + len(polys), sum(p.area for p in polys))
-
-    raw_polys = (
-        bridged_polys
-        if _eval_polys(bridged_polys) >= _eval_polys(tight_polys)
-        else tight_polys
-    )
-    if not raw_polys:
-        raw_polys = tight_polys or bridged_polys
-
-    if not raw_polys:
-        raise ValueError(
-            f"Vector PDF page {page_idx + 1} parsed {len(struct_segs)} wall segments "
-            f"(scale 1:{scale_n}), but no enclosed architectural rooms (>=1.2 m²) could be "
-            "polygonized. Verify the PDF contains closed floor-plan wall geometry."
-        )
-
-    # Normalize coordinates so building bottom-left sits at (0, 0) for tidy downstream drafting
-    all_x = [c[0] for p in raw_polys for c in p.exterior.coords]
-    all_y = [c[1] for p in raw_polys for c in p.exterior.coords]
-    ox, oy = min(all_x), min(all_y)
-
-    def _shift_poly(poly: Polygon) -> Polygon:
-        return Polygon([(x - ox, y - oy) for x, y in list(poly.exterior.coords)[:-1]])
-
-    shifted_polys = [_shift_poly(p) for p in raw_polys]
-    shifted_labels = [
-        (txt, Point2D(x_mm=round(pt.x_mm - ox, 1), y_mm=round(pt.y_mm - oy, 1)), hint)
-        for txt, pt, hint in labels
-    ]
-
-    # Match labels to room polygons (join multiple open-plan zone labels with " / ")
-    poly_labels: dict[int, list[str]] = {i: [] for i in range(len(shifted_polys))}
-    for txt, pt, is_hint in shifted_labels:
-        if not is_hint:
-            continue
-        sp = Point(pt.x_mm, pt.y_mm)
-        containing = [i for i, p in enumerate(shifted_polys) if p.contains(sp)]
-        if containing:
-            idx_best = min(containing, key=lambda i: shifted_polys[i].area)
-            if txt not in poly_labels[idx_best]:
-                poly_labels[idx_best].append(txt)
-        else:
-            dists = [(float(p.distance(sp)), i) for i, p in enumerate(shifted_polys)]
-            min_d, idx_near = min(dists)
-            if min_d <= 850.0 and txt not in poly_labels[idx_near]:
-                poly_labels[idx_near].append(txt)
-
-    # Build canonical Room objects with honest per-room detection_confidence
-    rooms: list[Room] = []
-    low_conf_rooms: list[str] = []
-    for idx, poly in enumerate(shifted_polys, start=1):
-        coords = list(poly.exterior.coords)[:-1]
-        if len(coords) < 3:
-            continue
-        pts_mm = [Point2D(x_mm=round(x, 1), y_mm=round(y, 1)) for x, y in coords]
-        area_m2 = poly.area / 1_000_000.0
-        matched = poly_labels.get(idx - 1, [])
-        if matched:
-            raw_lbl = clean_room_label(" / ".join(matched))
-            norm_type = classify_room_label(raw_lbl, std.room_templates).normalized_type
-            has_text = True
-        else:
-            # Infer unlabelled compact utility/wet/corridor cavity conservatively
-            bx0, by0, bx1, by1 = poly.bounds
-            aspect = max(bx1 - bx0, by1 - by0) / max(min(bx1 - bx0, by1 - by0), 1.0)
-            if area_m2 <= 4.5 and aspect >= 1.9:
-                raw_lbl = f"Corridor (Inferred {idx})"
-                norm_type = RoomType.CORRIDOR
-            elif 2.5 <= area_m2 <= 8.0:
-                raw_lbl = f"Bathroom / Wet Room (Inferred {idx})"
-                norm_type = RoomType.BATHROOM
-            elif area_m2 >= 9.0:
-                raw_lbl = f"Room {idx} (Unlabelled)"
-                norm_type = RoomType.BEDROOM
-            else:
-                raw_lbl = f"Storage / Utility (Inferred {idx})"
-                norm_type = RoomType.STORAGE
-            has_text = False
-
-        conf: Literal["high", "medium", "low"] = score_room_detection_confidence(
-            poly,
-            has_matched_text_label=has_text,
-            from_explicit_room_layer=False,
-            from_pdf_vector=True,
-        )
-        if conf == "low":
-            low_conf_rooms.append(raw_lbl)
-
-        rt = std.room_templates.rooms[norm_type]
-        rooms.append(
-            Room(
-                id=f"R{idx}",
-                raw_label=raw_lbl,
-                normalized_type=norm_type,
-                polygon_mm=pts_mm,
-                area_m2=round(area_m2, 2),
-                ceiling_height_mm=2900.0,
-                is_wet_room=rt.is_wet_room,
-                is_outdoor=rt.is_outdoor,
-                ambient_temp_c=(
-                    std.eac_rules.ambient_defaults_c.roof_outdoor_c if rt.is_outdoor else None
-                ),
-                floor="GF",
-                detection_confidence=conf,
-            )
-        )
-
-    if not rooms:
-        raise ValueError("Vector PDF ingestion recovered zero valid rooms after polygon cleanup.")
-
-    # Derive crisp exterior & interior WallSegments from unified room boundaries
-    outer_ring = unary_union(shifted_polys).boundary
-    walls: list[WallSegment] = []
-    seen_edges: set[tuple[int, int, int, int]] = set()
-    for r in rooms:
-        rpts = r.polygon_mm
-        for i in range(len(rpts)):
-            a, b = rpts[i], rpts[(i + 1) % len(rpts)]
-            if math.hypot(b.x_mm - a.x_mm, b.y_mm - a.y_mm) < 120.0:
-                continue
-            k1 = (round(a.x_mm / 50), round(a.y_mm / 50), round(b.x_mm / 50), round(b.y_mm / 50))
-            k2 = (k1[2], k1[3], k1[0], k1[1])
-            if k1 in seen_edges or k2 in seen_edges:
-                continue
-            seen_edges.add(k1)
-            mid = Point((a.x_mm + b.x_mm) * 0.5, (a.y_mm + b.y_mm) * 0.5)
-            is_ext = float(outer_ring.distance(mid)) < 90.0
-            walls.append(
-                WallSegment(id=f"W{len(walls) + 1}", start=a, end=b, is_exterior=is_ext)
-            )
-
-    # Place DB1 in corridor / central circulation room (or largest room perimeter)
     corridor = next((r for r in rooms if r.normalized_type == RoomType.CORRIDOR), None)
     db_room = corridor or max(rooms, key=lambda r: r.area_m2)
     db_pt = db_room.centroid_mm()
 
-    # Infer building type
     if building_type is not None:
         inferred_bt = building_type
     else:

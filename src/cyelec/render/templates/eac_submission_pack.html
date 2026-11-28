@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="__HTML_LANG__">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" type="image/svg+xml" href="__DEFAULT_LOGO_URI__" />
+  <title>__PACK_TITLE__ — __PROJECT_NAME__</title>
+  <style>
+__EAC_PACK_CSS__
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hdr-brand">
+      <img src="__HEADER_LOGO_URI__" alt="CyElec Logo" class="hdr-logo" />
+      <h1>__PACK_TITLE__ — __PROJECT_NAME__</h1>
+    </div>
+    <div>
+      <code>cyelec-pipeline v__PIPELINE_VERSION__</code> | __TIMESTAMP_UTC__
+    </div>
+  </header>
+
+  __BRANDING_BANNER__
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-k">Recommended EAC Supply</div>
+      <div class="card-v">__SUPPLY_TIER__</div>
+    </div>
+    <div class="card">
+      <div class="card-k">Earthing &amp; Profile</div>
+      <div class="card-v">__EARTHING_PROFILE__</div>
+    </div>
+    <div class="card">
+      <div class="card-k">Spatial Layout</div>
+      <div class="card-v">__SPATIAL_LAYOUT__</div>
+    </div>
+    <div class="card">
+      <div class="card-k">Indicative BOQ Total</div>
+      <div class="card-v">__BOQ_TOTAL__</div>
+    </div>
+    <div class="card">
+      <div class="card-k">Review Gate Status</div>
+      <div class="card-v">__REVIEW_STATUS__</div>
+    </div>
+  </div>
+
+  <p>
+    <strong>Floor Area:</strong> __FLOOR_AREA_M2__ m² |
+    <strong>Circuits:</strong> __CIRCUIT_COUNT__ |
+    <strong>Demand:</strong> __DIVERSIFIED_KVA__ kVA diversified
+    (__CONNECTED_KVA__ kVA connected) |
+    <strong>Balance:</strong> __BAL_SUMMARY__ |
+    <strong>Input SHA-256:</strong> <code>__INPUT_SHA16__</code>
+  </p>
+
+  __FLOORPLAN_SECTION__
+
+  <section>
+    <h2>2. __SLD_TITLE__ — __DB_ANCHOR_ID__</h2>
+    <div class="sld-frame">
+      __SLD_SVG__
+    </div>
+  </section>
+
+  <section>
+    <h2>3. Submission Deliverable Manifest (SHA-256 Verified)</h2>
+    <table>
+      <thead>
+        <tr><th>Artifact Key</th><th>Filename</th><th class="r">Size</th><th>SHA-256</th></tr>
+      </thead>
+      <tbody>
+        __FILE_ROWS__
+      </tbody>
+    </table>
+  </section>
+
+  <section class="signoff">
+    <strong>4. __ETEK_SIGNOFF_TITLE__</strong>
+    <div class="signoff-grid">
+      <div class="sig-line">__ENG_NAME__</div>
+      <div class="sig-line">__ETEK_NO__</div>
+      <div class="sig-line">Signature &amp; Official Stamp</div>
+      <div class="sig-line">Date</div>
+    </div>
+  </section>
+</body>
+</html>

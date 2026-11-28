@@ -873,6 +873,206 @@ def _add_dxf_conduit_routes(
     return room_floor, trunk_callout_anchors
 
 
+_DXF_STATIC_DEVICE_TAGS: dict[DeviceType, str] = {
+    DeviceType.EAC_METER_CABINET: "EAC-MTR H+1500",
+    DeviceType.EARTH_PIT: "TT-EARTH-PIT",
+    DeviceType.TELECOM_CABINET: "9U-RACK/ONT H+1800",
+    DeviceType.INTERCOM_OUTDOOR: "V-INTERCOM-EXT",
+    DeviceType.ALARM_PANEL: "ALARM-PANEL",
+    DeviceType.ALARM_KEYPAD: "KP H+1400",
+    DeviceType.ALARM_SIREN: "SIREN H+3000",
+}
+
+_DXF_SHORT_ID_TAG_TEMPLATES: dict[DeviceType, str] = {
+    DeviceType.DATA_RJ45: "2xCAT6:{sid}",
+    DeviceType.TV_OUTLET: "TV/SAT:{sid}",
+    DeviceType.WIFI_AP: "WIFI-AP:{sid}",
+    DeviceType.INTERCOM_INDOOR: "V-MON:{sid} H+1500",
+    DeviceType.ALARM_PIR: "PIR:{sid}",
+    DeviceType.CCTV_CAMERA: "CCTV:{sid} IP67",
+    DeviceType.KNX_KEYPAD: "KNX:{sid} H+1200",
+    DeviceType.ROOM_THERMOSTAT: "TH:{sid} H+1500",
+}
+
+_DXF_LAYER_GROUPS: tuple[tuple[frozenset[DeviceType], str, bool], ...] = (
+    (
+        frozenset(
+            {
+                DeviceType.LUMINAIRE,
+                DeviceType.PENDANT_LIGHT,
+                DeviceType.WALL_SCONCE,
+                DeviceType.LINEAR_COVE,
+                DeviceType.OUTDOOR_PIR_LIGHT,
+                DeviceType.GARDEN_BOLLARD,
+                DeviceType.MIRROR_LIGHT,
+                DeviceType.EXHAUST_FAN,
+            }
+        ),
+        "E-LITE",
+        False,
+    ),
+    (
+        frozenset({DeviceType.SWITCH, DeviceType.DIMMER_SWITCH, DeviceType.FAN_ISOLATOR_3P}),
+        "E-SWIT",
+        True,
+    ),
+    (frozenset({DeviceType.SOCKET_TWIN, DeviceType.KITCHEN_FCU}), "E-SOCK", True),
+    (
+        frozenset(
+            {
+                DeviceType.SPLIT_AC,
+                DeviceType.VRV_OUTDOOR,
+                DeviceType.VRV_INDOOR_ISOLATOR,
+                DeviceType.HEAT_PUMP_OUTDOOR,
+                DeviceType.HEAT_PUMP_HYDROBOX,
+                DeviceType.UFH_MANIFOLD,
+                DeviceType.ROOM_THERMOSTAT,
+            }
+        ),
+        "E-AC",
+        True,
+    ),
+    (frozenset({DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT}), "E-EARTHING", False),
+    (
+        frozenset(
+            {
+                DeviceType.TELECOM_CABINET,
+                DeviceType.DATA_RJ45,
+                DeviceType.TV_OUTLET,
+                DeviceType.WIFI_AP,
+            }
+        ),
+        "E-ELV-DATA",
+        True,
+    ),
+    (
+        frozenset(
+            {
+                DeviceType.INTERCOM_OUTDOOR,
+                DeviceType.INTERCOM_INDOOR,
+                DeviceType.ALARM_PANEL,
+                DeviceType.ALARM_PIR,
+                DeviceType.ALARM_KEYPAD,
+                DeviceType.ALARM_SIREN,
+                DeviceType.CCTV_CAMERA,
+            }
+        ),
+        "E-ELV-SEC",
+        True,
+    ),
+    (frozenset({DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR}), "E-ELV-SMOKE", False),
+    (frozenset({DeviceType.KNX_KEYPAD}), "E-KNX", True),
+)
+
+
+def _format_dxf_device_tag(dev: PlacedDevice) -> str:
+    """Format canonical DXF callout tag for an electrical/ELV placed device."""
+    dt = dev.device_type
+    if dt in _DXF_STATIC_DEVICE_TAGS:
+        return _DXF_STATIC_DEVICE_TAGS[dt]
+    short_id = dev.device_id.split("-")[-1]
+    if dt in _DXF_SHORT_ID_TAG_TEMPLATES:
+        return _DXF_SHORT_ID_TAG_TEMPLATES[dt].format(sid=short_id)
+
+    cid = dev.circuit_id or "?"
+    if dt == DeviceType.SMOKE_DETECTOR:
+        return f"{dev.circuit_id or 'SD'}:SMOKE"
+    if dt == DeviceType.HEAT_DETECTOR:
+        return f"{dev.circuit_id or 'HD'}:HEAT"
+    if dt == DeviceType.DIMMER_SWITCH:
+        return f"{cid}:{short_id} DIM"
+    if dt == DeviceType.SHUTTER_SWITCH:
+        return f"{cid}:SH H+1200"
+    if dt == DeviceType.EV_WALLBOX:
+        return f"{dev.circuit_id or 'EV'}:EV-WB H+1300"
+    if dt == DeviceType.SWITCH:
+        st = dev.switch_type or "1G1W"
+        grp = dev.switch_group or "a"
+        h_sfx = " H+750" if abs(dev.mounting_height_mm - 750.0) < 10.0 else ""
+        return f"{cid}:{short_id} {st}({grp}){h_sfx}"
+    if dt == DeviceType.FAN_ISOLATOR_3P:
+        return f"{cid}:3P-FAN H+2200"
+    if dt in (
+        DeviceType.LUMINAIRE,
+        DeviceType.PENDANT_LIGHT,
+        DeviceType.OUTDOOR_PIR_LIGHT,
+        DeviceType.GARDEN_BOLLARD,
+    ):
+        grp_s = f"({dev.switch_group})" if dev.switch_group else ""
+        ip_s = f" {dev.ip_rating}" if dev.ip_rating != "IP20" else ""
+        return f"{cid}:{short_id}{grp_s}{ip_s}"
+    if dt == DeviceType.MIRROR_LIGHT:
+        return f"{cid}:{short_id}(b) IP44 H+2000"
+    if dt == DeviceType.EXHAUST_FAN:
+        return f"{cid}:FAN(a) H+2400"
+    if dt == DeviceType.COOKER_CONTROL_UNIT:
+        return f"{cid}:45A-CCU H+1150"
+    if dt == DeviceType.WATER_HEATER_DP_SWITCH:
+        return f"{cid}:20A-DP H+1200"
+    if dt in (DeviceType.SPLIT_AC, DeviceType.VRV_INDOOR_ISOLATOR):
+        return f"{cid}:{short_id} H+2200"
+    if dt == DeviceType.SOCKET_TWIN and dev.mounting_height_mm >= 1000.0:
+        return f"{cid}:{short_id} H+{int(dev.mounting_height_mm)}"
+    return f"{cid}:{short_id}"
+
+
+def _dxf_device_block_layer_rot(dev: PlacedDevice) -> tuple[str, str, float]:
+    """Return (block_name, dxf_layer, rotation_deg) for a placed device."""
+    blk_name = _BLOCK_NAMES.get(dev.device_type, "CYELEC_APPL")
+    if dev.device_type == DeviceType.SWITCH:
+        if dev.switch_type == "2G1W":
+            blk_name = "CYELEC_SWITCH_2G"
+        elif dev.switch_type == "1G2W":
+            blk_name = "CYELEC_SWITCH_2W"
+
+    for types, layer, use_wall_angle in _DXF_LAYER_GROUPS:
+        if dev.device_type in types:
+            rot = (
+                dev.wall_angle_deg
+                if (use_wall_angle or dev.device_type == DeviceType.MIRROR_LIGHT)
+                else 0.0
+            )
+            return blk_name, layer, rot
+    return blk_name, "E-APPL", dev.wall_angle_deg
+
+
+def _add_elv_interlink_curves(
+    msp: Modelspace,
+    active_devices: list[PlacedDevice],
+    room_floor: dict[str, str],
+    inv_scale: float,
+) -> None:
+    """Draw per-floor interlinked smoke/heat detector and KNX bus dashed arcs on E-103."""
+    def _s(v_mm: float) -> float:
+        return round(v_mm * inv_scale, 4)
+
+    for types, layer, bulge in (
+        (frozenset({DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR}), "E-ELV-SMOKE", 0.14),
+        (frozenset({DeviceType.KNX_KEYPAD}), "E-KNX", -0.14),
+    ):
+        by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
+        for d in active_devices:
+            if d.device_type in types:
+                by_flr[room_floor.get(d.room_id, "GF")].append(d)
+        for flr_devs in by_flr.values():
+            for a_d, b_d in itertools.pairwise(flr_devs):
+                if (
+                    math.hypot(
+                        b_d.location_mm.x_mm - a_d.location_mm.x_mm,
+                        b_d.location_mm.y_mm - a_d.location_mm.y_mm,
+                    )
+                    <= 8500.0
+                ):
+                    _add_dashed_curve(
+                        msp,
+                        (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
+                        (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
+                        layer=layer,
+                        bulge_frac=bulge,
+                        dash_count=7,
+                    )
+
+
 def _add_dxf_device_blocks(
     msp: Modelspace,
     spatial: SpatialLayoutResult,
@@ -886,7 +1086,6 @@ def _add_dxf_device_blocks(
     def _s(v_mm: float) -> float:
         return round(v_mm * inv_scale, 4)
 
-    # 3. Placed IEC 60617 / ELV named BLOCK references (wall-rotated) + de-collided circuit tags
     if discipline == "lighting":
         active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_DEVICE_TYPES]
     elif discipline == "power":
@@ -894,14 +1093,12 @@ def _add_dxf_device_blocks(
     elif discipline == "elv":
         active_devices = [d for d in spatial.devices if d.device_type in _ELV_DEVICE_TYPES]
     else:
-        # Combined LV Coordination sheet (Lighting + Power, excluding ELV to avoid sheet clutter)
         active_devices = [
             d
             for d in spatial.devices
             if d.device_type in (_LIGHTING_DEVICE_TYPES | _POWER_DEVICE_TYPES)
         ]
 
-    # Pre-seed occupied_boxes with every device footprint so labels never print over symbols
     for dev in active_devices:
         x, y = _s(dev.location_mm.x_mm), _s(dev.location_mm.y_mm)
         rad = _s(125.0)
@@ -909,159 +1106,12 @@ def _add_dxf_device_blocks(
 
     for dev in active_devices:
         x, y = _s(dev.location_mm.x_mm), _s(dev.location_mm.y_mm)
-        short_id = dev.device_id.split("-")[-1]
-        if dev.device_type == DeviceType.EAC_METER_CABINET:
-            tag = "EAC-MTR H+1500"
-        elif dev.device_type == DeviceType.EARTH_PIT:
-            tag = "TT-EARTH-PIT"
-        elif dev.device_type == DeviceType.TELECOM_CABINET:
-            tag = "9U-RACK/ONT H+1800"
-        elif dev.device_type == DeviceType.DATA_RJ45:
-            tag = f"2xCAT6:{short_id}"
-        elif dev.device_type == DeviceType.TV_OUTLET:
-            tag = f"TV/SAT:{short_id}"
-        elif dev.device_type == DeviceType.WIFI_AP:
-            tag = f"WIFI-AP:{short_id}"
-        elif dev.device_type == DeviceType.INTERCOM_OUTDOOR:
-            tag = "V-INTERCOM-EXT"
-        elif dev.device_type == DeviceType.INTERCOM_INDOOR:
-            tag = f"V-MON:{short_id} H+1500"
-        elif dev.device_type == DeviceType.ALARM_PANEL:
-            tag = "ALARM-PANEL"
-        elif dev.device_type == DeviceType.ALARM_KEYPAD:
-            tag = "KP H+1400"
-        elif dev.device_type == DeviceType.ALARM_PIR:
-            tag = f"PIR:{short_id}"
-        elif dev.device_type == DeviceType.ALARM_SIREN:
-            tag = "SIREN H+3000"
-        elif dev.device_type == DeviceType.CCTV_CAMERA:
-            tag = f"CCTV:{short_id} IP67"
-        elif dev.device_type == DeviceType.SMOKE_DETECTOR:
-            tag = f"{dev.circuit_id or 'SD'}:SMOKE"
-        elif dev.device_type == DeviceType.HEAT_DETECTOR:
-            tag = f"{dev.circuit_id or 'HD'}:HEAT"
-        elif dev.device_type == DeviceType.KNX_KEYPAD:
-            tag = f"KNX:{short_id} H+1200"
-        elif dev.device_type == DeviceType.DIMMER_SWITCH:
-            tag = f"{dev.circuit_id or '?'}:{short_id} DIM"
-        elif dev.device_type == DeviceType.SHUTTER_SWITCH:
-            tag = f"{dev.circuit_id or '?'}:SH H+1200"
-        elif dev.device_type == DeviceType.ROOM_THERMOSTAT:
-            tag = f"TH:{short_id} H+1500"
-        elif dev.device_type == DeviceType.EV_WALLBOX:
-            tag = f"{dev.circuit_id or 'EV'}:EV-WB H+1300"
-        elif dev.device_type == DeviceType.SWITCH:
-            st = dev.switch_type or "1G1W"
-            grp = dev.switch_group or "a"
-            h_sfx = " H+750" if abs(dev.mounting_height_mm - 750.0) < 10.0 else ""
-            tag = f"{dev.circuit_id or '?'}:{short_id} {st}({grp}){h_sfx}"
-        elif dev.device_type == DeviceType.FAN_ISOLATOR_3P:
-            tag = f"{dev.circuit_id or '?'}:3P-FAN H+2200"
-        elif dev.device_type in (
-            DeviceType.LUMINAIRE,
-            DeviceType.PENDANT_LIGHT,
-            DeviceType.OUTDOOR_PIR_LIGHT,
-            DeviceType.GARDEN_BOLLARD,
-        ):
-            grp_s = f"({dev.switch_group})" if dev.switch_group else ""
-            ip_s = f" {dev.ip_rating}" if dev.ip_rating != "IP20" else ""
-            tag = f"{dev.circuit_id or '?'}:{short_id}{grp_s}{ip_s}"
-        elif dev.device_type == DeviceType.MIRROR_LIGHT:
-            tag = f"{dev.circuit_id or '?'}:{short_id}(b) IP44 H+2000"
-        elif dev.device_type == DeviceType.EXHAUST_FAN:
-            tag = f"{dev.circuit_id or '?'}:FAN(a) H+2400"
-        elif dev.device_type == DeviceType.COOKER_CONTROL_UNIT:
-            tag = f"{dev.circuit_id or '?'}:45A-CCU H+1150"
-        elif dev.device_type == DeviceType.WATER_HEATER_DP_SWITCH:
-            tag = f"{dev.circuit_id or '?'}:20A-DP H+1200"
-        elif dev.device_type in (DeviceType.SPLIT_AC, DeviceType.VRV_INDOOR_ISOLATOR):
-            tag = f"{dev.circuit_id or '?'}:{short_id} H+2200"
-        elif dev.device_type == DeviceType.SOCKET_TWIN and dev.mounting_height_mm >= 1000.0:
-            tag = f"{dev.circuit_id or '?'}:{short_id} H+{int(dev.mounting_height_mm)}"
-        else:
-            tag = f"{dev.circuit_id or '?'}:{short_id}"
-
-        blk_name = _BLOCK_NAMES.get(dev.device_type, "CYELEC_APPL")
-        if dev.device_type == DeviceType.SWITCH:
-            if dev.switch_type == "2G1W":
-                blk_name = "CYELEC_SWITCH_2G"
-            elif dev.switch_type == "1G2W":
-                blk_name = "CYELEC_SWITCH_2W"
-
-        if dev.device_type in (
-            DeviceType.LUMINAIRE,
-            DeviceType.PENDANT_LIGHT,
-            DeviceType.WALL_SCONCE,
-            DeviceType.LINEAR_COVE,
-            DeviceType.OUTDOOR_PIR_LIGHT,
-            DeviceType.GARDEN_BOLLARD,
-            DeviceType.MIRROR_LIGHT,
-            DeviceType.EXHAUST_FAN,
-        ):
-            layer = "E-LITE"
-            rot = 0.0 if dev.device_type != DeviceType.MIRROR_LIGHT else dev.wall_angle_deg
-        elif dev.device_type in (
-            DeviceType.SWITCH,
-            DeviceType.DIMMER_SWITCH,
-            DeviceType.FAN_ISOLATOR_3P,
-        ):
-            layer = "E-SWIT"
-            rot = dev.wall_angle_deg
-        elif dev.device_type in (DeviceType.SOCKET_TWIN, DeviceType.KITCHEN_FCU):
-            layer = "E-SOCK"
-            rot = dev.wall_angle_deg
-        elif dev.device_type in (
-            DeviceType.SPLIT_AC,
-            DeviceType.VRV_OUTDOOR,
-            DeviceType.VRV_INDOOR_ISOLATOR,
-            DeviceType.HEAT_PUMP_OUTDOOR,
-            DeviceType.HEAT_PUMP_HYDROBOX,
-            DeviceType.UFH_MANIFOLD,
-            DeviceType.ROOM_THERMOSTAT,
-        ):
-            layer = "E-AC"
-            rot = dev.wall_angle_deg
-        elif dev.device_type in (DeviceType.EAC_METER_CABINET, DeviceType.EARTH_PIT):
-            layer = "E-EARTHING"
-            rot = 0.0
-        elif dev.device_type in (
-            DeviceType.TELECOM_CABINET,
-            DeviceType.DATA_RJ45,
-            DeviceType.TV_OUTLET,
-            DeviceType.WIFI_AP,
-        ):
-            layer = "E-ELV-DATA"
-            rot = dev.wall_angle_deg
-        elif dev.device_type in (
-            DeviceType.INTERCOM_OUTDOOR,
-            DeviceType.INTERCOM_INDOOR,
-            DeviceType.ALARM_PANEL,
-            DeviceType.ALARM_PIR,
-            DeviceType.ALARM_KEYPAD,
-            DeviceType.ALARM_SIREN,
-            DeviceType.CCTV_CAMERA,
-        ):
-            layer = "E-ELV-SEC"
-            rot = dev.wall_angle_deg
-        elif dev.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
-            layer = "E-ELV-SMOKE"
-            rot = 0.0
-        elif dev.device_type == DeviceType.KNX_KEYPAD:
-            layer = "E-KNX"
-            rot = dev.wall_angle_deg
-        else:
-            layer = "E-APPL"
-            rot = dev.wall_angle_deg
-
-        msp.add_blockref(
-            blk_name,
-            (x, y),
-            dxfattribs={"layer": layer, "rotation": rot},
-        )
+        tag = _format_dxf_device_tag(dev)
+        blk_name, layer, rot = _dxf_device_block_layer_rot(dev)
+        msp.add_blockref(blk_name, (x, y), dxfattribs={"layer": layer, "rotation": rot})
         lx, ly = _place_decollided_label(x, y, tag, _s(60.0), occupied_boxes, inv_scale)
         msp.add_text(tag, dxfattribs={"layer": layer, "height": _s(60.0)}).set_placement((lx, ly))
 
-    # 3b. Curved dashed switch-to-luminaire/fan control legs on E-SWIT-LEG (Lighting & Combined)
     if discipline in ("combined", "lighting") and spatial.switch_legs:
         dev_by_id = {d.device_id: d for d in active_devices}
         for leg in spatial.switch_legs:
@@ -1079,52 +1129,9 @@ def _add_dxf_device_blocks(
                 bulge = 0.16 if idx % 2 == 0 else -0.16
                 _add_dashed_curve(msp, p_sw, p_tgt, layer="E-SWIT-LEG", bulge_frac=bulge)
 
-    # 3b-elv. On E-103 ELV sheet, draw per-floor interlinked smoke/heat & KNX bus arcs
     if discipline == "elv":
-        smokes_by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
-        for d in active_devices:
-            if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
-                smokes_by_flr[room_floor.get(d.room_id, "GF")].append(d)
-        for flr_smokes in smokes_by_flr.values():
-            for a_d, b_d in itertools.pairwise(flr_smokes):
-                if (
-                    math.hypot(
-                        b_d.location_mm.x_mm - a_d.location_mm.x_mm,
-                        b_d.location_mm.y_mm - a_d.location_mm.y_mm,
-                    )
-                    <= 8500.0
-                ):
-                    _add_dashed_curve(
-                        msp,
-                        (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
-                        (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
-                        layer="E-ELV-SMOKE",
-                        bulge_frac=0.14,
-                        dash_count=7,
-                    )
-        knx_by_flr: dict[str, list[PlacedDevice]] = defaultdict(list)
-        for d in active_devices:
-            if d.device_type == DeviceType.KNX_KEYPAD:
-                knx_by_flr[room_floor.get(d.room_id, "GF")].append(d)
-        for flr_knx in knx_by_flr.values():
-            for a_d, b_d in itertools.pairwise(flr_knx):
-                if (
-                    math.hypot(
-                        b_d.location_mm.x_mm - a_d.location_mm.x_mm,
-                        b_d.location_mm.y_mm - a_d.location_mm.y_mm,
-                    )
-                    <= 8500.0
-                ):
-                    _add_dashed_curve(
-                        msp,
-                        (_s(a_d.location_mm.x_mm), _s(a_d.location_mm.y_mm)),
-                        (_s(b_d.location_mm.x_mm), _s(b_d.location_mm.y_mm)),
-                        layer="E-KNX",
-                        bulge_frac=-0.14,
-                        dash_count=7,
-                    )
+        _add_elv_interlink_curves(msp, active_devices, room_floor, inv_scale)
 
-    # 3c. De-collided conduit size & wire-count callouts on discipline-specific sheets
     for cx, cy, callout, cond_layer in trunk_callout_anchors:
         lx, ly = _place_decollided_label(cx, cy, callout, _s(55.0), occupied_boxes, inv_scale)
         msp.add_text(callout, dxfattribs={"layer": cond_layer, "height": _s(55.0)}).set_placement(

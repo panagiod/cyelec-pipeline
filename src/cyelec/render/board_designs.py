@@ -18,6 +18,7 @@ from ezdxf.filemanagement import new as new_dxf
 
 from cyelec.models.electrical import (
     BoardModuleSlot,
+    DinRailBoardLayout,
     ElectricalDesignResult,
 )
 from cyelec.models.spatial import Phase2DesignResult
@@ -121,6 +122,292 @@ _DOOR_COLS: tuple[tuple[float, float], ...] = (
 )
 
 
+def _compute_board_card_layout(
+    brd: DinRailBoardLayout,
+    *,
+    svg_w: int,
+    left_w: float,
+) -> _CardLayout:
+    """Pre-compute collision-free E-204 board card layout with full unwrapped text."""
+    role_lbl, role_col = _ROLE_META.get(brd.board_role, ("BOARD", "#1b365d"))
+    parent_txt = (
+        f"Fed from {brd.parent_board_id}" if brd.parent_board_id else "EAC Service Origin"
+    )
+    r1 = f"{brd.total_modules_used}/{brd.total_modules_capacity}M ({brd.spare_pct:.0f}% spare)"
+    r2 = f"Dims: {brd.enclosure_dims_mm} | {brd.ip_rating} | Busbar: {brd.busbar_rating_a}A Cu"
+    av1 = (svg_w - 30) - text_width_px(r1, 11.0, bold=True) - 16.0 - 30.0
+    av2 = (svg_w - 30) - text_width_px(r2, 8.5) - 16.0 - 30.0
+    h1, h1_fs = _wrapped(
+        f"{brd.board_id} ({brd.floor}) — {role_lbl} | {brd.standard_ref}",
+        av1,
+        11.0,
+        bold=True,
+        min_font_px=9.5,
+    )
+    h2, h2_fs = _wrapped(
+        f"{parent_txt} · Supply: {brd.incoming_supply_spec}",
+        av2,
+        8.5,
+        min_font_px=7.6,
+    )
+    h1_lh, h2_lh = 13.0, 10.5
+    h2_y0 = 15.0 + (len(h1) - 1) * h1_lh + 13.0
+    header_h = max(34.0, h2_y0 + (len(h2) - 1) * h2_lh + 8.0)
+
+    n_rows = max(1, len(brd.rows))
+    cab_h = 26.0 + n_rows * 62.0 + 18.0
+    th_txt = "PASS" if brd.thermal_pass else "UPGRADE ENCLOSURE"
+    thermal = (
+        f"IEC 60890 Thermal (40°C): P_loss = {brd.power_dissipation_w:.1f} W <= "
+        f"P_max = {brd.max_enclosure_dissipation_w:.0f} W [{th_txt}]"
+    )
+    pl = brd.phase_loads_a
+    ph_str = (
+        f"L1: {pl.get('L1', 0.0):.1f}A | L2: {pl.get('L2', 0.0):.1f}A | "
+        f"L3: {pl.get('L3', 0.0):.1f}A"
+        if pl
+        else "Feeder Bus"
+    )
+    load_txt = f"Board Load: {ph_str}"
+    load_same_row = (
+        text_width_px(thermal, 8.0, bold=True) + text_width_px(load_txt, 7.8) + 16.0
+        <= left_w
+    )
+    bars, bars_fs = _wrapped(f"Bars: {brd.terminal_bars_spec}", left_w, 7.8, min_font_px=7.2)
+    sel, sel_fs = _wrapped(
+        f"Selectivity: {brd.selectivity_note}", left_w, 7.8, min_font_px=7.2
+    )
+    foot_lh = 10.5
+    n_foot = 1 + (0 if load_same_row else 1) + len(bars) + len(sel)
+    elev_h = header_h + 8.0 + 16.0 + cab_h + 13.0 + (n_foot - 1) * foot_lh + 4.0 + 10.0
+
+    rows_cells: list[tuple[list[tuple[list[str], float]], float]] = []
+    for lr in brd.door_legend:
+        vals = (
+            f"R{lr.rail_no}.{lr.way_no}",
+            lr.circuit_id,
+            lr.phase,
+            lr.device_spec,
+            lr.cable_spec,
+            lr.description,
+        )
+        cells = [
+            fit_text_lines(v, cw, 7.4, max_lines=2, min_font_px=6.6)
+            for v, (_ox, cw) in zip(vals, _DOOR_COLS, strict=True)
+        ]
+        n_ln = max(len(c[0]) for c in cells)
+        rows_cells.append((cells, 16.5 + (n_ln - 1) * 9.0))
+    tbl_h = header_h + 8.0 + 16.0 + 18.0 + sum(rh for _c, rh in rows_cells) + 22.0
+    if not rows_cells:
+        tbl_h += 16.5
+    return _CardLayout(
+        role_col=role_col,
+        r1=r1,
+        r2=r2,
+        h1=h1,
+        h1_fs=h1_fs,
+        h2=h2,
+        h2_fs=h2_fs,
+        h2_y0=h2_y0,
+        header_h=header_h,
+        cab_h=cab_h,
+        thermal=thermal,
+        load_txt=load_txt,
+        load_same_row=load_same_row,
+        bars=bars,
+        bars_fs=bars_fs,
+        sel=sel,
+        sel_fs=sel_fs,
+        rows_cells=rows_cells,
+        h=max(elev_h, tbl_h),
+    )
+
+
+def _render_board_elevation_svg(
+    parts: list[str],
+    brd: DinRailBoardLayout,
+    cd: _CardLayout,
+    *,
+    y_card: float,
+    left_x: float,
+    left_w: float,
+) -> None:
+    """Append left-column physical 18 mm DIN-rail elevation and thermal/terminal footer."""
+    ex = left_x
+    ey = y_card + cd.header_h + 8.0
+    ew = left_w
+    cab_h = cd.cab_h
+
+    parts.append(
+        f'  <text x="{ex:.1f}" y="{ey + 10:.1f}" class="sec">'
+        "PHYSICAL FRONT ELEVATION (TRUE 18mm MODULE SCALE)</text>"
+    )
+    parts.append(
+        f'  <text x="{ex + ew:.1f}" y="{ey + 10:.1f}" text-anchor="end" class="xs">'
+        f"Ipf {brd.incoming_ipf_ka:.2f} kA &lt;= Icu {brd.min_device_icu_ka:.0f} kA</text>"
+    )
+
+    cy0 = ey + 16.0
+    cab_fill = "#f0fdfa" if brd.board_role == "secondary_pool" else "#f8fafc"
+    cab_stroke = "#0f766e" if brd.board_role == "secondary_pool" else "#475569"
+    parts.append(
+        f'  <rect x="{ex:.1f}" y="{cy0:.1f}" width="{ew:.1f}" height="{cab_h:.1f}" rx="4" '
+        f'fill="{cab_fill}" stroke="{cab_stroke}" stroke-width="1.8" />'
+    )
+    bar_y = cy0 + 6.0
+    parts.append(
+        f'  <rect x="{ex + 12:.1f}" y="{bar_y:.1f}" width="250" height="12" rx="2" '
+        'fill="#dbeafe" stroke="#2563eb" stroke-width="1" />'
+    )
+    parts.append(
+        f'  <text x="{ex + 137:.1f}" y="{bar_y + 9:.1f}" text-anchor="middle" '
+        'style="font-size:7px;font-weight:700;fill:#1e40af;">NEUTRAL TERMINAL BAR (N)</text>'
+    )
+    pe_lbl = (
+        "PE + SEC.702 BONDING BAR"
+        if brd.board_role == "secondary_pool"
+        else "EARTH / PROTECTIVE BAR (PE)"
+    )
+    parts.append(
+        f'  <rect x="{ex + ew - 262:.1f}" y="{bar_y:.1f}" width="250" height="12" rx="2" '
+        'fill="#dcfce7" stroke="#16a34a" stroke-width="1" />'
+    )
+    parts.append(
+        f'  <text x="{ex + ew - 137:.1f}" y="{bar_y + 9:.1f}" text-anchor="middle" '
+        f'style="font-size:7px;font-weight:700;fill:#166534;">{pe_lbl}</text>'
+    )
+
+    rail_x0 = ex + 26.0
+    rail_w = ew - 38.0
+    ry = cy0 + 26.0
+    for row in brd.rows:
+        cap_m = max(12, row.modules_capacity)
+        parts.append(
+            f'  <text x="{ex + 12:.1f}" y="{ry + 28:.1f}" text-anchor="middle" '
+            f'class="th">R{row.row_no}</text>'
+        )
+        parts.append(
+            f'  <rect x="{rail_x0 - 3:.1f}" y="{ry + 17:.1f}" width="{rail_w + 6:.1f}" '
+            'height="16" fill="#cbd5e1" stroke="#94a3b8" stroke-width="0.7" />'
+        )
+        px_per_m = rail_w / float(cap_m)
+        for sl in row.slots:
+            sx = rail_x0 + (sl.slot_start_m - 1) * px_per_m + 0.8
+            sw = max(6.0, sl.width_m * px_per_m - 1.6)
+            s_fill, s_stroke = _SLOT_STYLE.get(sl.kind, ("#ffffff", "#334155"))
+            dash = ' stroke-dasharray="3,2"' if sl.kind == "spare" else ""
+            parts.append(
+                f'  <rect x="{sx:.1f}" y="{ry:.1f}" width="{sw:.1f}" height="48" rx="2" '
+                f'fill="{s_fill}" stroke="{s_stroke}" stroke-width="1.1"{dash} />'
+            )
+            if sl.kind != "spare":
+                p_col = _PHASE_COLOR.get(sl.phase, "#94a3b8")
+                parts.append(
+                    f'  <rect x="{sx + 0.6:.1f}" y="{ry + 0.6:.1f}" '
+                    f'width="{max(2.0, sw - 1.2):.1f}" height="4.5" fill="{p_col}" />'
+                )
+                if sl.kind not in ("meter", "knx"):
+                    tw = min(14.0, max(5.0, sw * 0.42))
+                    tx = sx + (sw - tw) / 2.0
+                    parts.append(
+                        f'  <rect x="{tx:.1f}" y="{ry + 20.5:.1f}" width="{tw:.1f}" '
+                        'height="6.5" rx="1" fill="#1e293b" />'
+                    )
+            top_t, bot_t = _slot_lines(sl)
+            cx_m = sx + sw / 2.0
+            if top_t:
+                t_txt, t_fs = _slot_text(top_t, sw, 6.8, bold=True)
+                parts.append(
+                    f'  <text x="{cx_m:.1f}" y="{ry + 15.5:.1f}" text-anchor="middle" '
+                    f'class="mcode" style="font-size:{t_fs}px;">{esc(t_txt)}</text>'
+                )
+            if bot_t:
+                b_txt, b_fs = _slot_text(bot_t, sw, 6.1, bold=False)
+                parts.append(
+                    f'  <text x="{cx_m:.1f}" y="{ry + 41.5:.1f}" text-anchor="middle" '
+                    f'class="mlbl" style="font-size:{b_fs}px;">{esc(b_txt)}</text>'
+                )
+        ry += 62.0
+
+    gy = cy0 + cab_h - 13.0
+    parts.append(
+        f'  <line x1="{ex + 10:.1f}" y1="{gy:.1f}" x2="{ex + ew - 10:.1f}" y2="{gy:.1f}" '
+        'stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,3" />'
+    )
+    parts.append(
+        f'  <text x="{ex + ew / 2.0:.1f}" y="{gy + 9.5:.1f}" text-anchor="middle" '
+        'style="font-size:6.8px;fill:#64748b;">REMOVABLE CABLE GLAND ENTRY PLATE '
+        "(BOTTOM / TOP CONDUIT &amp; SWA GLANDS)</text>"
+    )
+
+    fy = cy0 + cab_h + 13.0
+    th_cls = "ok" if brd.thermal_pass else "warn"
+    parts.append(
+        f'  <text x="{ex:.1f}" y="{fy:.1f}" class="{th_cls}">{esc(cd.thermal)}</text>'
+    )
+    if cd.load_same_row:
+        parts.append(
+            f'  <text x="{ex + ew:.1f}" y="{fy:.1f}" text-anchor="end" class="xs">'
+            f"{esc(cd.load_txt)}</text>"
+        )
+    else:
+        fy += 10.5
+        parts.append(
+            f'  <text x="{ex:.1f}" y="{fy:.1f}" class="xs">{esc(cd.load_txt)}</text>'
+        )
+    for f_lines, f_fs in ((cd.bars, cd.bars_fs), (cd.sel, cd.sel_fs)):
+        for ln in f_lines:
+            fy += 10.5
+            parts.append(
+                f'  <text x="{ex:.1f}" y="{fy:.1f}" class="xs" '
+                f'style="font-size:{f_fs}px;">{esc(ln)}</text>'
+            )
+
+
+def _render_board_door_directory_svg(
+    parts: list[str],
+    cd: _CardLayout,
+    *,
+    y_card: float,
+    right_x: float,
+    right_w: float,
+) -> None:
+    """Append right-column BS 7671 Reg 514.9.1 Inside-Door Circuit Directory table."""
+    tx0 = right_x
+    ty0 = y_card + cd.header_h + 8.0
+    parts.append(
+        f'  <text x="{tx0:.1f}" y="{ty0 + 10:.1f}" class="sec">'
+        "BS 7671 REG 514.9.1 INSIDE-DOOR CIRCUIT DIRECTORY</text>"
+    )
+    th_y = ty0 + 16.0
+    parts.append(
+        f'  <rect x="{tx0:.1f}" y="{th_y:.1f}" width="{right_w:.1f}" height="18" '
+        'fill="#e2e8f0" stroke="#cbd5e1" stroke-width="0.8" />'
+    )
+    for (ox, _cw), htxt in zip(
+        _DOOR_COLS,
+        ("Way", "ID", "Ph", "Protective Device", "Cable", "Load / Room"),
+        strict=True,
+    ):
+        parts.append(
+            f'  <text x="{tx0 + ox:.1f}" y="{th_y + 12.2:.1f}" class="th">{htxt}</text>'
+        )
+    row_y = th_y + 18.0
+    for idx_l, (cells, rh) in enumerate(cd.rows_cells):
+        bg = "#f8fafc" if idx_l % 2 == 1 else "#ffffff"
+        parts.append(
+            f'  <rect x="{tx0:.1f}" y="{row_y:.1f}" width="{right_w:.1f}" height="{rh:.1f}" '
+            f'fill="{bg}" stroke="#e2e8f0" stroke-width="0.5" />'
+        )
+        for (ox, _cw), (c_lines, c_fs) in zip(_DOOR_COLS, cells, strict=True):
+            for li, c_ln in enumerate(c_lines):
+                parts.append(
+                    f'  <text x="{tx0 + ox:.1f}" y="{row_y + 11.4 + li * 9.0:.1f}" '
+                    f'class="td" style="font-size:{c_fs}px;">{esc(c_ln)}</text>'
+                )
+        row_y += rh
+
+
 def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult) -> str:
     """Render Sheet E-204 Main & Secondary Distribution Board Front Elevations & Door Schedules.
 
@@ -134,16 +421,13 @@ def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult
     boards = design.din_rail_boards
 
     svg_w = 1240
-    left_x = 24.0
-    left_w = 590.0
-    right_x = 630.0
-    right_w = 586.0
+    left_x, left_w = 24.0, 590.0
+    right_x, right_w = 630.0, 586.0
 
     main_cnt = sum(1 for bd in boards if bd.board_role == "main")
     sec_cnt = len(boards) - main_cnt
     sec_names = ", ".join(bd.board_id for bd in boards if bd.board_role != "main") or "None needed"
 
-    # ---- Sheet header (title full width; subtitle left of the colour key) ----
     title_lines, title_fs = fit_text_lines(
         f"E-204 MAIN & SECONDARY DISTRIBUTION BOARD DESIGNS — {b.project_name}",
         float(svg_w - 48),
@@ -165,103 +449,9 @@ def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult
     sub_y0 = 34.0 + (len(title_lines) - 1) * title_lh + 17.0
     hdr_line_y = sub_y0 + (len(sub_lines) - 1) * sub_lh + 11.0
 
-    # ---- Pre-compute every board card layout so nothing ever clips or collides ----
-    cards: list[_CardLayout] = []
-    for brd in boards:
-        role_lbl, role_col = _ROLE_META.get(brd.board_role, ("BOARD", "#1b365d"))
-        parent_txt = (
-            f"Fed from {brd.parent_board_id}" if brd.parent_board_id else "EAC Service Origin"
-        )
-        r1 = f"{brd.total_modules_used}/{brd.total_modules_capacity}M ({brd.spare_pct:.0f}% spare)"
-        r2 = f"Dims: {brd.enclosure_dims_mm} | {brd.ip_rating} | Busbar: {brd.busbar_rating_a}A Cu"
-        av1 = (svg_w - 30) - text_width_px(r1, 11.0, bold=True) - 16.0 - 30.0
-        av2 = (svg_w - 30) - text_width_px(r2, 8.5) - 16.0 - 30.0
-        h1, h1_fs = _wrapped(
-            f"{brd.board_id} ({brd.floor}) — {role_lbl} | {brd.standard_ref}",
-            av1, 11.0, bold=True, min_font_px=9.5,
-        )
-        h2, h2_fs = _wrapped(
-            f"{parent_txt} · Supply: {brd.incoming_supply_spec}", av2, 8.5, min_font_px=7.6
-        )
-        h1_lh, h2_lh = 13.0, 10.5
-        h2_y0 = 15.0 + (len(h1) - 1) * h1_lh + 13.0
-        header_h = max(34.0, h2_y0 + (len(h2) - 1) * h2_lh + 8.0)
-
-        n_rows = max(1, len(brd.rows))
-        cab_h = 26.0 + n_rows * 62.0 + 18.0
-        th_txt = "PASS" if brd.thermal_pass else "UPGRADE ENCLOSURE"
-        thermal = (
-            f"IEC 60890 Thermal (40°C): P_loss = {brd.power_dissipation_w:.1f} W <= "
-            f"P_max = {brd.max_enclosure_dissipation_w:.0f} W [{th_txt}]"
-        )
-        pl = brd.phase_loads_a
-        ph_str = (
-            f"L1: {pl.get('L1', 0.0):.1f}A | L2: {pl.get('L2', 0.0):.1f}A | "
-            f"L3: {pl.get('L3', 0.0):.1f}A"
-            if pl
-            else "Feeder Bus"
-        )
-        load_txt = f"Board Load: {ph_str}"
-        load_same_row = (
-            text_width_px(thermal, 8.0, bold=True) + text_width_px(load_txt, 7.8) + 16.0
-            <= left_w
-        )
-        bars, bars_fs = _wrapped(f"Bars: {brd.terminal_bars_spec}", left_w, 7.8, min_font_px=7.2)
-        sel, sel_fs = _wrapped(
-            f"Selectivity: {brd.selectivity_note}", left_w, 7.8, min_font_px=7.2
-        )
-        foot_lh = 10.5
-        # footer rows relative to fy (= cabinet bottom + 13)
-        n_foot = 1 + (0 if load_same_row else 1) + len(bars) + len(sel)
-        elev_h = header_h + 8.0 + 16.0 + cab_h + 13.0 + (n_foot - 1) * foot_lh + 4.0 + 10.0
-
-        rows_cells: list[tuple[list[tuple[list[str], float]], float]] = []
-        for lr in brd.door_legend:
-            vals = (
-                f"R{lr.rail_no}.{lr.way_no}",
-                lr.circuit_id,
-                lr.phase,
-                lr.device_spec,
-                lr.cable_spec,
-                lr.description,
-            )
-            cells = [
-                fit_text_lines(v, cw, 7.4, max_lines=2, min_font_px=6.6)
-                for v, (_ox, cw) in zip(vals, _DOOR_COLS, strict=True)
-            ]
-            n_ln = max(len(c[0]) for c in cells)
-            rows_cells.append((cells, 16.5 + (n_ln - 1) * 9.0))
-        tbl_h = header_h + 8.0 + 16.0 + 18.0 + sum(rh for _c, rh in rows_cells) + 22.0
-        if not rows_cells:
-            tbl_h += 16.5
-        cards.append(
-            _CardLayout(
-                role_col=role_col,
-                r1=r1,
-                r2=r2,
-                h1=h1,
-                h1_fs=h1_fs,
-                h2=h2,
-                h2_fs=h2_fs,
-                h2_y0=h2_y0,
-                header_h=header_h,
-                cab_h=cab_h,
-                thermal=thermal,
-                load_txt=load_txt,
-                load_same_row=load_same_row,
-                bars=bars,
-                bars_fs=bars_fs,
-                sel=sel,
-                sel_fs=sel_fs,
-                rows_cells=rows_cells,
-                h=max(elev_h, tbl_h),
-            )
-        )
-
+    cards = [_compute_board_card_layout(brd, svg_w=svg_w, left_w=left_w) for brd in boards]
     y_first = hdr_line_y + 12.0
-    svg_h = int(
-        max(760.0, y_first + 22.0 + sum(c.h + 18.0 for c in cards) + 34.0)
-    )
+    svg_h = int(max(760.0, y_first + 22.0 + sum(c.h + 18.0 for c in cards) + 34.0))
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -301,9 +491,7 @@ def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult
             f'  <text x="24" y="{sub_y0 + i * sub_lh:.1f}" class="sub" '
             f'style="font-size:{sub_fs}px;">{esc(ln)}</text>'
         )
-    # Compact Phase & Device Color Key right-aligned on the first subtitle row
-    ky = sub_y0 - 8.0
-    kt = sub_y0 - 1.0
+    ky, kt = sub_y0 - 8.0, sub_y0 - 1.0
     for kx, fill, extra, lbl in (
         (856, "#92400e", "", "L1"),
         (896, "#1e293b", "", "L2"),
@@ -324,27 +512,22 @@ def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult
 
     y_card = y_first
     for brd, cd in zip(boards, cards, strict=True):
-        ch = cd.h
-        header_h = cd.header_h
-        role_col = cd.role_col
-        # Outer card frame + header bar (height grows with wrapped header lines)
         parts.append(
-            f'  <rect x="18" y="{y_card:.1f}" width="{svg_w - 36}" height="{ch:.1f}" rx="5" '
+            f'  <rect x="18" y="{y_card:.1f}" width="{svg_w - 36}" height="{cd.h:.1f}" rx="5" '
             'fill="#ffffff" stroke="#cbd5e1" stroke-width="1.3" />'
         )
         parts.append(
-            f'  <rect x="18" y="{y_card:.1f}" width="{svg_w - 36}" height="{header_h:.1f}" '
-            f'rx="5" fill="{role_col}" />'
+            f'  <rect x="18" y="{y_card:.1f}" width="{svg_w - 36}" height="{cd.header_h:.1f}" '
+            f'rx="5" fill="{cd.role_col}" />'
         )
         for i, ln in enumerate(cd.h1):
             parts.append(
                 f'  <text x="30" y="{y_card + 15 + i * 13.0:.1f}" class="whdr" '
                 f'style="font-size:{cd.h1_fs}px;">{esc(ln)}</text>'
             )
-        h2_y0 = cd.h2_y0
         for i, ln in enumerate(cd.h2):
             parts.append(
-                f'  <text x="30" y="{y_card + h2_y0 + i * 10.5:.1f}" class="wsub" '
+                f'  <text x="30" y="{y_card + cd.h2_y0 + i * 10.5:.1f}" class="wsub" '
                 f'style="font-size:{cd.h2_fs}px;">{esc(ln)}</text>'
             )
         parts.append(
@@ -355,179 +538,13 @@ def render_board_designs_svg(result: Phase2DesignResult | ElectricalDesignResult
             f'  <text x="{svg_w - 30}" y="{y_card + 28:.1f}" text-anchor="end" class="wsub">'
             f"{esc(cd.r2)}</text>"
         )
-
-        # ---- LEFT COLUMN: PHYSICAL FRONT ELEVATION ----
-        ex = left_x
-        ey = y_card + header_h + 8.0
-        ew = left_w
-        cab_h = cd.cab_h
-
-        parts.append(
-            f'  <text x="{ex:.1f}" y="{ey + 10:.1f}" class="sec">'
-            "PHYSICAL FRONT ELEVATION (TRUE 18mm MODULE SCALE)</text>"
+        _render_board_elevation_svg(
+            parts, brd, cd, y_card=y_card, left_x=left_x, left_w=left_w
         )
-        parts.append(
-            f'  <text x="{ex + ew:.1f}" y="{ey + 10:.1f}" text-anchor="end" class="xs">'
-            f"Ipf {brd.incoming_ipf_ka:.2f} kA &lt;= Icu {brd.min_device_icu_ka:.0f} kA</text>"
+        _render_board_door_directory_svg(
+            parts, cd, y_card=y_card, right_x=right_x, right_w=right_w
         )
-
-        # Metallic cabinet bezel
-        cy0 = ey + 16.0
-        cab_fill = "#f0fdfa" if brd.board_role == "secondary_pool" else "#f8fafc"
-        cab_stroke = "#0f766e" if brd.board_role == "secondary_pool" else "#475569"
-        parts.append(
-            f'  <rect x="{ex:.1f}" y="{cy0:.1f}" width="{ew:.1f}" height="{cab_h:.1f}" rx="4" '
-            f'fill="{cab_fill}" stroke="{cab_stroke}" stroke-width="1.8" />'
-        )
-        # Top Brass Neutral (Blue) & Earth/PE (Green) Terminal Bars
-        bar_y = cy0 + 6.0
-        parts.append(
-            f'  <rect x="{ex + 12:.1f}" y="{bar_y:.1f}" width="250" height="12" rx="2" '
-            'fill="#dbeafe" stroke="#2563eb" stroke-width="1" />'
-        )
-        parts.append(
-            f'  <text x="{ex + 137:.1f}" y="{bar_y + 9:.1f}" text-anchor="middle" '
-            'style="font-size:7px;font-weight:700;fill:#1e40af;">NEUTRAL TERMINAL BAR (N)</text>'
-        )
-        pe_lbl = (
-            "PE + SEC.702 BONDING BAR"
-            if brd.board_role == "secondary_pool"
-            else "EARTH / PROTECTIVE BAR (PE)"
-        )
-        parts.append(
-            f'  <rect x="{ex + ew - 262:.1f}" y="{bar_y:.1f}" width="250" height="12" rx="2" '
-            'fill="#dcfce7" stroke="#16a34a" stroke-width="1" />'
-        )
-        parts.append(
-            f'  <text x="{ex + ew - 137:.1f}" y="{bar_y + 9:.1f}" text-anchor="middle" '
-            f'style="font-size:7px;font-weight:700;fill:#166534;">{pe_lbl}</text>'
-        )
-
-        # DIN rails & individual scaled modules
-        rail_x0 = ex + 26.0
-        rail_w = ew - 38.0
-        ry = cy0 + 26.0
-        for row in brd.rows:
-            cap_m = max(12, row.modules_capacity)
-            parts.append(
-                f'  <text x="{ex + 12:.1f}" y="{ry + 28:.1f}" text-anchor="middle" '
-                f'class="th">R{row.row_no}</text>'
-            )
-            parts.append(
-                f'  <rect x="{rail_x0 - 3:.1f}" y="{ry + 17:.1f}" width="{rail_w + 6:.1f}" '
-                'height="16" fill="#cbd5e1" stroke="#94a3b8" stroke-width="0.7" />'
-            )
-            px_per_m = rail_w / float(cap_m)
-            for sl in row.slots:
-                sx = rail_x0 + (sl.slot_start_m - 1) * px_per_m + 0.8
-                sw = max(6.0, sl.width_m * px_per_m - 1.6)
-                s_fill, s_stroke = _SLOT_STYLE.get(sl.kind, ("#ffffff", "#334155"))
-                dash = ' stroke-dasharray="3,2"' if sl.kind == "spare" else ""
-                parts.append(
-                    f'  <rect x="{sx:.1f}" y="{ry:.1f}" width="{sw:.1f}" height="48" rx="2" '
-                    f'fill="{s_fill}" stroke="{s_stroke}" stroke-width="1.1"{dash} />'
-                )
-                if sl.kind != "spare":
-                    p_col = _PHASE_COLOR.get(sl.phase, "#94a3b8")
-                    parts.append(
-                        f'  <rect x="{sx + 0.6:.1f}" y="{ry + 0.6:.1f}" '
-                        f'width="{max(2.0, sw - 1.2):.1f}" height="4.5" fill="{p_col}" />'
-                    )
-                    if sl.kind not in ("meter", "knx"):
-                        tw = min(14.0, max(5.0, sw * 0.42))
-                        tx = sx + (sw - tw) / 2.0
-                        parts.append(
-                            f'  <rect x="{tx:.1f}" y="{ry + 20.5:.1f}" width="{tw:.1f}" '
-                            'height="6.5" rx="1" fill="#1e293b" />'
-                        )
-                top_t, bot_t = _slot_lines(sl)
-                cx_m = sx + sw / 2.0
-                if top_t:
-                    t_txt, t_fs = _slot_text(top_t, sw, 6.8, bold=True)
-                    parts.append(
-                        f'  <text x="{cx_m:.1f}" y="{ry + 15.5:.1f}" text-anchor="middle" '
-                        f'class="mcode" style="font-size:{t_fs}px;">{esc(t_txt)}</text>'
-                    )
-                if bot_t:
-                    b_txt, b_fs = _slot_text(bot_t, sw, 6.1, bold=False)
-                    parts.append(
-                        f'  <text x="{cx_m:.1f}" y="{ry + 41.5:.1f}" text-anchor="middle" '
-                        f'class="mlbl" style="font-size:{b_fs}px;">{esc(b_txt)}</text>'
-                    )
-            ry += 62.0
-
-        # Bottom gland plate strip inside cabinet
-        gy = cy0 + cab_h - 13.0
-        parts.append(
-            f'  <line x1="{ex + 10:.1f}" y1="{gy:.1f}" x2="{ex + ew - 10:.1f}" y2="{gy:.1f}" '
-            'stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,3" />'
-        )
-        parts.append(
-            f'  <text x="{ex + ew / 2.0:.1f}" y="{gy + 9.5:.1f}" text-anchor="middle" '
-            'style="font-size:6.8px;fill:#64748b;">REMOVABLE CABLE GLAND ENTRY PLATE '
-            "(BOTTOM / TOP CONDUIT &amp; SWA GLANDS)</text>"
-        )
-
-        # Thermal, Phase Balance & Terminal Spec Footer below cabinet (wrapped, full text)
-        fy = cy0 + cab_h + 13.0
-        th_cls = "ok" if brd.thermal_pass else "warn"
-        parts.append(
-            f'  <text x="{ex:.1f}" y="{fy:.1f}" class="{th_cls}">{esc(cd.thermal)}</text>'
-        )
-        if cd.load_same_row:
-            parts.append(
-                f'  <text x="{ex + ew:.1f}" y="{fy:.1f}" text-anchor="end" class="xs">'
-                f"{esc(cd.load_txt)}</text>"
-            )
-        else:
-            fy += 10.5
-            parts.append(
-                f'  <text x="{ex:.1f}" y="{fy:.1f}" class="xs">{esc(cd.load_txt)}</text>'
-            )
-        for f_lines, f_fs in ((cd.bars, cd.bars_fs), (cd.sel, cd.sel_fs)):
-            for ln in f_lines:
-                fy += 10.5
-                parts.append(
-                    f'  <text x="{ex:.1f}" y="{fy:.1f}" class="xs" '
-                    f'style="font-size:{f_fs}px;">{esc(ln)}</text>'
-                )
-
-        # ---- RIGHT COLUMN: BS 7671 REG 514.9.1 INSIDE-DOOR CIRCUIT DIRECTORY ----
-        tx0 = right_x
-        ty0 = y_card + header_h + 8.0
-        parts.append(
-            f'  <text x="{tx0:.1f}" y="{ty0 + 10:.1f}" class="sec">'
-            "BS 7671 REG 514.9.1 INSIDE-DOOR CIRCUIT DIRECTORY</text>"
-        )
-        th_y = ty0 + 16.0
-        parts.append(
-            f'  <rect x="{tx0:.1f}" y="{th_y:.1f}" width="{right_w:.1f}" height="18" '
-            'fill="#e2e8f0" stroke="#cbd5e1" stroke-width="0.8" />'
-        )
-        for (ox, _cw), htxt in zip(
-            _DOOR_COLS,
-            ("Way", "ID", "Ph", "Protective Device", "Cable", "Load / Room"),
-            strict=True,
-        ):
-            parts.append(
-                f'  <text x="{tx0 + ox:.1f}" y="{th_y + 12.2:.1f}" class="th">{htxt}</text>'
-            )
-        row_y = th_y + 18.0
-        for idx_l, (cells, rh) in enumerate(cd.rows_cells):
-            bg = "#f8fafc" if idx_l % 2 == 1 else "#ffffff"
-            parts.append(
-                f'  <rect x="{tx0:.1f}" y="{row_y:.1f}" width="{right_w:.1f}" height="{rh:.1f}" '
-                f'fill="{bg}" stroke="#e2e8f0" stroke-width="0.5" />'
-            )
-            for (ox, _cw), (c_lines, c_fs) in zip(_DOOR_COLS, cells, strict=True):
-                for li, c_ln in enumerate(c_lines):
-                    parts.append(
-                        f'  <text x="{tx0 + ox:.1f}" y="{row_y + 11.4 + li * 9.0:.1f}" '
-                        f'class="td" style="font-size:{c_fs}px;">{esc(c_ln)}</text>'
-                    )
-            row_y += rh
-
-        y_card += ch + 18.0
+        y_card += cd.h + 18.0
 
     parts.append("</svg>")
     return "\n".join(parts)

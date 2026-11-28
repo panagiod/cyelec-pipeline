@@ -1,0 +1,69 @@
+@page { size: A4 portrait; margin: 11mm; }
+body {
+  font-family: "DejaVu Sans", "Noto Sans", sans-serif;
+  color: #102a43;
+  font-size: 8.6pt;
+  line-height: 1.35;
+  margin: 0;
+}
+.hdr {
+  background: #1b365d;
+  color: #ffffff;
+  padding: 9px 13px;
+  border-bottom: 4px solid #0284c7;
+  margin-bottom: 9px;
+}
+.hdr h1 { margin: 0 0 3px 0; font-size: 11.8pt; }
+.hdr p { margin: 0; font-size: 7.9pt; opacity: 0.92; }
+h2 {
+  font-size: 9.2pt;
+  color: #1b365d;
+  border-bottom: 1.5px solid #1b365d;
+  padding-bottom: 2px;
+  margin: 9px 0 4px 0;
+  page-break-after: avoid;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 6px;
+  font-size: 7.9pt;
+}
+th, td {
+  border: 1px solid #cbd5e1;
+  padding: 3px 5px;
+  text-align: left;
+  vertical-align: top;
+}
+th { background: #e2e8f0; color: #1b365d; font-weight: 700; }
+.test-tbl { font-size: 6.8pt; }
+.test-tbl th, .test-tbl td { padding: 2.5px 3.2px; }
+.legend-box {
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  padding: 5px 8px;
+  font-size: 7.1pt;
+  margin-bottom: 7px;
+}
+.note { font-size: 7.1pt; color: #475569; margin: 3px 0 6px 0; }
+.page-break { page-break-before: always; }
+.signbox {
+  margin-top: 9px;
+  border: 1.5px solid #1b365d;
+  padding: 8px 11px;
+  background: #f8fafc;
+  page-break-inside: avoid;
+}
+.sig-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.sig-line {
+  border-top: 1px dashed #475569;
+  padding-top: 4px;
+  margin-top: 22px;
+  font-size: 7.6pt;
+  color: #475569;
+}

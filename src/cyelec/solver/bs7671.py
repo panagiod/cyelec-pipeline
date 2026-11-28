@@ -18,6 +18,10 @@ from cyelec.models.electrical import (
     ReviewSeverity,
     SolvedCircuit,
 )
+from cyelec.solver.fault_selectivity import (
+    compute_circuit_fault_currents,
+    lookup_vendor_catalog_ref,
+)
 from cyelec.standards_loader import CableEntry, StandardsBundle
 
 
@@ -248,51 +252,16 @@ def _apply_circuit_override(
     return spec.model_copy(update=updates)
 
 
-def solve_circuit(
-    spec: CircuitSpec,
+def _select_protective_device(
+    eff_spec: CircuitSpec,
     standards: StandardsBundle,
     *,
-    earthing_system: EarthingSystem = EarthingSystem.TT,
-    ze_or_ra_ohm: float | None = None,
-    phase: PhaseAssignment = PhaseAssignment.L1,
-    override: CircuitOverride | None = None,
-) -> SolvedCircuit:
-    """Deterministically size and verify a final circuit to BS 7671:2018+A2 and Cyprus EAC rules."""
-    eff_spec = _apply_circuit_override(spec, override)
-    cables_std = standards.cables
+    override: CircuitOverride | None,
+    earthing_system: EarthingSystem,
+    flags: list[ReviewFlag],
+) -> tuple[int, BreakerCurve, str, float, float]:
+    """Select protective device rating/curve/label and emit EV/XLPE device flags."""
     devices_std = standards.devices
-    eac_std = standards.eac_rules
-
-    resolved_ze_ra = (
-        ze_or_ra_ohm
-        if ze_or_ra_ohm is not None
-        else eac_std.earthing.default_ze_or_ra_ohm[earthing_system]
-    )
-
-    flags: list[ReviewFlag] = []
-
-    # 1. Derating factors (Tables 4B1, 4C1, 52.2)
-    ca = cables_std.get_ca(eff_spec.ambient_temp_c, eff_spec.insulation_type)
-    cg, cg_exceeded = cables_std.get_cg(eff_spec.grouping_count)
-    ci = cables_std.get_ci(eff_spec.thermal_insulation_mm)
-    effective_derating = ca * cg * ci
-
-    if cg_exceeded:
-        flags.append(
-            ReviewFlag(
-                code="GROUPING_EXCEEDS_TABLE_4C1",
-                severity=ReviewSeverity.WARNING,
-                category="bs7671",
-                circuit_id=eff_spec.circuit_id,
-                regulation_ref="BS 7671 Table 4C1",
-                message=(
-                    f"Circuit {eff_spec.circuit_id} has {eff_spec.grouping_count} grouped circuits "
-                    "(>20); clamped to Cg=0.38. Engineer verification required."
-                ),
-            )
-        )
-
-    # 2. Protective device selection (MCB B/C/D <= 63 A, MCCB / BS 88-2 > 63 A)
     curve: BreakerCurve = eff_spec.preferred_curve
     allow_mccb = (
         eff_spec.is_three_phase
@@ -321,14 +290,18 @@ def solve_circuit(
     i2t_a2s = device_spec.i2t_a2s
 
     if curve == BreakerCurve.BS88:
-        rcd_suffix = f" + {eff_spec.rcd_idn_ma}mA RCD" if (
-            eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None
-        ) else ""
+        rcd_suffix = (
+            f" + {eff_spec.rcd_idn_ma}mA RCD"
+            if (eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None)
+            else ""
+        )
         device_label = f"{breaker_in_a}A BS 88-2 gG Fuse{rcd_suffix}"
     elif curve == BreakerCurve.MCCB or breaker_in_a > max(devices_std.standard_ratings_a):
-        rcd_suffix = f" + {eff_spec.rcd_idn_ma}mA RCD" if (
-            eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None
-        ) else ""
+        rcd_suffix = (
+            f" + {eff_spec.rcd_idn_ma}mA RCD"
+            if (eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None)
+            else ""
+        )
         device_label = f"{breaker_in_a}A MCCB{rcd_suffix}"
     elif eff_spec.rcd_protected and eff_spec.rcd_idn_ma is not None:
         if eff_spec.category == CircuitCategory.EV_CHARGER:
@@ -386,16 +359,23 @@ def solve_circuit(
                     ),
                 )
             )
+    return breaker_in_a, curve, device_label, zs_max_ohm, i2t_a2s
 
-    # Required Iz: BS 7671 Reg 433.1.204 (20 A leg rule for 32 A ring final) vs Reg 433.1.1 (In)
-    if eff_spec.topology == CircuitTopology.RING_FINAL:
-        required_iz_a = max(cables_std.constants.ring_final_min_iz_a, 0.67 * breaker_in_a)
-        if breaker_in_a == 32:
-            required_iz_a = cables_std.constants.ring_final_min_iz_a
-    else:
-        required_iz_a = float(breaker_in_a)
 
-    # 3. Cable selection & deterministic upsizing
+def _select_cable_candidate(
+    eff_spec: CircuitSpec,
+    standards: StandardsBundle,
+    *,
+    override: CircuitOverride | None,
+    required_iz_a: float,
+    effective_derating: float,
+    earthing_system: EarthingSystem,
+    resolved_ze_ra: float,
+    zs_max_ohm: float,
+    i2t_a2s: float,
+) -> tuple[_CandidateEval, list[str]]:
+    """Select smallest compliant conductor CSA (or explicit override) and upsize reasons."""
+    cables_std = standards.cables
     all_cables = cables_std.sorted_cables()
     floor_cable_mm2 = eff_spec.min_cable_mm2
     if eff_spec.topology == CircuitTopology.RING_FINAL:
@@ -413,7 +393,6 @@ def solve_circuit(
 
     upsize_reasons: list[str] = []
     chosen: _CandidateEval | None = None
-
     for idx, entry in enumerate(candidates):
         cpc_mm2 = fixed_cpc if fixed_cpc is not None else entry.default_cpc_mm2
         ev = _evaluate_cable(
@@ -429,11 +408,8 @@ def solve_circuit(
             i2t_a2s=i2t_a2s,
         )
         chosen = ev
-
         if ev.all_pass:
             break
-
-        # If this isn't the last candidate, record why we are upsizing
         if idx < len(candidates) - 1:
             if not ev.thermal_pass and "thermal" not in upsize_reasons:
                 upsize_reasons.append("thermal")
@@ -449,9 +425,6 @@ def solve_circuit(
                 upsize_reasons.append("cpc_adiabatic")
             if not ev.live_adiabatic_pass and "live_adiabatic" not in upsize_reasons:
                 upsize_reasons.append("live_adiabatic")
-
-            # On TT systems, missing RCD cannot be fixed by upsizing copper;
-            # stop early if only TT earth-fault verification failed.
             if (
                 earthing_system == EarthingSystem.TT
                 and ev.thermal_pass
@@ -463,9 +436,30 @@ def solve_circuit(
                 break
 
     if chosen is None:
-        raise RuntimeError(f"No cable candidate available for circuit '{spec.circuit_id}'.")
+        raise RuntimeError(f"No cable candidate available for circuit '{eff_spec.circuit_id}'.")
+    return chosen, upsize_reasons
 
-    # 4. Emit audit & compliance review flags
+
+def _append_circuit_compliance_flags(
+    flags: list[ReviewFlag],
+    *,
+    eff_spec: CircuitSpec,
+    chosen: _CandidateEval,
+    upsize_reasons: list[str],
+    required_iz_a: float,
+    ca: float,
+    cg: float,
+    ci: float,
+    earthing_system: EarthingSystem,
+    resolved_ze_ra: float,
+    standards: StandardsBundle,
+    zs_max_ohm: float,
+    curve: BreakerCurve,
+    breaker_in_a: int,
+    i2t_a2s: float,
+) -> None:
+    """Append BS 7671 upsize, thermal, VD, earth-fault, and adiabatic review flags."""
+    eac_std = standards.eac_rules
     if upsize_reasons:
         if eff_spec.topology == CircuitTopology.RING_FINAL:
             flags.append(
@@ -527,10 +521,6 @@ def solve_circuit(
                 ),
             )
         )
-
-    earth_fault_method: Literal["TT_RCD", "TN_ZS"] = (
-        "TT_RCD" if earthing_system == EarthingSystem.TT else "TN_ZS"
-    )
 
     if earthing_system == EarthingSystem.TT:
         if not eff_spec.rcd_protected or eff_spec.rcd_idn_ma is None:
@@ -624,11 +614,96 @@ def solve_circuit(
             )
         )
 
-    from cyelec.solver.fault_selectivity import (
-        compute_circuit_fault_currents,
-        lookup_vendor_catalog_ref,
+
+def solve_circuit(
+    spec: CircuitSpec,
+    standards: StandardsBundle,
+    *,
+    earthing_system: EarthingSystem = EarthingSystem.TT,
+    ze_or_ra_ohm: float | None = None,
+    phase: PhaseAssignment = PhaseAssignment.L1,
+    override: CircuitOverride | None = None,
+) -> SolvedCircuit:
+    """Deterministically size and verify a final circuit to BS 7671:2018+A2 and Cyprus EAC rules."""
+    eff_spec = _apply_circuit_override(spec, override)
+    cables_std = standards.cables
+    eac_std = standards.eac_rules
+
+    resolved_ze_ra = (
+        ze_or_ra_ohm
+        if ze_or_ra_ohm is not None
+        else eac_std.earthing.default_ze_or_ra_ohm[earthing_system]
+    )
+    flags: list[ReviewFlag] = []
+
+    ca = cables_std.get_ca(eff_spec.ambient_temp_c, eff_spec.insulation_type)
+    cg, cg_exceeded = cables_std.get_cg(eff_spec.grouping_count)
+    ci = cables_std.get_ci(eff_spec.thermal_insulation_mm)
+    effective_derating = ca * cg * ci
+
+    if cg_exceeded:
+        flags.append(
+            ReviewFlag(
+                code="GROUPING_EXCEEDS_TABLE_4C1",
+                severity=ReviewSeverity.WARNING,
+                category="bs7671",
+                circuit_id=eff_spec.circuit_id,
+                regulation_ref="BS 7671 Table 4C1",
+                message=(
+                    f"Circuit {eff_spec.circuit_id} has {eff_spec.grouping_count} grouped circuits "
+                    "(>20); clamped to Cg=0.38. Engineer verification required."
+                ),
+            )
+        )
+
+    breaker_in_a, curve, device_label, zs_max_ohm, i2t_a2s = _select_protective_device(
+        eff_spec,
+        standards,
+        override=override,
+        earthing_system=earthing_system,
+        flags=flags,
     )
 
+    if eff_spec.topology == CircuitTopology.RING_FINAL:
+        required_iz_a = max(cables_std.constants.ring_final_min_iz_a, 0.67 * breaker_in_a)
+        if breaker_in_a == 32:
+            required_iz_a = cables_std.constants.ring_final_min_iz_a
+    else:
+        required_iz_a = float(breaker_in_a)
+
+    chosen, upsize_reasons = _select_cable_candidate(
+        eff_spec,
+        standards,
+        override=override,
+        required_iz_a=required_iz_a,
+        effective_derating=effective_derating,
+        earthing_system=earthing_system,
+        resolved_ze_ra=resolved_ze_ra,
+        zs_max_ohm=zs_max_ohm,
+        i2t_a2s=i2t_a2s,
+    )
+
+    _append_circuit_compliance_flags(
+        flags,
+        eff_spec=eff_spec,
+        chosen=chosen,
+        upsize_reasons=upsize_reasons,
+        required_iz_a=required_iz_a,
+        ca=ca,
+        cg=cg,
+        ci=ci,
+        earthing_system=earthing_system,
+        resolved_ze_ra=resolved_ze_ra,
+        standards=standards,
+        zs_max_ohm=zs_max_ohm,
+        curve=curve,
+        breaker_in_a=breaker_in_a,
+        i2t_a2s=i2t_a2s,
+    )
+
+    earth_fault_method: Literal["TT_RCD", "TN_ZS"] = (
+        "TT_RCD" if earthing_system == EarthingSystem.TT else "TN_ZS"
+    )
     assigned_phase = (
         PhaseAssignment.THREE_PHASE
         if eff_spec.is_three_phase

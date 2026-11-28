@@ -596,15 +596,13 @@ class _DxfScanResult:
     db_points: list[tuple[str, Point2D]]
 
 
-def _scan_dxf_entities(
+def _compute_dxf_scale(
     doc: Drawing,
     resolved_entities: list[tuple[DXFGraphic, str, str | None]],
     layer_mapping: DxfLayerMapping | None,
     flags: list[ReviewFlag],
-) -> _DxfScanResult:
-    """Pass 1: infer metric scale and extract rooms, walls, openings, fixtures & annotations."""
-    msp = doc.modelspace()
-    # First pass: compute raw coordinate span & door arc radii for unit/scale sanity checks
+) -> float:
+    """Compute raw coordinate span & door arc radii and infer metric scale to mm."""
     xs: list[float] = []
     ys: list[float] = []
     raw_arc_radii: list[float] = []
@@ -625,7 +623,140 @@ def _scan_dxf_entities(
             raw_arc_radii.append(float(ent.dxf.radius))
     span = max((max(xs) - min(xs)) if xs else 0.0, (max(ys) - min(ys)) if ys else 0.0)
     insunits = int(doc.header.get("$INSUNITS", 0))
-    scale = _infer_unit_scale(insunits, span, flags, raw_door_arc_radii=raw_arc_radii)
+    return _infer_unit_scale(insunits, span, flags, raw_door_arc_radii=raw_arc_radii)
+
+
+def _append_entity_segments(
+    ent: DXFGraphic,
+    scale: float,
+    dest: list[tuple[Point2D, Point2D]],
+    *,
+    include_spline: bool = False,
+) -> None:
+    """Extract scaled line segments from LINE, LWPolyline, and optionally Spline entities."""
+    dtype = ent.dxftype()
+    if dtype == "LINE":
+        dest.append(
+            (
+                Point2D(x_mm=float(ent.dxf.start.x) * scale, y_mm=float(ent.dxf.start.y) * scale),
+                Point2D(x_mm=float(ent.dxf.end.x) * scale, y_mm=float(ent.dxf.end.y) * scale),
+            )
+        )
+    elif isinstance(ent, LWPolyline):
+        pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
+        for a, b in itertools.pairwise(pts):
+            dest.append((Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1])))
+        if ent.closed and len(pts) >= 3:
+            dest.append(
+                (Point2D(x_mm=pts[-1][0], y_mm=pts[-1][1]), Point2D(x_mm=pts[0][0], y_mm=pts[0][1]))
+            )
+    elif include_spline and isinstance(ent, Spline):
+        s_pts = _flatten_spline_xy(ent, scale)
+        for a, b in itertools.pairwise(s_pts):
+            dest.append((Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1])))
+        if ent.closed and len(s_pts) >= 3:
+            dest.append(
+                (
+                    Point2D(x_mm=s_pts[-1][0], y_mm=s_pts[-1][1]),
+                    Point2D(x_mm=s_pts[0][0], y_mm=s_pts[0][1]),
+                )
+            )
+
+
+def _extract_leader_entity(
+    ent: DXFGraphic,
+    layer: str,
+    scale: float,
+    leader_arrows: list[tuple[Point, Point]],
+    text_labels: list[tuple[str, Point, str]],
+) -> bool:
+    """Handle DXF LEADER / MULTILEADER entities; return True if consumed."""
+    dtype = ent.dxftype()
+    if dtype == "LEADER":
+        verts = list(getattr(ent, "vertices", []) or [])
+        if len(verts) >= 2:
+            tip_v, tail_v = verts[0], verts[-1]
+            leader_arrows.append(
+                (
+                    Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale),
+                    Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale),
+                )
+            )
+        return True
+    if dtype == "MULTILEADER":
+        ctx = getattr(ent, "context", None)
+        mtext_obj = getattr(ctx, "mtext", None) if ctx is not None else None
+        ml_text = str(getattr(mtext_obj, "default_content", "") or "").strip()
+        for ld in getattr(ctx, "leaders", []) or []:
+            for line in getattr(ld, "lines", []) or []:
+                verts = list(getattr(line, "vertices", []) or [])
+                if verts:
+                    tip_v = verts[0]
+                    tail_v = getattr(ld, "last_leader_point", None) or verts[-1]
+                    tip_pt = Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale)
+                    tail_pt = Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale)
+                    leader_arrows.append((tip_pt, tail_pt))
+                    if ml_text:
+                        text_labels.append((ml_text, tail_pt, layer))
+        return True
+    return False
+
+
+def _record_dxf_text_or_appliance(
+    ent: DXFGraphic,
+    layer: str,
+    layer_up: str,
+    scale: float,
+    layer_mapping: DxfLayerMapping | None,
+    furniture_polys: list[tuple[Polygon, _FurnitureKind]],
+    text_labels: list[tuple[str, Point, str]],
+) -> None:
+    """Extract architectural room text labels and Greek fridge callout tokens."""
+    dtype = ent.dxftype()
+    is_furn_layer = any(tok in layer_up for tok in ("FURN", "FURNITURE", "JOINERY"))
+    if not (
+        _role_matches(layer, "text", layer_mapping)
+        or (
+            dtype in ("TEXT", "MTEXT")
+            and not _role_matches(layer, "fixtures", layer_mapping)
+            and not _role_matches(layer, "db", layer_mapping)
+            and not is_furn_layer
+        )
+    ):
+        return
+    txt = _extract_text_item(ent, scale)
+    if txt is None:
+        return
+    norm_tok = normalize_label(clean_room_label(txt[0]))
+    if norm_tok in _APPLIANCE_CALLOUT_TOKENS:
+        if norm_tok in _FRIDGE_CALLOUT_TOKENS:
+            fx, fy = txt[1]
+            furniture_polys.append(
+                (
+                    Polygon(
+                        [
+                            (fx - 300.0, fy - 300.0),
+                            (fx + 300.0, fy - 300.0),
+                            (fx + 300.0, fy + 300.0),
+                            (fx - 300.0, fy + 300.0),
+                        ]
+                    ),
+                    "fridge",
+                )
+            )
+    else:
+        text_labels.append((txt[0], Point(txt[1]), layer))
+
+
+def _scan_dxf_entities(
+    doc: Drawing,
+    resolved_entities: list[tuple[DXFGraphic, str, str | None]],
+    layer_mapping: DxfLayerMapping | None,
+    flags: list[ReviewFlag],
+) -> _DxfScanResult:
+    """Pass 1: infer metric scale and extract rooms, walls, openings, fixtures & annotations."""
+    msp = doc.modelspace()
+    scale = _compute_dxf_scale(doc, resolved_entities, layer_mapping, flags)
 
     room_raw_polys: list[Polygon] = []
     text_labels: list[tuple[str, Point, str]] = []
@@ -649,8 +780,7 @@ def _scan_dxf_entities(
             return
         sa = float(arc_ent.dxf.start_angle)
         ea = float(arc_ent.dxf.end_angle)
-        span = (ea - sa) % 360.0
-        if 75.0 <= span <= 105.0:
+        if 75.0 <= ((ea - sa) % 360.0) <= 105.0:
             fallback_door_arcs.append(
                 (
                     Point2D(
@@ -663,13 +793,11 @@ def _scan_dxf_entities(
                 )
             )
 
-    # Extract room label attributes from INSERT blocks (e.g. RM-TAG with NAME='Guest bedroom')
     for raw_ent in msp:
         if raw_ent.dxftype() == "INSERT":
             raw_layer = str(getattr(raw_ent.dxf, "layer", "0") or "0")
             if _role_matches(raw_layer, "text", layer_mapping):
-                attribs = getattr(raw_ent, "attribs", None) or []
-                for att in attribs:
+                for att in getattr(raw_ent, "attribs", None) or []:
                     tag_up = str(getattr(att.dxf, "tag", "") or "").upper()
                     val = str(getattr(att.dxf, "text", "") or "").strip()
                     if val and tag_up in ("NAME", "ROOM", "ROOM_NAME", "LABEL", "TITLE"):
@@ -679,40 +807,13 @@ def _scan_dxf_entities(
                         )
 
     for ent, layer, block_hint in resolved_entities:
+        if _extract_leader_entity(ent, layer, scale, leader_arrows, text_labels):
+            continue
+
         dtype = ent.dxftype()
         hint_up = (block_hint or "").upper()
         layer_up = layer.upper()
 
-        # DXF LEADER / MULTILEADER arrows pointing external room labels into narrow polygons
-        if dtype == "LEADER":
-            verts = list(getattr(ent, "vertices", []) or [])
-            if len(verts) >= 2:
-                tip_v, tail_v = verts[0], verts[-1]
-                leader_arrows.append(
-                    (
-                        Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale),
-                        Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale),
-                    )
-                )
-            continue
-        if dtype == "MULTILEADER":
-            ctx = getattr(ent, "context", None)
-            mtext_obj = getattr(ctx, "mtext", None) if ctx is not None else None
-            ml_text = str(getattr(mtext_obj, "default_content", "") or "").strip()
-            for ld in getattr(ctx, "leaders", []) or []:
-                for line in getattr(ld, "lines", []) or []:
-                    verts = list(getattr(line, "vertices", []) or [])
-                    if verts:
-                        tip_v = verts[0]
-                        tail_v = getattr(ld, "last_leader_point", None) or verts[-1]
-                        tip_pt = Point(float(tip_v[0]) * scale, float(tip_v[1]) * scale)
-                        tail_pt = Point(float(tail_v[0]) * scale, float(tail_v[1]) * scale)
-                        leader_arrows.append((tip_pt, tail_pt))
-                        if ml_text:
-                            text_labels.append((ml_text, tail_pt, layer))
-            continue
-
-        # Room boundary polygons
         if _role_matches(layer, "rooms", layer_mapping):
             coords = _extract_poly_coords(ent, scale)
             if coords is not None:
@@ -721,50 +822,8 @@ def _scan_dxf_entities(
                     poly = poly.buffer(0.0)
                 if isinstance(poly, Polygon) and poly.area >= 500_000.0:
                     room_raw_polys.append(poly)
-
-        # Wall segments (LINE, LWPOLYLINE, and flattened curved SPLINE walls)
         elif _role_matches(layer, "walls", layer_mapping):
-            if dtype == "LINE":
-                wall_lines.append(
-                    (
-                        Point2D(
-                            x_mm=float(ent.dxf.start.x) * scale,
-                            y_mm=float(ent.dxf.start.y) * scale,
-                        ),
-                        Point2D(
-                            x_mm=float(ent.dxf.end.x) * scale,
-                            y_mm=float(ent.dxf.end.y) * scale,
-                        ),
-                    )
-                )
-            elif isinstance(ent, LWPolyline):
-                pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
-                for a, b in itertools.pairwise(pts):
-                    wall_lines.append(
-                        (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
-                    )
-                if ent.closed and len(pts) >= 3:
-                    wall_lines.append(
-                        (
-                            Point2D(x_mm=pts[-1][0], y_mm=pts[-1][1]),
-                            Point2D(x_mm=pts[0][0], y_mm=pts[0][1]),
-                        )
-                    )
-            elif isinstance(ent, Spline):
-                s_pts = _flatten_spline_xy(ent, scale)
-                for a, b in itertools.pairwise(s_pts):
-                    wall_lines.append(
-                        (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
-                    )
-                if ent.closed and len(s_pts) >= 3:
-                    wall_lines.append(
-                        (
-                            Point2D(x_mm=s_pts[-1][0], y_mm=s_pts[-1][1]),
-                            Point2D(x_mm=s_pts[0][0], y_mm=s_pts[0][1]),
-                        )
-                    )
-
-        # Doors (on door layer OR exploded from a DOOR block)
+            _append_entity_segments(ent, scale, wall_lines, include_spline=True)
         elif _role_matches(layer, "doors", layer_mapping) or "DOOR" in hint_up:
             if dtype == "ARC":
                 center = Point2D(
@@ -780,38 +839,12 @@ def _scan_dxf_entities(
                     )
                 )
             elif dtype == "LINE":
-                door_leaves.append(
-                    (
-                        Point2D(
-                            x_mm=float(ent.dxf.start.x) * scale,
-                            y_mm=float(ent.dxf.start.y) * scale,
-                        ),
-                        Point2D(
-                            x_mm=float(ent.dxf.end.x) * scale,
-                            y_mm=float(ent.dxf.end.y) * scale,
-                        ),
-                    )
-                )
-
-        # Windows (also capture 90-deg door swings when architects place doors on Window layer)
+                _append_entity_segments(ent, scale, door_leaves)
         elif _role_matches(layer, "windows", layer_mapping):
             if dtype == "LINE":
-                window_lines.append(
-                    (
-                        Point2D(
-                            x_mm=float(ent.dxf.start.x) * scale,
-                            y_mm=float(ent.dxf.start.y) * scale,
-                        ),
-                        Point2D(
-                            x_mm=float(ent.dxf.end.x) * scale,
-                            y_mm=float(ent.dxf.end.y) * scale,
-                        ),
-                    )
-                )
+                _append_entity_segments(ent, scale, window_lines)
             elif dtype == "ARC":
                 _maybe_record_fallback_door_arc(ent)
-
-        # Distribution board anchor (layer OR DB block name)
         elif _role_matches(layer, "db", layer_mapping) or any(
             tok in hint_up for tok in ("DB1", "MDB", "DIST_BOARD", "PANEL")
         ):
@@ -825,8 +858,6 @@ def _scan_dxf_entities(
                     db_points.append(
                         (txt[0].strip() or "DB1", Point2D(x_mm=txt[1][0], y_mm=txt[1][1]))
                     )
-
-        # Plumbing fixtures (layer OR exploded from BATH/SHOWER/WC/SINK/BASIN block)
         elif _role_matches(layer, "fixtures", layer_mapping) or any(
             tok in hint_up for tok in ("BATH", "SHOWER", "BASIN", "SINK", "WC", "TOILET")
         ):
@@ -839,8 +870,6 @@ def _scan_dxf_entities(
                 txt = _extract_text_item(ent, scale)
                 if txt is not None:
                     fixture_texts.append((txt[0], Point(txt[1])))
-
-        # Architectural furniture & joinery blocks (BED/SOFA/TV/WARDROBE/DINING/STOVE/FRIDGE)
         elif (furn_kind := _classify_furniture_hint(layer, block_hint)) is not None:
             coords = _extract_poly_coords(ent, scale)
             if coords is not None:
@@ -865,72 +894,16 @@ def _scan_dxf_entities(
                 txt = _extract_text_item(ent, scale)
                 if txt is not None:
                     furniture_texts.append((txt[0], Point(txt[1])))
-
-        # Layer "0" fallback lines & 90-deg door arcs (used only when dedicated layers are absent)
         elif layer == "0" and not block_hint:
-            if dtype == "LINE":
-                layer0_lines.append(
-                    (
-                        Point2D(
-                            x_mm=float(ent.dxf.start.x) * scale,
-                            y_mm=float(ent.dxf.start.y) * scale,
-                        ),
-                        Point2D(
-                            x_mm=float(ent.dxf.end.x) * scale,
-                            y_mm=float(ent.dxf.end.y) * scale,
-                        ),
-                    )
-                )
-            elif dtype == "ARC":
+            if dtype == "ARC":
                 _maybe_record_fallback_door_arc(ent)
-            elif isinstance(ent, LWPolyline):
-                pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
-                for a, b in itertools.pairwise(pts):
-                    layer0_lines.append(
-                        (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
-                    )
-                if ent.closed and len(pts) >= 3:
-                    layer0_lines.append(
-                        (
-                            Point2D(x_mm=pts[-1][0], y_mm=pts[-1][1]),
-                            Point2D(x_mm=pts[0][0], y_mm=pts[0][1]),
-                        )
-                    )
+            else:
+                _append_entity_segments(ent, scale, layer0_lines)
 
-        # Architectural text labels (exclude furniture layer labels & short Greek appliance letters)
-        is_furn_layer = any(tok in layer_up for tok in ("FURN", "FURNITURE", "JOINERY"))
-        if (
-            _role_matches(layer, "text", layer_mapping)
-            or (
-                dtype in ("TEXT", "MTEXT")
-                and not _role_matches(layer, "fixtures", layer_mapping)
-                and not _role_matches(layer, "db", layer_mapping)
-                and not is_furn_layer
-            )
-        ):
-            txt = _extract_text_item(ent, scale)
-            if txt is not None:
-                norm_tok = normalize_label(clean_room_label(txt[0]))
-                if norm_tok in _APPLIANCE_CALLOUT_TOKENS:
-                    if norm_tok in _FRIDGE_CALLOUT_TOKENS:
-                        fx, fy = txt[1]
-                        furniture_polys.append(
-                            (
-                                Polygon(
-                                    [
-                                        (fx - 300.0, fy - 300.0),
-                                        (fx + 300.0, fy - 300.0),
-                                        (fx + 300.0, fy + 300.0),
-                                        (fx - 300.0, fy + 300.0),
-                                    ]
-                                ),
-                                "fridge",
-                            )
-                        )
-                else:
-                    text_labels.append((txt[0], Point(txt[1]), layer))
+        _record_dxf_text_or_appliance(
+            ent, layer, layer_up, scale, layer_mapping, furniture_polys, text_labels
+        )
 
-    # Resolve untyped furniture polylines (e.g. A-FURN rectangle + 'BED'/'DINING TABLE' text)
     for fpoly in untyped_furniture_polys:
         for ftxt, fpt in furniture_texts:
             if fpoly.contains(fpt) or fpoly.distance(fpt) < 400.0:
@@ -957,125 +930,14 @@ def _scan_dxf_entities(
     )
 
 
-def _build_and_classify_rooms(
-    scan: _DxfScanResult,
-    dxf_path: Path,
+def _resolve_leader_and_near_room_texts(
+    room_raw_polys: list[Polygon],
+    text_labels: list[tuple[str, Point, str]],
+    leader_arrows: list[tuple[Point, Point]],
     std: StandardsBundle,
-    tier2_fallback: RoomClassifierFallback | None,
-    flags: list[ReviewFlag],
-) -> tuple[list[Room], list[tuple[str, Polygon]], dict[str, list[ReviewFlag]]]:
-    """Pass 2: polygonize walls if needed, filter outer shells & classify room labels."""
-    room_raw_polys = scan.room_raw_polys
-    wall_lines = scan.wall_lines
-    layer0_lines = scan.layer0_lines
-    door_arcs = scan.door_arcs
-    fallback_door_arcs = scan.fallback_door_arcs
-    door_leaves = scan.door_leaves
-    window_lines = scan.window_lines
-    text_labels = scan.text_labels
-    leader_arrows = scan.leader_arrows
-    # Fallback: drawings with walls drawn purely on layer "0" (legacy homeowner/AutoCAD plans)
-    if not room_raw_polys and not wall_lines and layer0_lines:
-        if len(layer0_lines) >= 80:
-            paired_walls = extract_parallel_double_wall_lines(layer0_lines)
-            wall_lines = paired_walls if len(paired_walls) >= 16 else layer0_lines
-        else:
-            wall_lines = layer0_lines
-        flags.append(
-            ReviewFlag(
-                code="WALLS_INFERRED_FROM_LAYER_0",
-                severity=ReviewSeverity.WARNING,
-                category="geometry",
-                message=(
-                    f"No dedicated wall or room layer found; inferred {len(wall_lines)} wall "
-                    "segment(s) from default layer '0'. Verify room geometry or supply "
-                    "DxfLayerMapping."
-                ),
-            )
-        )
-
-    if not door_arcs and fallback_door_arcs:
-        door_arcs = fallback_door_arcs
-
-    # Wall-to-room polygonization fallback OR hybrid merge for partial A-ROOM drawings
-    if not room_raw_polys and wall_lines:
-        room_raw_polys = _polygonize_rooms_from_walls(
-            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
-        )
-        if room_raw_polys:
-            flags.append(
-                ReviewFlag(
-                    code="ROOMS_POLYGONIZED_FROM_WALLS",
-                    severity=ReviewSeverity.INFO,
-                    category="geometry",
-                    message=(
-                        f"No closed room polylines found; automatically derived "
-                        f"{len(room_raw_polys)} room polygon(s) from wall/door geometry. "
-                        "Verify room boundaries."
-                    ),
-                )
-            )
-    elif room_raw_polys and wall_lines:
-        # Hybrid merge: recover enclosed rooms that lack explicit A-ROOM polylines
-        wall_derived = _polygonize_rooms_from_walls(
-            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
-        )
-        existing_union = unary_union(room_raw_polys)
-        added_hybrid = 0
-        for cand in wall_derived:
-            if cand.area < 1_000_000.0:
-                continue
-            # Reject any candidate that overlaps existing rooms (including outer floor shells!)
-            if (cand.intersection(existing_union).area / max(cand.area, 1.0)) >= 0.25:
-                continue
-            room_raw_polys.append(cand)
-            existing_union = unary_union([existing_union, cand])
-            added_hybrid += 1
-        if added_hybrid > 0:
-            flags.append(
-                ReviewFlag(
-                    code="ROOMS_HYBRID_AUGMENTED_FROM_WALLS",
-                    severity=ReviewSeverity.INFO,
-                    category="geometry",
-                    message=(
-                        f"Augmented {len(room_raw_polys) - added_hybrid} explicit room "
-                        f"polyline(s) with {added_hybrid} additional wall-enclosed room(s) "
-                        "lacking A-ROOM outlines."
-                    ),
-                )
-            )
-
-    # Drop any outer building/floor shell polygon enclosing 2+ smaller interior rooms
-    if len(room_raw_polys) >= 3:
-        deduped_rooms: list[Polygon] = []
-        for i, cand in enumerate(room_raw_polys):
-            contained = sum(
-                1
-                for j, other in enumerate(room_raw_polys)
-                if i != j
-                and cand.area > other.area * 1.15
-                and cand.contains(other.representative_point())
-            )
-            if contained < 2:
-                deduped_rooms.append(cand)
-        if deduped_rooms:
-            room_raw_polys = deduped_rooms
-
-    if not room_raw_polys:
-        raise ValueError(
-            f"No closed room polygons (>= 0.5 m²) or polygonizable wall loops found in "
-            f"DXF '{dxf_path}'. Use DxfLayerMapping to map custom architect layers."
-        )
-
-    # Sort rooms deterministically (top-to-bottom, left-to-right by centroid)
-    room_raw_polys.sort(key=lambda p: (-round(p.centroid.y, 1), round(p.centroid.x, 1)))
-
-    rooms: list[Room] = []
-    room_poly_pairs: list[tuple[str, Polygon]] = []
-    room_flags_by_id: dict[str, list[ReviewFlag]] = defaultdict(list)
+) -> dict[int, list[str]]:
+    """Map external DXF LEADER arrows and near-boundary veranda labels to room indices."""
     tmpl_std = std.room_templates
-
-    # Pre-index text labels that sit outside ALL room polygons (for LEADER & veranda fallback)
     outside_text_indices: list[int] = [
         ti
         for ti, (_t, pt, _l) in enumerate(text_labels)
@@ -1107,7 +969,6 @@ def _build_and_classify_rooms(
             consumed_outside_text.add(best_ti)
             leader_texts_by_room_idx[pointed_idx].append(text_labels[best_ti][0])
 
-    # Near-boundary fallback for unlabelled outdoor verandas/entrances when leader is plain LINEs
     unlabelled_room_indices = [
         i
         for i, p in enumerate(room_raw_polys)
@@ -1136,178 +997,299 @@ def _build_and_classify_rooms(
         if best_ri is not None:
             consumed_outside_text.add(ti)
             leader_texts_by_room_idx[best_ri].append(txt_val)
+    return leader_texts_by_room_idx
 
-    for idx, poly in enumerate(room_raw_polys, start=1):
-        rid = f"R{idx}"
-        room_poly_pairs.append((rid, poly))
 
-        inside_texts = [t for t, pt, _ in text_labels if poly.contains(pt) or poly.touches(pt)]
-        if not inside_texts and leader_texts_by_room_idx.get(idx - 1):
-            inside_texts = list(leader_texts_by_room_idx[idx - 1])
-        if inside_texts:
-            # Prefer texts matching Tier-1 room aliases over CAD door/window callouts (e.g. '3068')
-            best_label = clean_room_label(inside_texts[0])
-            best_cls = classify_room_label(
-                best_label, tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
-            )
-            if len(inside_texts) > 1:
-                candidates = [
-                    (
+def _classify_single_room_polygon(
+    idx: int,
+    rid: str,
+    poly: Polygon,
+    inside_texts: list[str],
+    std: StandardsBundle,
+    tier2_fallback: RoomClassifierFallback | None,
+    flags: list[ReviewFlag],
+    room_flags_by_id: dict[str, list[ReviewFlag]],
+) -> Room:
+    """Resolve best label/classification for one room polygon and construct its Room model."""
+    tmpl_std = std.room_templates
+    if inside_texts:
+        best_label = clean_room_label(inside_texts[0])
+        best_cls = classify_room_label(
+            best_label, tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
+        )
+        if len(inside_texts) > 1:
+            candidates = [
+                (
+                    clean_room_label(t),
+                    classify_room_label(
                         clean_room_label(t),
+                        tmpl_std,
+                        room_id=rid,
+                        tier2_fallback=tier2_fallback,
+                    ),
+                )
+                for t in inside_texts
+            ]
+            joined_lbl = " ".join(c[0] for c in candidates if c[0] and not c[0][0].isdigit())
+            if joined_lbl:
+                candidates.append(
+                    (
+                        joined_lbl,
                         classify_room_label(
-                            clean_room_label(t),
+                            joined_lbl,
                             tmpl_std,
                             room_id=rid,
                             tier2_fallback=tier2_fallback,
                         ),
                     )
-                    for t in inside_texts
-                ]
-                joined_lbl = " ".join(c[0] for c in candidates if c[0] and not c[0][0].isdigit())
-                if joined_lbl:
-                    candidates.append(
-                        (
-                            joined_lbl,
-                            classify_room_label(
-                                joined_lbl,
-                                tmpl_std,
-                                room_id=rid,
-                                tier2_fallback=tier2_fallback,
-                            ),
-                        )
-                    )
-                matched_types = {
-                    c[1].normalized_type for c in candidates if c[1].confidence >= 0.90
-                }
-                area_m2_est = float(poly.area) / 1_000_000.0
+                )
+            matched_types = {
+                c[1].normalized_type for c in candidates if c[1].confidence >= 0.90
+            }
+            area_m2_est = float(poly.area) / 1_000_000.0
 
-                if RoomType.KITCHEN in matched_types and RoomType.LIVING_ROOM in matched_types:
-                    best_label = " / ".join(
-                        dict.fromkeys(
-                            c[0]
-                            for c in candidates
-                            if c[1].confidence >= 0.90 and c[0] != joined_lbl
-                        )
-                    )
-                    kl_cls = classify_room_label(
-                        "kitchen/living", tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
-                    )
-                    best_cls = replace(kl_cls, cleaned_label=best_label or kl_cls.cleaned_label)
-                elif (
-                    RoomType.UTILITY in matched_types
-                    and RoomType.STORAGE in matched_types
-                    and RoomType.KITCHEN not in matched_types
-                ):
-                    best_label, best_cls = next(
-                        c for c in candidates if c[1].normalized_type == RoomType.UTILITY
-                    )
-                elif (
-                    area_m2_est > 12.0
-                    and (
-                        RoomType.MASTER_BEDROOM in matched_types
-                        or RoomType.BEDROOM in matched_types
-                    )
-                    and (RoomType.ENSUITE in matched_types or RoomType.BATHROOM in matched_types)
-                ):
-                    pref = (
-                        RoomType.MASTER_BEDROOM
-                        if RoomType.MASTER_BEDROOM in matched_types
-                        else RoomType.BEDROOM
-                    )
-                    best_label, best_cls = next(
-                        c for c in candidates if c[1].normalized_type == pref
-                    )
-                    room_flags_by_id[rid].append(
-                        ReviewFlag(
-                            code="OPEN_PLAN_MULTI_LABEL_ROOM",
-                            severity=ReviewSeverity.INFO,
-                            category="geometry",
-                            message=(
-                                f"Room {rid} ({area_m2_est:.1f} m²) contains multiple labels "
-                                f"({', '.join(t.value for t in sorted(matched_types))}); "
-                                f"classified as '{pref.value}'. Verify archway/partition."
-                            ),
-                        )
-                    )
-                else:
-                    # Preserve combined labels when multiple distinct aliases share the same type
-                    # (e.g. Greek open-plan 'καθιστικό' + 'τραπεζαρία' -> 'καθιστικό / τραπεζαρία')
-                    high_conf_singles = [
-                        c
+            if RoomType.KITCHEN in matched_types and RoomType.LIVING_ROOM in matched_types:
+                best_label = " / ".join(
+                    dict.fromkeys(
+                        c[0]
                         for c in candidates
                         if c[1].confidence >= 0.90 and c[0] != joined_lbl
-                    ]
-                    if (
-                        len(matched_types) == 1
-                        and len({c[0].lower() for c in high_conf_singles}) >= 2
-                        and RoomType.LIVING_ROOM in matched_types
-                    ):
-                        best_label = " / ".join(dict.fromkeys(c[0] for c in high_conf_singles))
-                        best_cls = replace(high_conf_singles[0][1], cleaned_label=best_label)
-                    else:
-                        candidates.sort(
-                            key=lambda item: (item[1].confidence, len(item[1].matched_alias or "")),
-                            reverse=True,
-                        )
-                        best_label, best_cls = candidates[0]
-            raw_label = best_label
-            cls_res = best_cls
+                    )
+                )
+                kl_cls = classify_room_label(
+                    "kitchen/living", tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
+                )
+                best_cls = replace(kl_cls, cleaned_label=best_label or kl_cls.cleaned_label)
+            elif (
+                RoomType.UTILITY in matched_types
+                and RoomType.STORAGE in matched_types
+                and RoomType.KITCHEN not in matched_types
+            ):
+                best_label, best_cls = next(
+                    c for c in candidates if c[1].normalized_type == RoomType.UTILITY
+                )
+            elif (
+                area_m2_est > 12.0
+                and (
+                    RoomType.MASTER_BEDROOM in matched_types
+                    or RoomType.BEDROOM in matched_types
+                )
+                and (RoomType.ENSUITE in matched_types or RoomType.BATHROOM in matched_types)
+            ):
+                pref = (
+                    RoomType.MASTER_BEDROOM
+                    if RoomType.MASTER_BEDROOM in matched_types
+                    else RoomType.BEDROOM
+                )
+                best_label, best_cls = next(
+                    c for c in candidates if c[1].normalized_type == pref
+                )
+                room_flags_by_id[rid].append(
+                    ReviewFlag(
+                        code="OPEN_PLAN_MULTI_LABEL_ROOM",
+                        severity=ReviewSeverity.INFO,
+                        category="geometry",
+                        message=(
+                            f"Room {rid} ({area_m2_est:.1f} m²) contains multiple labels "
+                            f"({', '.join(t.value for t in sorted(matched_types))}); "
+                            f"classified as '{pref.value}'. Verify archway/partition."
+                        ),
+                    )
+                )
+            else:
+                high_conf_singles = [
+                    c for c in candidates if c[1].confidence >= 0.90 and c[0] != joined_lbl
+                ]
+                if (
+                    len(matched_types) == 1
+                    and len({c[0].lower() for c in high_conf_singles}) >= 2
+                    and RoomType.LIVING_ROOM in matched_types
+                ):
+                    best_label = " / ".join(dict.fromkeys(c[0] for c in high_conf_singles))
+                    best_cls = replace(high_conf_singles[0][1], cleaned_label=best_label)
+                else:
+                    candidates.sort(
+                        key=lambda item: (item[1].confidence, len(item[1].matched_alias or "")),
+                        reverse=True,
+                    )
+                    best_label, best_cls = candidates[0]
+        raw_label = best_label
+        cls_res = best_cls
+    else:
+        raw_label = f"Unnamed Room {idx}"
+        room_flags_by_id[rid].append(
+            ReviewFlag(
+                code="ROOM_LABEL_MISSING",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"Room {rid} ({poly.area / 1e6:.2f} m²) has no enclosing DXF text label; "
+                    "defaulted conservatively to 'storage'."
+                ),
+            )
+        )
+        cls_res = classify_room_label(
+            raw_label, tmpl_std, room_id=rid, tier2_fallback=tier2_fallback
+        )
+
+    if cls_res.flag is not None and inside_texts:
+        room_flags_by_id[rid].append(cls_res.flag)
+
+    rt = tmpl_std.rooms[cls_res.normalized_type]
+    ring_coords = list(poly.exterior.coords)[:-1]
+    poly_pts = [
+        Point2D(x_mm=round(float(x), 2), y_mm=round(float(y), 2)) for x, y in ring_coords
+    ]
+    used_wall_poly = any(f.code == "ROOMS_POLYGONIZED_FROM_WALLS" for f in flags)
+    det_conf = score_room_detection_confidence(
+        poly,
+        has_matched_text_label=bool(inside_texts),
+        from_explicit_room_layer=not used_wall_poly,
+        from_pdf_vector=False,
+    )
+    return Room(
+        id=rid,
+        raw_label=cls_res.cleaned_label or raw_label,
+        normalized_type=cls_res.normalized_type,
+        polygon_mm=poly_pts,
+        area_m2=round(float(poly.area) / 1_000_000.0, 4),
+        is_wet_room=rt.is_wet_room,
+        is_outdoor=rt.is_outdoor,
+        ambient_temp_c=(
+            std.eac_rules.ambient_defaults_c.roof_outdoor_c if rt.is_outdoor else None
+        ),
+        fixtures=[],
+        detection_confidence=det_conf,
+    )
+
+
+def _build_and_classify_rooms(
+    scan: _DxfScanResult,
+    dxf_path: Path,
+    std: StandardsBundle,
+    tier2_fallback: RoomClassifierFallback | None,
+    flags: list[ReviewFlag],
+) -> tuple[list[Room], list[tuple[str, Polygon]], dict[str, list[ReviewFlag]]]:
+    """Pass 2: polygonize walls if needed, filter outer shells & classify room labels."""
+    room_raw_polys = scan.room_raw_polys
+    wall_lines = scan.wall_lines
+    layer0_lines = scan.layer0_lines
+    door_arcs = scan.door_arcs
+    fallback_door_arcs = scan.fallback_door_arcs
+    door_leaves = scan.door_leaves
+    window_lines = scan.window_lines
+    text_labels = scan.text_labels
+    leader_arrows = scan.leader_arrows
+
+    if not room_raw_polys and not wall_lines and layer0_lines:
+        if len(layer0_lines) >= 80:
+            paired_walls = extract_parallel_double_wall_lines(layer0_lines)
+            wall_lines = paired_walls if len(paired_walls) >= 16 else layer0_lines
         else:
-            raw_label = f"Unnamed Room {idx}"
-            room_flags_by_id[rid].append(
+            wall_lines = layer0_lines
+        flags.append(
+            ReviewFlag(
+                code="WALLS_INFERRED_FROM_LAYER_0",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"No dedicated wall or room layer found; inferred {len(wall_lines)} wall "
+                    "segment(s) from default layer '0'. Verify room geometry or supply "
+                    "DxfLayerMapping."
+                ),
+            )
+        )
+
+    if not door_arcs and fallback_door_arcs:
+        door_arcs = fallback_door_arcs
+
+    if not room_raw_polys and wall_lines:
+        room_raw_polys = _polygonize_rooms_from_walls(
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
+        )
+        if room_raw_polys:
+            flags.append(
                 ReviewFlag(
-                    code="ROOM_LABEL_MISSING",
-                    severity=ReviewSeverity.WARNING,
+                    code="ROOMS_POLYGONIZED_FROM_WALLS",
+                    severity=ReviewSeverity.INFO,
                     category="geometry",
                     message=(
-                        f"Room {rid} ({poly.area / 1e6:.2f} m²) has no enclosing DXF text label; "
-                        "defaulted conservatively to 'storage'."
+                        f"No closed room polylines found; automatically derived "
+                        f"{len(room_raw_polys)} room polygon(s) from wall/door geometry. "
+                        "Verify room boundaries."
                     ),
                 )
             )
-            cls_res = classify_room_label(
-                raw_label,
-                tmpl_std,
-                room_id=rid,
-                tier2_fallback=tier2_fallback,
+    elif room_raw_polys and wall_lines:
+        wall_derived = _polygonize_rooms_from_walls(
+            wall_lines, door_arcs, window_lines, door_leaves=door_leaves, flags=flags
+        )
+        existing_union = unary_union(room_raw_polys)
+        added_hybrid = 0
+        for cand in wall_derived:
+            if cand.area < 1_000_000.0:
+                continue
+            if (cand.intersection(existing_union).area / max(cand.area, 1.0)) >= 0.25:
+                continue
+            room_raw_polys.append(cand)
+            existing_union = unary_union([existing_union, cand])
+            added_hybrid += 1
+        if added_hybrid > 0:
+            flags.append(
+                ReviewFlag(
+                    code="ROOMS_HYBRID_AUGMENTED_FROM_WALLS",
+                    severity=ReviewSeverity.INFO,
+                    category="geometry",
+                    message=(
+                        f"Augmented {len(room_raw_polys) - added_hybrid} explicit room "
+                        f"polyline(s) with {added_hybrid} additional wall-enclosed room(s) "
+                        "lacking A-ROOM outlines."
+                    ),
+                )
             )
 
-        if cls_res.flag is not None and inside_texts:
-            room_flags_by_id[rid].append(cls_res.flag)
+    if len(room_raw_polys) >= 3:
+        deduped_rooms: list[Polygon] = []
+        for i, cand in enumerate(room_raw_polys):
+            contained = sum(
+                1
+                for j, other in enumerate(room_raw_polys)
+                if i != j
+                and cand.area > other.area * 1.15
+                and cand.contains(other.representative_point())
+            )
+            if contained < 2:
+                deduped_rooms.append(cand)
+        if deduped_rooms:
+            room_raw_polys = deduped_rooms
 
-        rt = tmpl_std.rooms[cls_res.normalized_type]
-        ring_coords = list(poly.exterior.coords)[:-1]
-        poly_pts = [
-            Point2D(x_mm=round(float(x), 2), y_mm=round(float(y), 2)) for x, y in ring_coords
-        ]
-        area_m2 = round(float(poly.area) / 1_000_000.0, 4)
-
-        used_wall_poly = any(f.code == "ROOMS_POLYGONIZED_FROM_WALLS" for f in flags)
-        det_conf = score_room_detection_confidence(
-            poly,
-            has_matched_text_label=bool(inside_texts),
-            from_explicit_room_layer=not used_wall_poly,
-            from_pdf_vector=False,
+    if not room_raw_polys:
+        raise ValueError(
+            f"No closed room polygons (>= 0.5 m²) or polygonizable wall loops found in "
+            f"DXF '{dxf_path}'. Use DxfLayerMapping to map custom architect layers."
         )
+
+    room_raw_polys.sort(key=lambda p: (-round(p.centroid.y, 1), round(p.centroid.x, 1)))
+    leader_texts_by_room_idx = _resolve_leader_and_near_room_texts(
+        room_raw_polys, text_labels, leader_arrows, std
+    )
+
+    rooms: list[Room] = []
+    room_poly_pairs: list[tuple[str, Polygon]] = []
+    room_flags_by_id: dict[str, list[ReviewFlag]] = defaultdict(list)
+
+    for idx, poly in enumerate(room_raw_polys, start=1):
+        rid = f"R{idx}"
+        room_poly_pairs.append((rid, poly))
+        inside_texts = [t for t, pt, _ in text_labels if poly.contains(pt) or poly.touches(pt)]
+        if not inside_texts and leader_texts_by_room_idx.get(idx - 1):
+            inside_texts = list(leader_texts_by_room_idx[idx - 1])
         rooms.append(
-            Room(
-                id=rid,
-                raw_label=cls_res.cleaned_label or raw_label,
-                normalized_type=cls_res.normalized_type,
-                polygon_mm=poly_pts,
-                area_m2=area_m2,
-                is_wet_room=rt.is_wet_room,
-                is_outdoor=rt.is_outdoor,
-                ambient_temp_c=(
-                    std.eac_rules.ambient_defaults_c.roof_outdoor_c if rt.is_outdoor else None
-                ),
-                fixtures=[],
-                detection_confidence=det_conf,
+            _classify_single_room_polygon(
+                idx, rid, poly, inside_texts, std, tier2_fallback, flags, room_flags_by_id
             )
         )
 
-    # Fail-fast guard: reject uncleaned raw PDF-to-DXF vector soup (layer '0' only, >40 cells,
-    # zero readable DXF text labels) instead of routing garbage hatch polygons.
     used_layer0_fallback = any(f.code == "WALLS_INFERRED_FROM_LAYER_0" for f in flags)
     unlabelled_count = sum(1 for r in rooms if r.raw_label.startswith("Unnamed Room"))
     if used_layer0_fallback and len(rooms) > 40 and unlabelled_count == len(rooms):

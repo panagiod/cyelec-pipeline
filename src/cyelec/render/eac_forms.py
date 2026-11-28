@@ -6,8 +6,14 @@ from html import escape as esc
 from pathlib import Path
 
 from cyelec.models.building import BuildingType
-from cyelec.models.electrical import CircuitCategory, ReviewSeverity
+from cyelec.models.electrical import (
+    CircuitCategory,
+    EacProjectMetadata,
+    ElectricalDesignResult,
+    ReviewSeverity,
+)
 from cyelec.models.spatial import Phase2DesignResult
+from cyelec.render.templates import load_indented_css, render_template
 
 EAC_DISTRICT_EMAILS: dict[str, str] = {
     "Nicosia / Λευκωσία": "amc-lefkosia@eac.com.cy",
@@ -323,121 +329,73 @@ def _is_commercial_type(btype: BuildingType) -> bool:
     )
 
 
-def render_eac_application_form_html(result: Phase2DesignResult) -> str:
-    """Render official Cyprus EAC (Ε-ΔΔ-707/516/514) & HMY 58.18-1 Certificate Pack HTML."""
-    d = result.design
-    eac = d.eac_compliance
-    rows = build_eac_application_rows(result)
-    is_comm = _is_commercial_type(d.building.building_type)
-    lps_req = bool(d.lightning_risk and d.lightning_risk.lps_required)
-    points_by_cid = _count_circuit_points(result)
-
-    # Official HMY 58.18-1 Section Θ re-inspection period (IET GN3 / Cyprus EMS)
-    reinspection_text = (
-        "5 (Πέντε) χρόνια — Commercial / Industrial (IET GN3)"
-        if is_comm
-        else "10 (Δέκα) χρόνια — Domestic Residential (IET GN3)"
-    )
-
-    # Official HMY 58.18-1 Footnote (1): remaining permissible circuit VD after main feeder VD
-    main_feeder_vd_pct = 0.50
-    max_sub_vd_pct = max((sm.voltage_drop_pct for sm in d.sub_mains), default=0.0)
-    upstream_vd_pct = round(main_feeder_vd_pct + max_sub_vd_pct, 2)
-    rem_lighting_vd_pct = max(0.50, round(3.0 - upstream_vd_pct, 2))
-    rem_power_vd_pct = max(1.00, round(5.0 - upstream_vd_pct, 2))
-
-    # Main supply cable spec matching SLD (E-201)
-    main_a = eac.recommended_main_breaker_a
-    cores = 4 if eac.supply_phases == 3 else 2
-    if eac.ct_metering_required or main_a > 100:
-        main_cable_spec = f"Code G (XLPE/SWA) · {cores}×50 mm² Cu / 25 mm² PE"
-    elif main_a > 63:
-        main_cable_spec = f"Code C (XLPE/PVC) · {cores}×25 mm² Cu / 16 mm² PE"
-    else:
-        main_cable_spec = f"Code C (XLPE/PVC) · {cores}×16 mm² Cu / 16 mm² PE"
-
-    # Official HMY 58.18-1 Section I SPD parameters (Footnote *1: overhead or LPS -> Type 1+2)
-    meta = d.eac_metadata
-    is_overhead = bool(meta is not None and meta.supply_connection_type == "overhead")
-    spd_type12 = lps_req or is_overhead
-    spd_type = "Type 1+2 (Class I+II)" if spd_type12 else "Type 2 (Class II)"
-    spd_iimp = (
-        "12.5 kA (10/350µs)"
-        if spd_type12
-        else "N/A (Underground / No LPS*1)"
-    )
-    spd_in = "20 kA nominal / 40 kA Imax (8/20µs)"
-    spd_up = "≤ 1.5 kV"
-    spd_uc = "275 V AC (L-N / L-PE)"
-
-    # Official 2026 EAC Παράρτημα VII — PV & Battery Storage Technical Parameters Table
-    pv_storage_section = ""
+def _render_pv_storage_html(d: ElectricalDesignResult) -> str:
+    """Render official 2026 EAC Annex VII PV DC Array & Battery Storage HTML section."""
     pvs = d.pv_storage_design
-    if pvs is not None:
-        voc_badge = "PASS" if pvs.voc_cold_pass else "FAIL"
-        mppt_badge = "PASS" if pvs.mppt_window_pass else "CHECK"
-        dcvd_badge = "PASS" if pvs.dc_vd_pass else "CHECK"
-        bess_rows = ""
-        if pvs.battery_enabled:
-            bess_rows = (
-                "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
-                f"<td>{pvs.battery_nominal_kwh:g} kWh nominal / "
-                f"{pvs.battery_usable_kwh:g} kWh usable "
-                f"({esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC bus)</td></tr>"
-                "<tr><td><strong>BESS Charge/Discharge &amp; DC Protection</strong></td>"
-                f"<td>Max {pvs.battery_max_power_kw:g} kW ({pvs.battery_max_current_a:g} A DC) · "
-                f"{esc(pvs.battery_dc_breaker_spec)} · {esc(pvs.battery_dc_cable_spec)}</td></tr>"
-            )
-            if pvs.eps_backup_enabled:
-                bess_rows += (
-                    "<tr><td><strong>EPS Critical-Load Backup (Annex VI)</strong></td>"
-                    f"<td>{esc(pvs.eps_changeover_spec)}</td></tr>"
-                )
-        else:
-            bess_rows = (
-                "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
-                "<td>Hybrid Inverter Storage-Ready (0 kWh installed — "
-                "upgradeable under EAC PVS-S-1.2)</td></tr>"
-            )
-        pv_storage_section = (
-            "<h2>G. Official 2026 EAC Annex VII — PV DC Array &amp; "
-            "Battery Storage (DRG. PVS-S-1.2)</h2>"
-            "<table><thead><tr>"
-            "<th style='width:38%'>PV / Storage Parameter (BS 7671 Sec. 712 / EAC 2026)</th>"
-            "<th>Engineered Value / Υπολογισμένη Τιμή</th>"
-            "</tr></thead><tbody>"
-            "<tr><td><strong>Hybrid Inverter AC Rating &amp; Phases</strong></td>"
-            f"<td>{pvs.inverter_ac_kva:g} kVA ({pvs.inverter_phases}-Phase, "
-            "EN 50549-1 NS Protection, "
-            f"Vdc_max={pvs.inverter_max_dc_v}V, MPPT {pvs.mppt_min_v}–{pvs.mppt_max_v}V)</td></tr>"
-            "<tr><td><strong>PV Array &amp; String Configuration</strong></td>"
-            f"<td>{pvs.module_count} × {pvs.module_wp} Wp = "
-            f"<strong>{pvs.array_dc_kwp:g} kWp</strong> "
-            f"(DC/AC {pvs.dc_ac_ratio:.2f}) — {pvs.strings_count} string(s) × "
-            f"{pvs.modules_per_string} modules/string</td></tr>"
-            "<tr><td><strong>Cyprus Cold Voc (0°C) &amp; Hot Vmp (70°C)</strong></td>"
-            f"<td>Voc(STC)={pvs.string_voc_stc_v:.1f}V · Voc(0°C)={pvs.string_voc_cold_0c_v:.1f}V "
-            f"≤ {pvs.inverter_max_dc_v}V [<strong>{voc_badge}</strong>] · "
-            f"Vmp(70°C)={pvs.string_vmp_hot_70c_v:.1f}V [<strong>{mppt_badge}</strong>]</td></tr>"
-            "<tr><td><strong>Solar DC Cabling &amp; Voltage Drop</strong></td>"
-            f"<td>{esc(pvs.dc_cable_spec)} (est. {pvs.dc_run_length_m:.1f} m) · "
-            f"ΔV_DC = {pvs.dc_voltage_drop_pct:.2f}% ≤ 1.50% "
-            f"[<strong>{dcvd_badge}</strong>]</td></tr>"
-            "<tr><td><strong>DC Load-Break Isolator &amp; DC SPD</strong></td>"
-            f"<td>{esc(pvs.dc_isolator_spec)} · {esc(pvs.dc_spd_spec)}</td></tr>"
-            f"{bess_rows}"
-            "<tr><td><strong>EAC 2026 Grid Curtailment &amp; Zero-Export</strong></td>"
-            f"<td>{esc(pvs.eac_2026_drg_ref)} · Bidirectional Smart Meter + "
-            "Sealable Contactor Box + CT Sensor</td></tr>"
-            "</tbody></table>"
+    if pvs is None:
+        return ""
+    voc_badge = "PASS" if pvs.voc_cold_pass else "FAIL"
+    mppt_badge = "PASS" if pvs.mppt_window_pass else "CHECK"
+    dcvd_badge = "PASS" if pvs.dc_vd_pass else "CHECK"
+    if pvs.battery_enabled:
+        bess_rows = (
+            "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
+            f"<td>{pvs.battery_nominal_kwh:g} kWh nominal / "
+            f"{pvs.battery_usable_kwh:g} kWh usable "
+            f"({esc(pvs.battery_chemistry)}, {pvs.battery_bus_voltage_v}V DC bus)</td></tr>"
+            "<tr><td><strong>BESS Charge/Discharge &amp; DC Protection</strong></td>"
+            f"<td>Max {pvs.battery_max_power_kw:g} kW ({pvs.battery_max_current_a:g} A DC) · "
+            f"{esc(pvs.battery_dc_breaker_spec)} · {esc(pvs.battery_dc_cable_spec)}</td></tr>"
         )
-
-    # Commissioning measurements pre-fill (optional engineer-entered site test readings)
-    supply_chk_html = (
-        "&#9745; <strong>Εναέρια (Overhead)</strong> &nbsp; &#9744; Υπόγεια (Underground)"
-        if is_overhead
-        else "&#9744; Εναέρια (Overhead) &nbsp; &#9745; <strong>Υπόγεια (Underground)</strong>"
+        if pvs.eps_backup_enabled:
+            bess_rows += (
+                "<tr><td><strong>EPS Critical-Load Backup (Annex VI)</strong></td>"
+                f"<td>{esc(pvs.eps_changeover_spec)}</td></tr>"
+            )
+    else:
+        bess_rows = (
+            "<tr><td><strong>Battery Storage (BESS) / Αποθήκευση</strong></td>"
+            "<td>Hybrid Inverter Storage-Ready (0 kWh installed — "
+            "upgradeable under EAC PVS-S-1.2)</td></tr>"
+        )
+    return (
+        "<h2>G. Official 2026 EAC Annex VII — PV DC Array &amp; "
+        "Battery Storage (DRG. PVS-S-1.2)</h2>"
+        "<table><thead><tr>"
+        "<th style='width:38%'>PV / Storage Parameter (BS 7671 Sec. 712 / EAC 2026)</th>"
+        "<th>Engineered Value / Υπολογισμένη Τιμή</th>"
+        "</tr></thead><tbody>"
+        "<tr><td><strong>Hybrid Inverter AC Rating &amp; Phases</strong></td>"
+        f"<td>{pvs.inverter_ac_kva:g} kVA ({pvs.inverter_phases}-Phase, "
+        "EN 50549-1 NS Protection, "
+        f"Vdc_max={pvs.inverter_max_dc_v}V, MPPT {pvs.mppt_min_v}–{pvs.mppt_max_v}V)</td></tr>"
+        "<tr><td><strong>PV Array &amp; String Configuration</strong></td>"
+        f"<td>{pvs.module_count} × {pvs.module_wp} Wp = "
+        f"<strong>{pvs.array_dc_kwp:g} kWp</strong> "
+        f"(DC/AC {pvs.dc_ac_ratio:.2f}) — {pvs.strings_count} string(s) × "
+        f"{pvs.modules_per_string} modules/string</td></tr>"
+        "<tr><td><strong>Cyprus Cold Voc (0°C) &amp; Hot Vmp (70°C)</strong></td>"
+        f"<td>Voc(STC)={pvs.string_voc_stc_v:.1f}V · Voc(0°C)={pvs.string_voc_cold_0c_v:.1f}V "
+        f"≤ {pvs.inverter_max_dc_v}V [<strong>{voc_badge}</strong>] · "
+        f"Vmp(70°C)={pvs.string_vmp_hot_70c_v:.1f}V [<strong>{mppt_badge}</strong>]</td></tr>"
+        "<tr><td><strong>Solar DC Cabling &amp; Voltage Drop</strong></td>"
+        f"<td>{esc(pvs.dc_cable_spec)} (est. {pvs.dc_run_length_m:.1f} m) · "
+        f"ΔV_DC = {pvs.dc_voltage_drop_pct:.2f}% ≤ 1.50% "
+        f"[<strong>{dcvd_badge}</strong>]</td></tr>"
+        "<tr><td><strong>DC Load-Break Isolator &amp; DC SPD</strong></td>"
+        f"<td>{esc(pvs.dc_isolator_spec)} · {esc(pvs.dc_spd_spec)}</td></tr>"
+        f"{bess_rows}"
+        "<tr><td><strong>EAC 2026 Grid Curtailment &amp; Zero-Export</strong></td>"
+        f"<td>{esc(pvs.eac_2026_drg_ref)} · Bidirectional Smart Meter + "
+        "Sealable Contactor Box + CT Sensor</td></tr>"
+        "</tbody></table>"
     )
+
+
+def _render_commissioning_boxes(
+    meta: EacProjectMetadata | None,
+) -> tuple[str, str, str]:
+    """Build HMY 58.18-1 bonding check boxes and site commissioning summary row."""
     mb_val = meta.measured_main_bonding_ohm if meta is not None else None
     sb_val = meta.measured_supp_bonding_ohm if meta is not None else None
     ra_val = meta.measured_ra_ohm if meta is not None else None
@@ -498,7 +456,11 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
             f"<td colspan='3'>{dt_part}{esc(comm_txt)}</td>"
             "</tr>"
         )
+    return mb_box, sb_box, comm_summary_row
 
+
+def _render_grouped_application_tables(rows: list[tuple[str, str, str, str]]) -> str:
+    """Group EAC application schedule rows into bilingual HTML tables per section."""
     grouped_html: list[str] = []
     cur_section = ""
     buf: list[str] = []
@@ -529,6 +491,16 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
             "<th>Declared Value / Δηλωθείσα Τιμή</th>"
             f"</tr></thead><tbody>{''.join(buf)}</tbody></table>"
         )
+    return "".join(grouped_html)
+
+
+def _render_hmy_table_a_and_b_rows(
+    result: Phase2DesignResult,
+) -> tuple[str, str, str, str]:
+    """Build sub-main section, HMY Table A circuit rows, Table B inspection rows & checklist."""
+    d = result.design
+    eac = d.eac_compliance
+    points_by_cid = _count_circuit_points(result)
 
     submain_section = ""
     if d.sub_mains:
@@ -553,7 +525,6 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
             f"</tr></thead><tbody>{sm_rows}</tbody></table>"
         )
 
-    # Official HMY 58.18-1 ΠΙΝΑΚΑΣ Α Pre-Populated Circuit & Initial Verification Test Schedule
     hmy_rows_parts: list[str] = []
     for c in d.circuits:
         is_site_cct = any(
@@ -585,12 +556,6 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
         )
     hmy_rows = "".join(hmy_rows_parts)
 
-    district_rows = "".join(
-        f"<tr><td>{esc(dist)}</td><td><code>{esc(email)}</code></td></tr>"
-        for dist, email in EAC_DISTRICT_EMAILS.items()
-    )
-
-    # Official 2026 EAC ΚΑΤΑΛΟΓΟΣ ΕΠΙΣΥΝΑΠΤΟΜΕΝΩΝ ΕΓΓΡΑΦΩΝ (New Install + PV Net-Billing / EV)
     checklist_items: list[tuple[str, bool]] = [
         (
             "1. Έντυπο Υποβολής Αίτησης για Έλεγχο Ηλεκτρολογικής Εγκατάστασης (Ε-ΔΔ-707)",
@@ -654,7 +619,6 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
         for item, included in checklist_items
     )
 
-    # Official HMY 58.18-1 ΠΙΝΑΚΑΣ Β 19-Point Visual Inspection Summary
     table_b_items = [
         (
             "1. Παρουσία RCD (30 mA / 100 mA Type-S)",
@@ -704,295 +668,100 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
         f"<td style='width:6%;text-align:center'>&#9744;</td></tr>"
         for left, right in table_b_items
     )
+    return submain_section, hmy_rows, chk_rows, table_b_rows
 
+
+def render_eac_application_form_html(result: Phase2DesignResult) -> str:
+    """Render official Cyprus EAC (Ε-ΔΔ-707/516/514) & HMY 58.18-1 Certificate Pack HTML."""
+    d = result.design
+    eac = d.eac_compliance
+    rows = build_eac_application_rows(result)
+    is_comm = _is_commercial_type(d.building.building_type)
+    lps_req = bool(d.lightning_risk and d.lightning_risk.lps_required)
+
+    reinspection_text = (
+        "5 (Πέντε) χρόνια — Commercial / Industrial (IET GN3)"
+        if is_comm
+        else "10 (Δέκα) χρόνια — Domestic Residential (IET GN3)"
+    )
+    main_feeder_vd_pct = 0.50
+    max_sub_vd_pct = max((sm.voltage_drop_pct for sm in d.sub_mains), default=0.0)
+    upstream_vd_pct = round(main_feeder_vd_pct + max_sub_vd_pct, 2)
+    rem_lighting_vd_pct = max(0.50, round(3.0 - upstream_vd_pct, 2))
+    rem_power_vd_pct = max(1.00, round(5.0 - upstream_vd_pct, 2))
+
+    main_a = eac.recommended_main_breaker_a
+    cores = 4 if eac.supply_phases == 3 else 2
+    if eac.ct_metering_required or main_a > 100:
+        main_cable_spec = f"Code G (XLPE/SWA) · {cores}×50 mm² Cu / 25 mm² PE"
+    elif main_a > 63:
+        main_cable_spec = f"Code C (XLPE/PVC) · {cores}×25 mm² Cu / 16 mm² PE"
+    else:
+        main_cable_spec = f"Code C (XLPE/PVC) · {cores}×16 mm² Cu / 16 mm² PE"
+
+    meta = d.eac_metadata
+    is_overhead = bool(meta is not None and meta.supply_connection_type == "overhead")
+    spd_type12 = lps_req or is_overhead
+    spd_type = "Type 1+2 (Class I+II)" if spd_type12 else "Type 2 (Class II)"
+    spd_iimp = "12.5 kA (10/350µs)" if spd_type12 else "N/A (Underground / No LPS*1)"
+    spd_in = "20 kA nominal / 40 kA Imax (8/20µs)"
+    spd_up = "≤ 1.5 kV"
+    spd_uc = "275 V AC (L-N / L-PE)"
+
+    supply_chk_html = (
+        "&#9745; <strong>Εναέρια (Overhead)</strong> &nbsp; &#9744; Υπόγεια (Underground)"
+        if is_overhead
+        else "&#9744; Εναέρια (Overhead) &nbsp; &#9745; <strong>Υπόγεια (Underground)</strong>"
+    )
+    mb_box, sb_box, comm_summary_row = _render_commissioning_boxes(meta)
+    grouped_html = _render_grouped_application_tables(rows)
+    submain_section, hmy_rows, chk_rows, table_b_rows = _render_hmy_table_a_and_b_rows(result)
+    pv_storage_section = _render_pv_storage_html(d)
+    district_rows = "".join(
+        f"<tr><td>{esc(dist)}</td><td><code>{esc(email)}</code></td></tr>"
+        for dist, email in EAC_DISTRICT_EMAILS.items()
+    )
     poles_lbl = "4P" if eac.supply_phases == 3 else "2P"
     origin_rcd_lbl = (
         "100 mA Type-S (130–500 ms)"
         if d.earthing_system.value == "TT"
         else "N/A (TN-C-S — 30 mA RCBOs at DB)"
     )
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>
-    Cyprus EAC (Ε-ΔΔ-707 / Ε-ΔΔ-516) &amp; HMY 58.18-1 — {esc(d.building.project_name)}
-  </title>
-  <style>
-    @page {{ size: A4 portrait; margin: 11mm; }}
-    body {{
-      font-family: "DejaVu Sans", "Noto Sans", sans-serif;
-      color: #102a43;
-      font-size: 8.6pt;
-      line-height: 1.35;
-      margin: 0;
-    }}
-    .hdr {{
-      background: #1b365d;
-      color: #ffffff;
-      padding: 9px 13px;
-      border-bottom: 4px solid #0284c7;
-      margin-bottom: 9px;
-    }}
-    .hdr h1 {{ margin: 0 0 3px 0; font-size: 11.8pt; }}
-    .hdr p {{ margin: 0; font-size: 7.9pt; opacity: 0.92; }}
-    h2 {{
-      font-size: 9.2pt;
-      color: #1b365d;
-      border-bottom: 1.5px solid #1b365d;
-      padding-bottom: 2px;
-      margin: 9px 0 4px 0;
-      page-break-after: avoid;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 6px;
-      font-size: 7.9pt;
-    }}
-    th, td {{
-      border: 1px solid #cbd5e1;
-      padding: 3px 5px;
-      text-align: left;
-      vertical-align: top;
-    }}
-    th {{ background: #e2e8f0; color: #1b365d; font-weight: 700; }}
-    .test-tbl {{ font-size: 6.8pt; }}
-    .test-tbl th, .test-tbl td {{ padding: 2.5px 3.2px; }}
-    .legend-box {{
-      background: #f8fafc;
-      border: 1px solid #cbd5e1;
-      padding: 5px 8px;
-      font-size: 7.1pt;
-      margin-bottom: 7px;
-    }}
-    .note {{ font-size: 7.1pt; color: #475569; margin: 3px 0 6px 0; }}
-    .page-break {{ page-break-before: always; }}
-    .signbox {{
-      margin-top: 9px;
-      border: 1.5px solid #1b365d;
-      padding: 8px 11px;
-      background: #f8fafc;
-      page-break-inside: avoid;
-    }}
-    .sig-grid {{
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      margin-top: 8px;
-    }}
-    .sig-line {{
-      border-top: 1px dashed #475569;
-      padding-top: 4px;
-      margin-top: 22px;
-      font-size: 7.6pt;
-      color: #475569;
-    }}
-  </style>
-</head>
-<body>
-  <div class="hdr">
-    <h1>ELECTRICITY AUTHORITY OF CYPRUS (EAC / ΑΗΚ) — PLAN APPROVAL &amp; Ε-ΔΔ-516 SCHEDULE</h1>
-    <p>
-      ΑΙΤΗΣΗ ΕΛΕΓΧΟΥ (Ε-ΔΔ-707), ΥΠΕΥΘΥΝΗ ΔΗΛΩΣΗ ΜΕΛΕΤΗΤΗ &amp; ΕΓΚΑΤΑΣΤΑΤΗ (Ε-ΔΔ-516 / Ε-ΔΔ-514)
-      &amp; ΠΙΣΤΟΠΟΙΗΤΙΚΟ ΚΑΤΑΛΛΗΛΟΤΗΤΑΣ ΕΝΤΥΠΟ Η.Μ.Υ. 58.18-1 (ΗΜΥ 58 · BS 7671 / ΚΔΠ 168/2017)
-    </p>
-  </div>
-  {"".join(grouped_html)}
-  {submain_section}
-  {pv_storage_section}
-
-  <div class="signbox">
-    <strong>
-      Statutory ETEK Declaration (Ε-ΔΔ-516) / Υπεύθυνη Δήλωση Αδειούχου Μελετητή (ΕΤΕΚ) &amp;
-      Εγκαταστάτη (Ε-ΔΔ-514):
-    </strong>
-    <p style="margin:4px 0 0 0;font-size:7.9pt;">
-      I hereby verify that the electrical installation drawings, Single-Line Diagram, BS 7671
-      calculations, earthing arrangements, and Cyprus EAC protective provisions attached hereto
-      have been independently reviewed and approved for EAC plan submission. /
-      Βεβαιώνω υπεύθυνα ότι τα συνημμένα ηλεκτρολογικά σχέδια, το μονογραμμικό διάγραμμα και οι
-      υπολογισμοί BS 7671 έχουν ελεγχθεί και συμμορφώνονται με τους Κανονισμούς της ΑΗΚ και ΗΜΥ.
-    </p>
-    <div class="sig-grid">
-      <div class="sig-line">
-        Licensed ETEK Engineer Signature, HMY Reg. &amp; kVA Limit /
-        Μελετητής ΕΤΕΚ (Όρια Ευθύνης kVA)
-      </div>
-      <div class="sig-line">
-        Licensed Electrical Contractor Signature &amp; HMY Reg. / Εγκαταστάτης (Ε-ΔΔ-514)
-      </div>
-      <div class="sig-line">
-        Applicant / Owner Signature &amp; ID / Υπογραφή Αιτητή
-      </div>
-      <div class="sig-line">
-        Date &amp; EAC Application Ref / Ημερομηνία &amp; Αρ. Φακέλου ΑΗΚ
-      </div>
-    </div>
-  </div>
-
-  <div class="page-break"></div>
-  <div class="hdr">
-    <h1>ΕΝΤΥΠΟ Η.Μ.Υ. 58.18-1 — ΠΙΣΤΟΠΟΙΗΤΙΚΟ ΚΑΤΑΛΛΗΛΟΤΗΤΑΣ &amp; ΠΙΝΑΚΑΣ Α</h1>
-    <p>
-      ΤΜΗΜΑ ΗΛΕΚΤΡΟΜΗΧΑΝΟΛΟΓΙΚΩΝ ΥΠΗΡΕΣΙΩΝ (ΚΥΠΡΟΣ) — ΜΕΡΗ Θ, Ι &amp; ΠΙΝΑΚΑΣ Α
-      (ΛΕΠΤΟΜΕΡΕΙΕΣ ΚΥΚΛΩΜΑΤΩΝ &amp; ΑΠΟΤΕΛΕΣΜΑΤΑ ΕΛΕΓΧΟΥ)
-    </p>
-  </div>
-
-  <h2>
-    Θ. ΕΠΟΜΕΝΗ ΕΠΙΘΕΩΡΗΣΗ &amp; Ι. ΣΤΟΙΧΕΙΑ ΕΓΚΑΤΑΣΤΑΣΗΣ /
-    Next Inspection &amp; Installation Details
-  </h2>
-  <table>
-    <tbody>
-      <tr>
-        <td style="width:32%"><strong>ΕΠΟΜΕΝΗ ΕΠΙΘΕΩΡΗΣΗ / Next Inspection</strong></td>
-        <td colspan="3">{esc(reinspection_text)}</td>
-      </tr>
-      <tr>
-        <td><strong>Σύστημα Γείωσης / Earthing</strong></td>
-        <td>{esc(d.earthing_system.value)} (Design Ze/Ra = {d.ze_or_ra_ohm:.2f} Ω)</td>
-        <td style="width:24%"><strong>Τύπος Παροχής / Supply Type</strong></td>
-        <td>{supply_chk_html}</td>
-      </tr>
-      <tr>
-        <td><strong>Κεντρική Παροχή / Main Feeder</strong></td>
-        <td>{esc(main_cable_spec)}</td>
-        <td><strong>Πτώση Τάσης Κεντρικής (ΔV)</strong></td>
-        <td>
-          Est. {main_feeder_vd_pct:.2f}% | Max Final ΔV:
-          L ≤ {rem_lighting_vd_pct:.2f}% · P ≤ {rem_power_vd_pct:.2f}%<sup>(1)</sup>
-        </td>
-      </tr>
-      <tr>
-        <td><strong>Κεντρική Προστατευτική Συσκευή</strong></td>
-        <td>
-          {eac.recommended_main_breaker_a}A {poles_lbl} Isolator /
-          Ipf {d.prospective_fault_current_ka:.1f} kA
-        </td>
-        <td><strong>RCD στην Αφετηρία (όπου απαιτ.)</strong></td>
-        <td>{esc(origin_rcd_lbl)}</td>
-      </tr>
-      {comm_summary_row}
-    </tbody>
-  </table>
-
-  <table>
-    <thead>
-      <tr>
-        <th colspan="5">
-          Έλεγχος Συνέχειας Γειώσεων (✓) — EAC Limits: Main Bonding ≤ 0.5 Ω ·
-          Earth Continuity ≤ 1.0 Ω · IR ≥ 1.0 MΩ · 30mA RCD ≤ 200ms (1×) / ≤ 40ms (5×)
-        </th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>&#9744; Προστατευτικών αγωγών κυκλωμάτων (CPC)</td>
-        <td>{mb_box}</td>
-        <td>{sb_box}</td>
-        <td>&#9744; Αγωγού Γείωσης (MEC, ≤ 1.0 Ω)</td>
-        <td>&#9744; Γεφύρωσης εξωτερικών αγώγιμων μερών</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <table>
-    <thead>
-      <tr>
-        <th colspan="5">
-          Συσκευή Προστασίας από Υπέρταση στην Αρχή της Εγκατάστασης (SPD)<sup>*1</sup>
-        </th>
-      </tr>
-      <tr>
-        <th>Τύπος / Type</th>
-        <th>Iimp (10/350µs)</th>
-        <th>In / Imax (8/20µs)</th>
-        <th>Παραμένουσα Τάση (Up)</th>
-        <th>Μέγιστη Συνεχής Τάση (Uc)</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td><strong>{esc(spd_type)}</strong></td>
-        <td>{esc(spd_iimp)}</td>
-        <td>{esc(spd_in)}</td>
-        <td>{esc(spd_up)}</td>
-        <td>{esc(spd_uc)}</td>
-      </tr>
-    </tbody>
-  </table>
-  <p class="note">
-    <sup>(1)</sup> ΕΝΤΥΠΟ Η.Μ.Υ. 58.18-1 Σημ. 1: Αφαιρείται από το 3% (φωτισμός)
-    και το 5% (ισχύς) η πτώση τάσης της κεντρικής παροχής/υποπαροχής.
-    <sup>*1</sup> Όπου η παροχή είναι υπόγεια χωρίς αντικεραυνική προστασία (LPS),
-    SPD Τύπου 2 επαρκεί· άλλως απαιτείται SPD Τύπου 1+2 ή Μελέτη Κινδύνου IEC 62305-2.
-  </p>
-
-  <h2>ΠΙΝΑΚΑΣ Α: ΛΕΠΤΟΜΕΡΕΙΕΣ ΚΥΚΛΩΜΑΤΩΝ &amp; ΑΠΟΤΕΛΕΣΜΑΤΑ ΕΛΕΓΧΟΥ (ΕΝΤΥΠΟ Η.Μ.Υ. 58.18-1)</h2>
-  <table class="test-tbl">
-    <thead>
-      <tr>
-        <th>Πίνακας</th>
-        <th>Αρ./Φάση</th>
-        <th>Περιγραφή Κυκλώματος</th>
-        <th>Κωδ. Συρμ.</th>
-        <th>Αρ. Σημείων</th>
-        <th>L/N / CPC (mm²)</th>
-        <th>Συσκευή Προστασίας</th>
-        <th>IΔn (mA)</th>
-        <th>Max Zs (Ω)</th>
-        <th>R1+R2 (Ω)</th>
-        <th>Δακτ. (✓)</th>
-        <th>IR (MΩ)</th>
-        <th>Zs (Ω)</th>
-        <th>Πολ. (✓)</th>
-        <th>ΔV (%)</th>
-        <th>Λειτ. (✓)</th>
-      </tr>
-    </thead>
-    <tbody>
-      {hmy_rows}
-    </tbody>
-  </table>
-  <div class="legend-box">
-    <strong>ΚΩΔΙΚΕΣ ΓΙΑ ΤΟΝ ΤΥΠΟ ΣΥΡΜΑΤΩΣΗΣ (Η.Μ.Υ. 58.18-1):</strong>
-    <strong>A</strong>=PVC/PVC &nbsp;|&nbsp;
-    <strong>B</strong>=PVC σε μεταλ. σωλήνα &nbsp;|&nbsp;
-    <strong>C</strong>=PVC σε μη μεταλ. σωλήνα (Standard Cyprus Conduit) &nbsp;|&nbsp;
-    <strong>D</strong>=PVC σε μεταλ. Trunking &nbsp;|&nbsp;
-    <strong>E</strong>=PVC σε μη μεταλ. Trunking &nbsp;|&nbsp;
-    <strong>F</strong>=PVC/SWA &nbsp;|&nbsp;
-    <strong>G</strong>=XLPE/SWA &nbsp;|&nbsp;
-    <strong>H</strong>=Mineral (MI) &nbsp;|&nbsp;
-    <strong>O</strong>=Άλλος (Να καταγραφεί)
-  </div>
-
-  <h2>ΠΙΝΑΚΑΣ Β: ΕΠΙΘΕΩΡΗΣΗ ΚΑΙ ΕΛΕΓΧΟΣ (Η.Μ.Υ. 58.18-1 — 19 ΣΗΜΕΙΑ ΕΠΙΘΕΩΡΗΣΗΣ)</h2>
-  <table class="test-tbl">
-    <tbody>
-      {table_b_rows}
-    </tbody>
-  </table>
-
-  <h2>ΚΑΤΑΛΟΓΟΣ ΕΠΙΣΥΝΑΠΤΟΜΕΝΩΝ ΕΓΓΡΑΦΩΝ / Official 2026 EAC Inspection Submission Checklist</h2>
-  <table>
-    <thead>
-      <tr><th>✓</th><th>Required Document / Απαιτούμενο Έγγραφο</th><th>Status</th></tr>
-    </thead>
-    <tbody>{chk_rows}</tbody>
-  </table>
-
-  <h2>EAC District Submission Offices / Κέντρα Εξυπηρέτησης Διανομής ΑΗΚ</h2>
-  <table>
-    <thead><tr><th>District / Επαρχία</th><th>Official EAC Submission Email</th></tr></thead>
-    <tbody>{district_rows}</tbody>
-  </table>
-</body>
-</html>
-"""
+    return render_template(
+        "eac_application_form.html",
+        {
+            "__PROJECT_NAME__": esc(d.building.project_name),
+            "__EAC_FORM_CSS__": load_indented_css("eac_application_form.css"),
+            "__GROUPED_HTML__": grouped_html,
+            "__SUBMAIN_SECTION__": submain_section,
+            "__PV_STORAGE_SECTION__": pv_storage_section,
+            "__REINSPECTION_TEXT__": esc(reinspection_text),
+            "__EARTHING_DETAIL__": (
+                f"{esc(d.earthing_system.value)} (Design Ze/Ra = {d.ze_or_ra_ohm:.2f} Ω)"
+            ),
+            "__SUPPLY_CHK_HTML__": supply_chk_html,
+            "__MAIN_CABLE_SPEC__": esc(main_cable_spec),
+            "__MAIN_FEEDER_VD_PCT__": f"{main_feeder_vd_pct:.2f}",
+            "__REM_LIGHTING_VD_PCT__": f"{rem_lighting_vd_pct:.2f}",
+            "__REM_POWER_VD_PCT__": f"{rem_power_vd_pct:.2f}",
+            "__MAIN_BREAKER_A__": str(eac.recommended_main_breaker_a),
+            "__POLES_LBL__": poles_lbl,
+            "__IPF_KA__": f"{d.prospective_fault_current_ka:.1f}",
+            "__ORIGIN_RCD_LBL__": esc(origin_rcd_lbl),
+            "__COMM_SUMMARY_ROW__": comm_summary_row,
+            "__MB_BOX__": mb_box,
+            "__SB_BOX__": sb_box,
+            "__SPD_TYPE__": esc(spd_type),
+            "__SPD_IIMP__": esc(spd_iimp),
+            "__SPD_IN__": esc(spd_in),
+            "__SPD_UP__": esc(spd_up),
+            "__SPD_UC__": esc(spd_uc),
+            "__HMY_ROWS__": hmy_rows,
+            "__TABLE_B_ROWS__": table_b_rows,
+            "__CHK_ROWS__": chk_rows,
+            "__DISTRICT_ROWS__": district_rows,
+        },
+    )
 
 
 def export_eac_application_form(

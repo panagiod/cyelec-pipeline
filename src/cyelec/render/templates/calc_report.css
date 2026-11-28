@@ -1,0 +1,92 @@
+@page { size: A4 landscape; margin: 12mm; }
+body {
+  font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif;
+  font-size: 9.5pt;
+  color: #1a202c;
+  margin: 0;
+  padding: 16px;
+  background: #ffffff;
+}
+header {
+  border-bottom: 3px solid #1b365d;
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.hdr-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hdr-logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+  object-fit: contain;
+}
+h1 { font-size: 14pt; color: #1b365d; margin: 0; }
+h2 {
+  font-size: 11pt;
+  color: #1b365d;
+  margin: 14px 0 6px 0;
+  border-bottom: 1px solid #cbd5e0;
+  padding-bottom: 2px;
+}
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  background: #f7fafc;
+  border: 1px solid #e2e8f0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 8.5pt;
+}
+.notice {
+  background: #ebf8ff;
+  border-left: 4px solid #2b6cb0;
+  padding: 6px 10px;
+  margin: 8px 0 12px 0;
+  font-size: 8.5pt;
+}
+table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 8.2pt; }
+table.compact { width: 65%; }
+th, td { border: 1px solid #cbd5e0; padding: 4px 6px; vertical-align: middle; }
+th { background: #1b365d; color: #ffffff; font-weight: 600; text-align: left; }
+tbody tr:nth-child(even) { background: #f8fafc; }
+.r { text-align: right; font-variant-numeric: tabular-nums; }
+.c { text-align: center; }
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+  font-size: 7.5pt;
+}
+.badge-pass { background: #d4edda; color: #155724; }
+.badge-warn { background: #fff3cd; color: #856404; }
+.badge-fail { background: #f8d7da; color: #721c24; }
+.badge-info { background: #d9e2ec; color: #1b365d; }
+.signoff {
+  margin-top: 16px;
+  border: 1px solid #1b365d;
+  padding: 10px;
+  page-break-inside: avoid;
+}
+.signoff-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-top: 18px;
+}
+.sig-line { border-top: 1px solid #4a5568; padding-top: 4px; font-size: 8pt; color: #4a5568; }
+code { font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }
+footer {
+  margin-top: 12px;
+  font-size: 7.5pt;
+  color: #718096;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 4px;
+}
