@@ -11,6 +11,12 @@ from ezdxf.filemanagement import new as new_dxf
 
 from cyelec.models.electrical import LightningRiskAssessment
 from cyelec.models.spatial import DeviceType, Phase2DesignResult
+from cyelec.render.text_fit import (
+    dxf_char_budget,
+    fit_text_lines,
+    wrap_text_chars,
+    wrap_text_to_width,
+)
 
 
 class _SiteSummary(TypedDict):
@@ -89,15 +95,22 @@ def render_site_plan_dxf(result: Phase2DesignResult) -> Drawing:
     msp = doc.modelspace()
     # 400 x 275 mm clean schematic layout for 1:1 ISO A3 Paper Space
     w_tot, h_tot = 400.0, 275.0
+    title_lines = wrap_text_chars(
+        f"E-104: SITE WORKS, UNDERGROUND TRENCHING, EARTHING & LPS — {b.project_name}",
+        dxf_char_budget(384.0, 4.0),
+    )
+    title_extra = (len(title_lines) - 1) * 5.6
+    h_tot += title_extra
     msp.add_lwpolyline(
         [(0.0, 0.0), (w_tot, 0.0), (w_tot, h_tot), (0.0, h_tot)],
         close=True,
         dxfattribs={"layer": "E-TITLE"},
     )
-    msp.add_text(
-        f"E-104: SITE WORKS, UNDERGROUND TRENCHING, EARTHING & LPS — {b.project_name[:42]}",
-        dxfattribs={"layer": "E-TITLE", "height": 4.0},
-    ).set_placement((8.0, h_tot - 10.0))
+    for i, t_line in enumerate(title_lines):
+        msp.add_text(t_line, dxfattribs={"layer": "E-TITLE", "height": 4.0}).set_placement(
+            (8.0, h_tot - 10.0 - i * 5.6)
+        )
+    h_tot -= title_extra  # body coordinates sit below the (possibly multi-line) title
     msp.add_line((0.0, h_tot - 14.0), (w_tot, h_tot - 14.0), dxfattribs={"layer": "E-TITLE"})
 
     # Left Schematic Site Plot Box (x=12..245, y=38..252)
@@ -286,11 +299,14 @@ def render_site_plan_dxf(result: Phase2DesignResult) -> Drawing:
         if info["has_pv"]
         else "8. Roof PV: Spare 32mm Conduit Provision to Roof",
     ]
+    panel_chars = dxf_char_budget(142.0, 2.1)
     for line in spec_lines:
-        msp.add_text(line[:64], dxfattribs={"layer": "E-TITLE", "height": 2.1}).set_placement(
-            (rx, y_cur)
-        )
-        y_cur -= 7.2
+        for k, seg in enumerate(wrap_text_chars(line, panel_chars)):
+            msp.add_text(
+                seg if k == 0 else f"   {seg}", dxfattribs={"layer": "E-TITLE", "height": 2.1}
+            ).set_placement((rx, y_cur))
+            y_cur -= 3.6
+        y_cur -= 3.6
 
     y_cur -= 6.0
     msp.add_line((248.0, y_cur + 4.0), (w_tot, y_cur + 4.0), dxfattribs={"layer": "E-TITLE"})
@@ -307,16 +323,18 @@ def render_site_plan_dxf(result: Phase2DesignResult) -> Drawing:
             f"Collection Area Ad: {lps.collection_area_ad_m2:.1f} m2 (H={h_m:.1f}m)",
             f"Annual Strikes Nd: {lps.nd_events_per_yr:.6f} /yr",
             f"Calculated Risk R1: {lps.risk_r1:.2e} vs RT={lps.tolerable_rt:.1e}",
-            f"Verdict: {lps.recommended_lps_class[:54]}",
-            f"SPD: {lps.spd_requirement[:56]}",
+            f"Verdict: {lps.recommended_lps_class}",
+            f"SPD: {lps.spd_requirement}",
         ]
     else:
         lps_lines = ["IEC 62305-2 Risk Check: Standard Type 2 SPD at Origin"]
     for line in lps_lines:
-        msp.add_text(line[:64], dxfattribs={"layer": "E-TITLE", "height": 2.1}).set_placement(
-            (rx, y_cur)
-        )
-        y_cur -= 7.2
+        for k, seg in enumerate(wrap_text_chars(line, panel_chars)):
+            msp.add_text(
+                seg if k == 0 else f"   {seg}", dxfattribs={"layer": "E-TITLE", "height": 2.1}
+            ).set_placement((rx, y_cur))
+            y_cur -= 3.6
+        y_cur -= 3.6
 
     # ISO A3 Paper-Space tab
     psp = doc.layouts.new("E104-SITE-A3")
@@ -324,27 +342,23 @@ def render_site_plan_dxf(result: Phase2DesignResult) -> Drawing:
     psp.add_viewport(
         center=(210.0, 148.5),
         size=(396.0, 273.0),
-        view_center_point=(w_tot * 0.5, h_tot * 0.5),
-        view_height=h_tot + 6.0,
+        view_center_point=(w_tot * 0.5, (h_tot + title_extra) * 0.5),
+        view_height=h_tot + title_extra + 6.0,
         dxfattribs={"layer": "E-TITLE"},
     )
     return doc
 
 
-def _wrap_svg_bullet(text: str, max_chars: int = 52) -> list[str]:
-    words = text.split()
-    lines: list[str] = []
-    cur = ""
-    for w in words:
-        cand = f"{cur} {w}".strip()
-        if len(cand) <= max_chars or not cur:
-            cur = cand
-        else:
-            lines.append(cur)
-            cur = f"  {w}"
-    if cur:
-        lines.append(cur)
-    return lines
+def _wrap_svg_bullet(
+    text: str, max_w: float, font_px: float, *, bold: bool = False
+) -> list[str]:
+    """Wrap a bullet to `max_w` px (real glyph metrics); continuation lines are indented."""
+    first = wrap_text_to_width(text, max_w, font_px, bold=bold)
+    if len(first) == 1:
+        return first
+    head = first[0]
+    rest = wrap_text_to_width(text[len(head) :].strip(), max_w - 12.0, font_px, bold=bold)
+    return [head, *(f"  {ln}" for ln in rest)]
 
 
 def render_site_plan_svg(result: Phase2DesignResult) -> str:
@@ -362,14 +376,28 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
     w_s = 'class="wlbl"'
     w_sm = 'class="wsm"'
 
-    verdict_lines = _wrap_svg_bullet(f"• Verdict: {lps_verdict}", max_chars=52)
-    spd_lines = _wrap_svg_bullet(f"• Surge Protection: {lps_spd}", max_chars=54)
+    panel_w = 1072.0 - 700.0
+    verdict_lines = _wrap_svg_bullet(f"• Verdict: {lps_verdict}", panel_w, 9.5, bold=True)
+    spd_lines = _wrap_svg_bullet(f"• Surge Protection: {lps_spd}", panel_w, 9.3)
+
+    # Full-length (wrapped) title band
+    title_lines = wrap_text_to_width(
+        f"E-104 SITE WORKS, TRENCHING, EARTHING & LPS — {b.project_name}", 1064.0, 15.0, bold=True
+    )
+    sub_lines = wrap_text_to_width(
+        f"Plot: {info['plot_w']}m x {info['plot_l']}m (Setback {info['setback']}m) | "
+        f"{d.eac_compliance.recommended_supply_tier} | "
+        f"Earthing: {d.earthing_system.value} ({info['earthing_type']})",
+        1064.0,
+        10.5,
+    )
+    hdr_extra = (len(title_lines) - 1) * 18.0 + (len(sub_lines) - 1) * 13.0
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         (
             '<svg xmlns="http://www.w3.org/2000/svg" class="cy-e104" '
-            'viewBox="0 0 1120 755" width="1120" height="755">'
+            'viewBox="0 0 1120 __SVG_H__" width="1120" height="__SVG_H__">'
         ),
         "  <style>",
         '    .cy-e104 text { font-family: "DejaVu Sans", Arial, sans-serif; fill: #1a202c; }',
@@ -381,20 +409,21 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
         "    .cy-e104 .wlbl { font-size: 9px; font-weight: 700; fill: #ffffff; }",
         "    .cy-e104 .wsm { font-size: 8.5px; font-weight: 700; fill: #ffffff; }",
         "  </style>",
-        '  <rect x="0" y="0" width="1120" height="755" fill="#ffffff" />',
+        '  <rect x="0" y="0" width="1120" height="__SVG_H__" fill="#ffffff" />',
         (
-            '  <rect x="14" y="14" width="1092" height="727" '
+            '  <rect x="14" y="14" width="1092" height="__FRAME_H__" '
             'fill="none" stroke="#1b365d" stroke-width="2" />'
         ),
-        (
-            '  <text x="28" y="40" class="hdr">'
-            f"E-104 SITE WORKS, TRENCHING, EARTHING &amp; LPS — {esc(b.project_name)}</text>"
-        ),
-        (
-            f'  <text x="28" y="57" class="sub">Plot: {info["plot_w"]}m x {info["plot_l"]}m '
-            f'(Setback {info["setback"]}m) | {esc(d.eac_compliance.recommended_supply_tier)}'
-            f' | Earthing: {esc(d.earthing_system.value)} ({esc(info["earthing_type"])})</text>'
-        ),
+        *[
+            f'  <text x="28" y="{40 + i * 18}" class="hdr">{esc(t_line)}</text>'
+            for i, t_line in enumerate(title_lines)
+        ],
+        *[
+            f'  <text x="28" y="{57 + (len(title_lines) - 1) * 18 + i * 13}" class="sub">'
+            f"{esc(s_line)}</text>"
+            for i, s_line in enumerate(sub_lines)
+        ],
+        f'  <g transform="translate(0,{hdr_extra:.0f})">' if hdr_extra else "",
         '  <line x1="14" y1="68" x2="1106" y2="68" stroke="#cbd5e0" stroke-width="1.5" />',
         (
             '  <rect x="42" y="94" width="620" height="538" fill="#f7fafc" '
@@ -445,10 +474,15 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             '  <line x1="234" y1="588" x2="234" y2="424" '
             'stroke="#c53030" stroke-width="4" stroke-dasharray="8,4" />'
         ),
-        (
-            '  <text x="242" y="520" class="lbl" style="fill:#c53030;">'
-            f'2xØ110mm HDPE EAC Duct ({info["trench_m"]}m, -750mm)</text>'
-        ),
+        *[
+            f'  <text x="242" y="{500 + k * 12}" class="lbl" style="fill:#c53030;">'
+            f"{esc(ln)}</text>"
+            for k, ln in enumerate(
+                wrap_text_to_width(
+                    f"2xØ110mm HDPE EAC Duct ({info['trench_m']}m, -750mm)", 120.0, 9.5, bold=True
+                )
+            )
+        ],
         '  <circle cx="146" cy="605" r="16" fill="#c6f6d5" stroke="#2f855a" stroke-width="2" />',
         (
             '  <text x="146" y="608" text-anchor="middle" '
@@ -490,10 +524,20 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             '  <rect x="200" y="230" width="280" height="40" rx="4" '
             'fill="#fefcbf" stroke="#b7791f" stroke-width="1.5" />'
         )
-        parts.append(
-            '  <text x="340" y="254" text-anchor="middle" class="lbl" style="fill:#975a16;">'
-            f'ROOF PV PROVISION: {info["pv_kva"]:g} kVA (AC+DC RISER + SPD)</text>'
+        pv_lines, pv_fs = fit_text_lines(
+            f"ROOF PV PROVISION: {info['pv_kva']:g} kVA (AC+DC RISER + SPD)",
+            266.0,
+            9.5,
+            max_lines=1,
+            min_font_px=8.0,
+            bold=True,
         )
+        pv_y0 = 254.0 - (len(pv_lines) - 1) * 6.0
+        for k, ln in enumerate(pv_lines):
+            parts.append(
+                f'  <text x="340" y="{pv_y0 + k * 12:.1f}" text-anchor="middle" class="lbl" '
+                f'style="fill:#975a16;font-size:{pv_fs:.1f}px;">{esc(ln)}</text>'
+            )
 
     # Garden bollards
     for bx, by in ((72, 130), (72, 540), (630, 130), (630, 540)):
@@ -502,69 +546,80 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
             'fill="#fefcbf" stroke="#d69e2e" stroke-width="2" />'
         )
 
-    # Right Technical Schedule Panel (wrapped cleanly inside x=684..1088)
+    # Right Technical Schedule Panel (every bullet wrapped inside x=700..1072; panel grows)
     ng_v = d.residential_brief.lightning_flash_density_ng
     hm_v = d.residential_brief.building_height_m
-    parts.extend(
+    panel_idx = len(parts)
+    parts.append("")  # placeholder for the panel background (height known at the end)
+    ly_cur = 120.0
+    parts.append(
+        f'  <text x="700" y="{ly_cur:.0f}" class="sec">A. UNDERGROUND DUCTS &amp; SITE WORKS</text>'
+    )
+    ly_cur += 4.0
+
+    def bullets(items: list[str], cls: str = "txt", style: str = "") -> None:
+        nonlocal ly_cur
+        st = f' style="{style}"' if style else ""
+        for item in items:
+            ly_cur += 19.0
+            for k, ln in enumerate(
+                _wrap_svg_bullet(item, panel_w, 9.5 if cls == "lbl" else 9.3, bold=cls == "lbl")
+            ):
+                if k:
+                    ly_cur += 14.0
+                parts.append(
+                    f'  <text x="700" y="{ly_cur:.0f}" class="{cls}"{st}>{esc(ln)}</text>'
+                )
+
+    bullets(
         [
-            (
-                '  <rect x="684" y="94" width="404" height="620" rx="6" '
-                'fill="#f8fafc" stroke="#cbd5e0" stroke-width="1.5" />'
-            ),
-            '  <text x="700" y="120" class="sec">A. UNDERGROUND DUCTS &amp; SITE WORKS</text>',
-            (
-                '  <text x="700" y="143" class="txt">'
-                f'• EAC Incoming Duct: 2xØ110mm HDPE ({info["trench_m"]}m, -750mm)</text>'
-            ),
-            (
-                '  <text x="700" y="162" class="txt">'
-                f'• Telecom / Cyta Duct: 2xØ32mm HDPE + draw pit ({info["trench_m"]}m)</text>'
-            ),
-            (
-                '  <text x="700" y="181" class="txt">'
-                f"• Earthing Electrode: {esc(d.earthing_system.value)} — {esc(eth_title)}</text>"
-            ),
-            (
-                '  <text x="700" y="200" class="txt">'
-                "• Main Bonding: 10mm² Cu to water, gas &amp; solar metalwork</text>"
-            ),
-            (
-                '  <text x="700" y="219" class="txt">'
-                f'• External Lighting: {info["n_bollards"]}x IP65 Bollards (Photocell/Timer)</text>'
-            ),
-            (
-                '  <text x="700" y="238" class="txt">'
-                f'• Exterior Security: {info["n_cams"]}x IP67 PoE CCTV Cameras (Cat6)</text>'
-            ),
-            '  <line x1="700" y1="256" x2="1072" y2="256" stroke="#cbd5e0" stroke-width="1" />',
-            '  <text x="700" y="280" class="sec">B. IEC 62305-2 LIGHTNING RISK ASSESSMENT</text>',
-            (
-                '  <text x="700" y="303" class="txt">'
-                f"• Cyprus Flash Density Ng: {ng_v:.2f} flashes/km²/yr</text>"
-            ),
-            (
-                '  <text x="700" y="322" class="txt">'
-                f"• Equivalent Collection Area Ad: {esc(lps_ad)} (H = {hm_v:.1f} m)</text>"
-            ),
-            (
-                '  <text x="700" y="341" class="txt">'
-                f"• Calculated Risk R1: {esc(lps_r1)} (Tolerable RT = 1.00e-05)</text>"
-            ),
+            f"• EAC Incoming Duct: 2xØ110mm HDPE ({info['trench_m']}m, -750mm)",
+            f"• Telecom / Cyta Duct: 2xØ32mm HDPE + draw pit ({info['trench_m']}m)",
+            f"• Earthing Electrode: {d.earthing_system.value} — {eth_title}",
+            "• Main Bonding: 10mm² Cu to water, gas & solar metalwork",
+            f"• External Lighting: {info['n_bollards']}x IP65 Bollards (Photocell/Timer)",
+            f"• Exterior Security: {info['n_cams']}x IP67 PoE CCTV Cameras (Cat6)",
         ]
     )
-    ly_cur = 363
-    for vl in verdict_lines:
+    ly_cur += 18.0
+    parts.append(
+        f'  <line x1="700" y1="{ly_cur:.0f}" x2="1072" y2="{ly_cur:.0f}" '
+        'stroke="#cbd5e0" stroke-width="1" />'
+    )
+    ly_cur += 24.0
+    parts.append(
+        f'  <text x="700" y="{ly_cur:.0f}" class="sec">'
+        "B. IEC 62305-2 LIGHTNING RISK ASSESSMENT</text>"
+    )
+    ly_cur += 4.0
+    bullets(
+        [
+            f"• Cyprus Flash Density Ng: {ng_v:.2f} flashes/km²/yr",
+            f"• Equivalent Collection Area Ad: {lps_ad} (H = {hm_v:.1f} m)",
+            f"• Calculated Risk R1: {lps_r1} (Tolerable RT = 1.00e-05)",
+        ]
+    )
+    ly_cur += 22.0
+    for k, vl in enumerate(verdict_lines):
+        if k:
+            ly_cur += 16.0
         parts.append(
-            f'  <text x="700" y="{ly_cur}" class="lbl" style="fill:{lps_color};">{esc(vl)}</text>'
+            f'  <text x="700" y="{ly_cur:.0f}" class="lbl" style="fill:{lps_color};">'
+            f"{esc(vl)}</text>"
         )
-        ly_cur += 16
-    ly_cur += 2
-    for sl in spd_lines:
-        parts.append(f'  <text x="700" y="{ly_cur}" class="txt">{esc(sl)}</text>')
-        ly_cur += 15
-    div_y = max(ly_cur + 8, 434)
+    ly_cur += 18.0
+    for k, sl in enumerate(spd_lines):
+        if k:
+            ly_cur += 15.0
+        parts.append(f'  <text x="700" y="{ly_cur:.0f}" class="txt">{esc(sl)}</text>')
+    div_y = int(max(ly_cur + 23, 434))
     sec_c_y = div_y + 24
     tr_y = sec_c_y + 18
+    panel_h = max(620.0, tr_y + 190 + 14 - 94.0)
+    parts[panel_idx] = (
+        f'  <rect x="684" y="94" width="404" height="{panel_h:.0f}" rx="6" '
+        'fill="#f8fafc" stroke="#cbd5e0" stroke-width="1.5" />'
+    )
     parts.extend(
         [
             (
@@ -613,10 +668,18 @@ def render_site_plan_svg(result: Phase2DesignResult) -> str:
                 'fill="#bee3f8" stroke="#2b6cb0" stroke-width="2" />'
             ),
             f'  <text x="938" y="{tr_y + 176}" class="txt">2xØ32mm Cyta</text>',
+            "  </g>" if hdr_extra else "",
             "</svg>",
         ]
     )
-    return "\n".join(p for p in parts if p)
+    body_h = max(755.0, 94.0 + panel_h + 41.0)
+    svg_h = int(body_h + hdr_extra)
+    return (
+        "\n".join(p for p in parts if p)
+        .replace("__SVG_H__", str(svg_h))
+        .replace("__FRAME_H__", str(svg_h - 28))
+    )
+
 
 
 def export_site_plan_deliverables(

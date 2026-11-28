@@ -16,6 +16,11 @@ from pathlib import Path
 from cyelec.models.electrical import BreakerCurve, ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.render.pdf_export import export_svg_sheet_to_pdf
+from cyelec.render.text_fit import svg_text_mask, text_width_px, wrap_text_to_width
+
+
+def text_width_px_bold(text: str, font_px: float) -> float:
+    return text_width_px(text, font_px, bold=True)
 
 
 def _esc(val: object) -> str:
@@ -125,9 +130,27 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
     rep_c = max(type_c_ckts, key=lambda c: c.breaker_in_a) if type_c_ckts else None
     rep_sm = max(result.sub_mains, key=lambda s: s.breaker_in_a) if result.sub_mains else None
 
+    # Full-length (wrapped) title band - grows instead of running off the sheet edge.
+    title_lines = wrap_text_to_width(
+        "E-203 TIME-CURRENT (I-t) SELECTIVITY & IEC 60909 FAULT COORDINATION — "
+        f"{result.building.project_name}",
+        w - 52.0,
+        15.0,
+        bold=True,
+    )
+    sub_lines = wrap_text_to_width(
+        f"Supply: {eac.recommended_supply_tier} | EAC Main Fuse: {fuse_a}A BS 88 gG | "
+        f"Origin Ik3_max: {ik3_ka:.2f} kA | Ik1_min: {ik1_ka:.2f} kA | "
+        f"Earthing: {result.earthing_system.value}",
+        w - 52.0,
+        10.5,
+    )
+    hdr_extra = (len(title_lines) - 1) * 18.0 + (len(sub_lines) - 1) * 13.0
+
     parts: list[str] = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" '
-        f'width="{w}" height="{h}" style="background:#ffffff;font-family:Inter,Arial,sans-serif;">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} __SVG_H__" '
+        f'width="{w}" height="__SVG_H__" '
+        'style="background:#ffffff;font-family:Inter,Arial,sans-serif;">',
         "  <style>",
         "    .t-title { font-size:15px; font-weight:700; fill:#1b365d; }",
         "    .t-sub { font-size:10.5px; fill:#475569; }",
@@ -137,15 +160,18 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
         "    .t-ok { font-size:8.5px; fill:#166534; font-weight:700; }",
         "    .t-warn { font-size:8.5px; fill:#b45309; font-weight:700; }",
         "  </style>",
-        f'  <rect x="10" y="10" width="{w - 20}" height="{h - 20}" '
+        '  <rect x="10" y="10" width="__FRAME_W__" height="__FRAME_H__" '
         'fill="#ffffff" stroke="#1b365d" stroke-width="1.8" rx="4" />',
-        f'  <text x="26" y="36" class="t-title">'
-        f"E-203 TIME-CURRENT (I-t) SELECTIVITY &amp; IEC 60909 FAULT COORDINATION — "
-        f"{_esc(result.building.project_name)}</text>",
-        f'  <text x="26" y="54" class="t-sub">'
-        f"Supply: {_esc(eac.recommended_supply_tier)} | EAC Main Fuse: {fuse_a}A BS 88 gG | "
-        f"Origin Ik3_max: {ik3_ka:.2f} kA | Ik1_min: {ik1_ka:.2f} kA | "
-        f"Earthing: {_esc(result.earthing_system.value)}</text>",
+        *[
+            f'  <text x="26" y="{36 + i * 18}" class="t-title">{_esc(t_line)}</text>'
+            for i, t_line in enumerate(title_lines)
+        ],
+        *[
+            f'  <text x="26" y="{54 + (len(title_lines) - 1) * 18 + i * 13}" class="t-sub">'
+            f"{_esc(s_line)}</text>"
+            for i, s_line in enumerate(sub_lines)
+        ],
+        *([f'  <g transform="translate(0,{hdr_extra:.0f})">'] if hdr_extra else []),
         f'  <line x1="20" y1="64" x2="{w - 20}" y2="64" stroke="#cbd5e1" stroke-width="1.1" />',
         # Plot background
         f'  <rect x="{px0:.1f}" y="{py0:.1f}" width="{pw:.1f}" height="{ph:.1f}" '
@@ -243,36 +269,39 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
             'stroke="#047857" stroke-width="1.5" />'
         )
 
-    # 5. Fault Current Vertical Markers (Ik1_min and Ik3_max)
-    for f_ka, f_col, f_lbl, is_max in (
+    # 5. Fault Current Vertical Markers (Ik1_min and Ik3_max). Both marker lines are drawn
+    # first; the labels follow on opaque background masks so neither marker line, the grid
+    # nor a curve band can strike through them.
+    markers = (
         (ik1_ka, "#d97706", f"Ik1_min = {ik1_ka:.2f} kA", False),
         (ik3_ka, "#b91c1c", f"Ik3_max = {ik3_ka:.2f} kA", True),
-    ):
+    )
+    for f_ka, f_col, _f_lbl, _is_max in markers:
         fx = map_x(f_ka * 1000.0)
         parts.append(
             f'  <line x1="{fx:.1f}" y1="{py0:.1f}" x2="{fx:.1f}" y2="{py1:.1f}" '
             f'stroke="{f_col}" stroke-width="1.6" stroke-dasharray="6,3" />'
         )
-        t_anchor = "start" if is_max and fx + 95.0 < px1 else "end"
-        tx_lbl = fx + 5.0 if t_anchor == "start" else fx - 5.0
+    for f_ka, f_col, f_lbl, is_max in markers:
+        fx = map_x(f_ka * 1000.0)
+        lbl_w = text_width_px_bold(f_lbl, 8.5)
+        if is_max:
+            t_anchor = "start" if fx + 8.0 + lbl_w < px1 - 4.0 else "end"
+        else:
+            t_anchor = "end" if fx - 8.0 - lbl_w > px0 + 4.0 else "start"
+        tx_lbl = fx + 6.0 if t_anchor == "start" else fx - 6.0
+        ty_lbl = py0 + 14 if is_max else py0 + 28
+        parts.append(svg_text_mask(f_lbl, tx_lbl, ty_lbl, 8.5, anchor=t_anchor, bold=True))
         parts.append(
-            f'  <text x="{tx_lbl:.1f}" y="{py0 + 14 if is_max else py0 + 28:.1f}" '
+            f'  <text x="{tx_lbl:.1f}" y="{ty_lbl:.1f}" '
             f'text-anchor="{t_anchor}" style="font-size:8.5px;font-weight:700;fill:{f_col};">'
             f"{_esc(f_lbl)}</text>"
         )
 
-    # Right Legend & RCD Coordination Panel
+    # Right Legend & RCD Coordination Panel (every line wrapped to the panel width)
     lx0 = px1 + 22.0
     ly = py0
     lw = w - lx0 - 24.0
-    parts.extend(
-        [
-            f'  <rect x="{lx0:.1f}" y="{ly:.1f}" width="{lw:.1f}" height="216" '
-            'rx="4" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1" />',
-            f'  <text x="{lx0 + 12:.1f}" y="{ly + 20:.1f}" class="t-lbl">'
-            "PROTECTIVE CURVE LEGEND</text>",
-        ]
-    )
     leg_items: list[tuple[str, str]] = [
         ("#dc2626", f"EAC Main Fuse: {fuse_a}A BS 88-2 gG"),
     ]
@@ -288,49 +317,90 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
         leg_items.append(
             ("#059669", f"Max Final Type C: {rep_c.breaker_in_a}A RCBO ({rep_c.spec.circuit_id})")
         )
+    leg_wrapped = [(col, wrap_text_to_width(txt, lw - 46.0, 8.5)) for col, txt in leg_items]
+    leg_h = max(216.0, 40.0 + sum(len(wl) * 11.0 + 11.0 for _c, wl in leg_wrapped) + 8.0)
+    parts.extend(
+        [
+            f'  <rect x="{lx0:.1f}" y="{ly:.1f}" width="{lw:.1f}" height="{leg_h:.1f}" '
+            'rx="4" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1" />',
+            f'  <text x="{lx0 + 12:.1f}" y="{ly + 20:.1f}" class="t-lbl">'
+            "PROTECTIVE CURVE LEGEND</text>",
+        ]
+    )
     cur_ly = ly + 40.0
-    for col, txt in leg_items:
+    for col, wl in leg_wrapped:
         parts.append(
             f'  <rect x="{lx0 + 12:.1f}" y="{cur_ly - 8:.1f}" width="16" height="10" '
             f'fill="{col}" fill-opacity="0.25" stroke="{col}" stroke-width="1.5" />'
         )
-        parts.append(
-            f'  <text x="{lx0 + 34:.1f}" y="{cur_ly:.1f}" class="t-xs">{_esc(txt)}</text>'
-        )
-        cur_ly += 22.0
+        for k, ln in enumerate(wl):
+            parts.append(
+                f'  <text x="{lx0 + 34:.1f}" y="{cur_ly + k * 11:.1f}" class="t-xs">'
+                f"{_esc(ln)}</text>"
+            )
+        cur_ly += len(wl) * 11.0 + 11.0
 
     # RCD Time-Delay Coordination Box (100mA Type-S vs 30mA Type-A)
-    rcd_y = ly + 230.0
+    rcd_y = ly + leg_h + 14.0
+    verdict = (
+        ("t-xs", "Upstream (TT): 100 mA Type-S (Delay 130–500 ms)", 18.0),
+        ("t-xs", "Downstream Final: 30 mA Type-A RCBO (≤40 ms @ 5×)", 16.0),
+        ("t-ok", "Ratio IΔn_up / IΔn_dn = 3.33× (>=3×) · NON-OVERLAPPING", 18.0),
+        ("t-lbl", "BS 7671 / IEC 60909 VERDICT", 24.0),
+        (
+            "t-ok",
+            "Breaking Capacity (Icu ≥ Ik3): "
+            f"{'PASS' if (sel is None or sel.all_breaking_capacity_pass) else 'CHECK'}",
+            18.0,
+        ),
+        (
+            "t-ok",
+            "Instantaneous Trip (Ik1 ≥ Imag): "
+            f"{'PASS' if (sel is None or sel.all_instantaneous_trip_pass) else 'CHECK'}",
+            18.0,
+        ),
+        (
+            "t-ok",
+            "Upstream-Downstream Selectivity: "
+            f"{'PASS' if (sel is None or sel.all_selectivity_pass) else 'PARTIAL / CHECK'}",
+            18.0,
+        ),
+        ("t-xs", "Ref: IEC 60898-1 · IEC 60909 · BS 7671 Reg 536.4", 18.0),
+    )
+    rcd_rows: list[tuple[str, str, float]] = []
+    vy = rcd_y + 20.0
+    for cls, txt, gap in verdict:
+        fs = 10.0 if cls == "t-lbl" else 8.5
+        vy += gap
+        for k, ln in enumerate(wrap_text_to_width(txt, lw - 24.0, fs, bold=cls != "t-xs")):
+            if k:
+                vy += fs * 1.25
+            rcd_rows.append((cls, ln, vy))
+    rcd_h = max(180.0, vy - rcd_y + 12.0)
     parts.extend(
         [
-            f'  <rect x="{lx0:.1f}" y="{rcd_y:.1f}" width="{lw:.1f}" height="180" '
+            f'  <rect x="{lx0:.1f}" y="{rcd_y:.1f}" width="{lw:.1f}" height="{rcd_h:.1f}" '
             'rx="4" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.2" />',
             f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 20:.1f}" class="t-lbl">'
             "RCD TIME-CURRENT SELECTIVITY</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 38:.1f}" class="t-xs">'
-            "Upstream (TT): 100 mA Type-S (Delay 130–500 ms)</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 54:.1f}" class="t-xs">'
-            "Downstream Final: 30 mA Type-A RCBO (≤40 ms @ 5×)</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 72:.1f}" class="t-ok">'
-            "Ratio IΔn_up / IΔn_dn = 3.33× (&gt;=3×) · NON-OVERLAPPING</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 96:.1f}" class="t-lbl">'
-            "BS 7671 / IEC 60909 VERDICT</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 114:.1f}" class="t-ok">'
-            f"Breaking Capacity (Icu ≥ Ik3): "
-            f"{'PASS' if (sel is None or sel.all_breaking_capacity_pass) else 'CHECK'}</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 132:.1f}" class="t-ok">'
-            f"Instantaneous Trip (Ik1 ≥ Imag): "
-            f"{'PASS' if (sel is None or sel.all_instantaneous_trip_pass) else 'CHECK'}</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 150:.1f}" class="t-ok">'
-            f"Upstream-Downstream Selectivity: "
-            f"{'PASS' if (sel is None or sel.all_selectivity_pass) else 'PARTIAL / CHECK'}</text>",
-            f'  <text x="{lx0 + 12:.1f}" y="{rcd_y + 168:.1f}" class="t-xs">'
-            "Ref: IEC 60898-1 · IEC 60909 · BS 7671 Reg 536.4</text>",
+            *[
+                f'  <text x="{lx0 + 12:.1f}" y="{yy:.1f}" class="{cls}">{_esc(ln)}</text>'
+                for cls, ln, yy in rcd_rows
+            ],
         ]
     )
+    panel_bottom = rcd_y + rcd_h
 
     # Bottom Board-by-Board IEC 60909 Fault & Discrimination Schedule
-    ty = py1 + 52.0
+    ty = max(py1 + 52.0, panel_bottom + 30.0)
+    # Size the Status column from its widest entry so long verdicts such as
+    # "CHECK_REQUIRED" stay inside the table/frame instead of running off the sheet.
+    status_texts = ["Status"] + (
+        [b.selectivity_type.upper() for b in sel.boards] if sel is not None else []
+    )
+    status_w = max(text_width_px(s, 8.5, bold=True) for s in status_texts)
+    status_x = min(1028.0, w - 24.0 - 8.0 - status_w)
+    ref_w = status_x - 606.0 - 14.0
     parts.extend(
         [
             f'  <text x="26" y="{ty:.1f}" class="t-lbl">'
@@ -348,42 +418,61 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
             "Limit Is</text>",
             f'  <text x="606" y="{ty + 23:.1f}" class="t-xs" style="font-weight:700;">'
             "Coordination &amp; Vendor Series</text>",
-            f'  <text x="1028" y="{ty + 23:.1f}" class="t-xs" style="font-weight:700;">'
+            f'  <text x="{status_x:.1f}" y="{ty + 23:.1f}" class="t-xs" style="font-weight:700;">'
             "Status</text>",
         ]
     )
     row_y = ty + 44.0
     if sel is not None:
-        for b in sel.boards[:6]:
+        for b in sel.boards:
             is_ok = b.breaking_capacity_pass and b.selectivity_type != "check_required"
             st_cls = "t-ok" if is_ok else "t-warn"
             st_txt = b.selectivity_type.upper()
+            dev_lines = wrap_text_to_width(b.upstream_device_label, 262.0, 8.5)
+            ref_lines = wrap_text_to_width(b.vendor_coordination_ref, ref_w, 8.5)
+            n_ln = max(len(dev_lines), len(ref_lines))
             parts.extend(
                 [
-                    f'  <line x1="24" y1="{row_y + 6:.1f}" x2="{w - 24}" y2="{row_y + 6:.1f}" '
-                    'stroke="#e2e8f0" stroke-width="0.8" />',
                     f'  <text x="32" y="{row_y:.1f}" class="t-xs" style="font-weight:700;">'
                     f"{_esc(b.board_id)}</text>",
-                    f'  <text x="102" y="{row_y:.1f}" class="t-xs">'
-                    f"{_esc(b.upstream_device_label[:46])}</text>",
+                    *[
+                        f'  <text x="102" y="{row_y + k * 11:.1f}" class="t-xs">{_esc(ln)}</text>'
+                        for k, ln in enumerate(dev_lines)
+                    ],
                     f'  <text x="372" y="{row_y:.1f}" class="t-xs">'
                     f"{b.ik3_max_ka:.2f} / {b.ik1_min_ka:.2f}</text>",
                     f'  <text x="468" y="{row_y:.1f}" class="t-xs">'
                     f"{b.device_icu_ka:g} kA</text>",
                     f'  <text x="536" y="{row_y:.1f}" class="t-xs">'
                     f"{b.discrimination_limit_is_ka:.1f} kA</text>",
-                    f'  <text x="606" y="{row_y:.1f}" class="t-xs">'
-                    f"{_esc(b.vendor_coordination_ref[:66])}</text>",
-                    f'  <text x="1028" y="{row_y:.1f}" class="{st_cls}">'
+                    *[
+                        f'  <text x="606" y="{row_y + k * 11:.1f}" class="t-xs">{_esc(ln)}</text>'
+                        for k, ln in enumerate(ref_lines)
+                    ],
+                    f'  <text x="{status_x:.1f}" y="{row_y:.1f}" class="{st_cls}">'
                     f"{_esc(st_txt)}</text>",
                 ]
             )
-            row_y += 22.0
+            sep_y = row_y + (n_ln - 1) * 11.0 + 6.0
+            parts.append(
+                f'  <line x1="24" y1="{sep_y:.1f}" x2="{w - 24}" y2="{sep_y:.1f}" '
+                'stroke="#e2e8f0" stroke-width="0.8" />'
+            )
+            row_y = sep_y + 16.0
 
     # Keep helper poly_line referenced for future overlay annotations
     _ = poly_line
+    if hdr_extra:
+        parts.append("  </g>")
     parts.append("</svg>")
-    return "\n".join(parts)
+    body_h = max(float(h), row_y + 24.0)
+    svg_h = int(math.ceil(body_h + hdr_extra))
+    return (
+        "\n".join(parts)
+        .replace("__SVG_H__", str(svg_h))
+        .replace("__FRAME_W__", str(w - 20))
+        .replace("__FRAME_H__", str(svg_h - 20))
+    )
 
 
 def export_selectivity_deliverables(

@@ -20,6 +20,12 @@ from cyelec.models.building import Point2D
 from cyelec.models.electrical import CircuitCategory
 from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
 from cyelec.render.label_layout import LabelLayoutEngine, estimate_text_size
+from cyelec.render.text_fit import (
+    fit_text_lines,
+    hoist_svg_text_to_top,
+    svg_text_mask,
+    wrap_text_to_width,
+)
 
 SvgDiscipline = Literal["combined", "lighting", "power", "elv"]
 
@@ -296,13 +302,49 @@ def render_floorplan_svg(
 
     # Map architectural mm -> SVG pixels (flipping Y axis so north is up)
     pad_left = 60.0
-    pad_top = 64.0
     pad_right = 258.0  # Legend + Mounting Heights sidebar
     pad_bottom = 52.0
     draw_w = 900.0
+    svg_w = int(math.ceil(pad_left + draw_w + pad_right))
+
+    sheet_title = (
+        "E-101 LIGHTING, PHOTOMETRICS & SWITCHING LAYOUT"
+        if discipline == "lighting"
+        else (
+            "E-102 POWER, SOCKETS & MECHANICAL PLANT LAYOUT"
+            if discipline == "power"
+            else (
+                "E-103 ELV, SECURITY, INTERCOM & LIFE SAFETY LAYOUT"
+                if discipline == "elv"
+                else "E-100 COMBINED LV ELECTRICAL LAYOUT (COORDINATION)"
+            )
+        )
+    )
+    # Full-length title band: wrap (never truncate) the title + project name and subtitle.
+    title_max_w = svg_w - pad_left - 24.0
+    title_lines, title_fs = fit_text_lines(
+        f"{sheet_title} — {building.project_name}",
+        title_max_w,
+        13.5,
+        max_lines=2,
+        min_font_px=11.0,
+        bold=True,
+    )
+    sub_txt = (
+        f"Area: {building.total_floor_area_m2:.1f} m² | "
+        f"Profile: {eac.eac_profile.value} "
+        f"(Bath excl: {eac.bathroom_socket_exclusion_m:.1f} m) | "
+        f"Points: {len(active_devices)} | "
+        f"Total Conduit: {spatial.total_conduit_m:.1f} m"
+    )
+    sub_lines = wrap_text_to_width(sub_txt, title_max_w, 9.8)
+    title_lh = title_fs * 1.2
+    sub_y0 = 26.0 + (len(title_lines) - 1) * title_lh + 16.0
+    hdr_extra = (len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * 12.5
+    pad_top = 64.0 + math.ceil(hdr_extra)
+
     scale = draw_w / span_x
     draw_h = max(480.0, span_y * scale)
-    svg_w = int(math.ceil(pad_left + draw_w + pad_right))
     svg_h = int(math.ceil(pad_top + draw_h + pad_bottom))
 
     # Layout engine strictly bounded to the drawing canvas (excluding title band & legend sidebar)
@@ -334,20 +376,6 @@ def render_floorplan_svg(
     for sb in building.sub_boards:
         board_mm_by_id[sb.board_id] = (sb.location_mm.x_mm, sb.location_mm.y_mm)
         board_id_by_floor[sb.floor] = sb.board_id
-
-    sheet_title = (
-        "E-101 LIGHTING, PHOTOMETRICS &amp; SWITCHING LAYOUT"
-        if discipline == "lighting"
-        else (
-            "E-102 POWER, SOCKETS &amp; MECHANICAL PLANT LAYOUT"
-            if discipline == "power"
-            else (
-                "E-103 ELV, SECURITY, INTERCOM &amp; LIFE SAFETY LAYOUT"
-                if discipline == "elv"
-                else "E-100 COMBINED LV ELECTRICAL LAYOUT (COORDINATION)"
-            )
-        )
-    )
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -388,19 +416,18 @@ def render_floorplan_svg(
             f'  <rect x="6" y="6" width="{svg_w - 12}" height="{svg_h - 12}" '
             'fill="none" stroke="#cbd5e1" stroke-width="1.0" />'
         ),
-        (
-            f'  <text x="{pad_left:.0f}" y="26" class="fp-title">'
-            f"{sheet_title} — {_esc(building.project_name)}</text>"
-        ),
-        (
-            f'  <text x="{pad_left:.0f}" y="42" class="fp-sub">'
-            f"Area: {building.total_floor_area_m2:.1f} m² | "
-            f"Profile: {_esc(eac.eac_profile.value)} "
-            f"(Bath excl: {eac.bathroom_socket_exclusion_m:.1f} m) | "
-            f"Points: {len(active_devices)} | "
-            f"Total Conduit: {spatial.total_conduit_m:.1f} m</text>"
-        ),
     ]
+    for i, t_line in enumerate(title_lines):
+        fs_attr = f' style="font-size:{title_fs:.1f}px;"' if title_fs != 13.5 else ""
+        parts.append(
+            f'  <text x="{pad_left:.0f}" y="{26.0 + i * title_lh:.1f}" class="fp-title"{fs_attr}>'
+            f"{_esc(t_line)}</text>"
+        )
+    for i, s_line in enumerate(sub_lines):
+        parts.append(
+            f'  <text x="{pad_left:.0f}" y="{sub_y0 + i * 12.5:.1f}" class="fp-sub">'
+            f"{_esc(s_line)}</text>"
+        )
 
     # 1. Room fills (interactive polygons for Pass-2 visual room override)
     for room in building.rooms:
@@ -898,7 +925,7 @@ def render_floorplan_svg(
     parts.extend(
         [
             (
-                f'  <rect data-db="true" data-anchor="db" '
+                f'  <rect class="txt-mask db-badge" data-db="true" data-anchor="db" '
                 f'x="{dbx - db_w / 2:.1f}" y="{dby - 8:.1f}" '
                 f'width="{db_w:.1f}" height="16" fill="#c53030" stroke="#742a2a" '
                 'stroke-width="1.5" rx="2" />'
@@ -924,7 +951,7 @@ def render_floorplan_svg(
         parts.extend(
             [
                 (
-                    f'  <rect data-sub-board="{_esc(sb.board_id)}" '
+                    f'  <rect class="txt-mask db-badge" data-sub-board="{_esc(sb.board_id)}" '
                     f'x="{fx - sb_w / 2:.1f}" y="{fy - 8:.1f}" width="{sb_w:.1f}" height="16" '
                     'fill="#dd6b20" stroke="#7b341e" stroke-width="1.5" rx="2" />'
                 ),
@@ -1145,24 +1172,21 @@ def render_floorplan_svg(
         r_bbox = (min(r_xs), min(r_ys), max(r_xs), max(r_ys))
         room_px_w = max(32.0, (r_bbox[2] - r_bbox[0]) - 8.0)
         raw_lbl = room.raw_label.strip()
-        if " / " in raw_lbl:
-            p1, p2 = raw_lbl.split(" / ", 1)
-            lbl_lines = [p1.strip()[:22], p2.strip()[:22]]
-        elif len(raw_lbl) > 18 and " " in raw_lbl:
-            mid = len(raw_lbl) // 2
-            sp_i = raw_lbl.find(" ", mid)
-            if sp_i == -1:
-                sp_i = raw_lbl.rfind(" ", 0, mid)
-            lbl_lines = (
-                [raw_lbl[:sp_i].strip(), raw_lbl[sp_i + 1 :].strip()]
-                if sp_i > 0
-                else [raw_lbl[:22]]
-            )
-        else:
-            lbl_lines = [raw_lbl[:22]]
-
-        max_ch = max(len(ln) for ln in lbl_lines)
-        lbl_fs = min(8.2, max(5.6, room_px_w / max(max_ch * 0.62, 1.0)))
+        lbl_parts = (
+            [p.strip() for p in raw_lbl.split(" / ") if p.strip()] if " / " in raw_lbl else []
+        ) or [raw_lbl]
+        # Full-length bilingual title: step the font down (8.2 -> 5.6 px) until each language
+        # part fits one line (single-language labels: two lines); below the floor, extra
+        # wrapped lines are added instead - the label is never truncated.
+        line_budget = 2 if len(lbl_parts) == 1 else len(lbl_parts)
+        lbl_fs = 8.2
+        while True:
+            lbl_lines = [
+                ln for p in lbl_parts for ln in wrap_text_to_width(p, room_px_w, lbl_fs, bold=True)
+            ]
+            if len(lbl_lines) <= line_budget or lbl_fs <= 5.6:
+                break
+            lbl_fs = round(lbl_fs - 0.2, 2)
         area_txt = f"{room.area_m2:.1f} m²"
         spec_lines: list[tuple[str, float, bool]] = [(ln, lbl_fs, True) for ln in lbl_lines]
         spec_lines.append((area_txt, 7.2, False))
@@ -1180,10 +1204,14 @@ def render_floorplan_svg(
             )
         for (txt_s, fs_s, is_title), lb in zip(spec_lines, line_boxes, strict=True):
             base_y = lb[1] + (lb[3] - lb[1]) * 0.80
+            fs_r = round(fs_s, 1)
+            parts.append(
+                svg_text_mask(txt_s, blk_cx, base_y, fs_r, anchor="middle", bold=is_title, pad=1.2)
+            )
             if is_title:
                 parts.append(
                     f'  <text x="{blk_cx:.1f}" y="{base_y:.1f}" text-anchor="middle" '
-                    f'class="room-lbl" style="font-size:{fs_s:.1f}px;">{_esc(txt_s)}</text>'
+                    f'class="room-lbl" style="font-size:{fs_r:.1f}px;">{_esc(txt_s)}</text>'
                 )
             else:
                 parts.append(
@@ -1205,6 +1233,7 @@ def render_floorplan_svg(
                 'r="1.5" fill="#475569" style="pointer-events:none;" />'
             )
         style_attr = f' style="fill:{t_col};"' if t_col else ""
+        parts.append(svg_text_mask(t_str, placed.text_x, placed.text_y, 6.6, bold=True, pad=1.0))
         parts.append(
             f'  <text x="{placed.text_x:.1f}" y="{placed.text_y:.1f}" '
             f'class="dev-tag"{style_attr}>{_esc(t_str)}</text>'
@@ -1343,4 +1372,5 @@ def render_floorplan_svg(
         )
 
     parts.append("</svg>")
-    return "\n".join(parts)
+    # Labels last: no wire, symbol, heatmap cell or fill can ever be painted over text.
+    return hoist_svg_text_to_top("\n".join(parts))

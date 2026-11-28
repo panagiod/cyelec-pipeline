@@ -16,6 +16,7 @@ from cyelec.models.electrical import (
     PhaseAssignment,
 )
 from cyelec.render.i18n import format_branding_line, t
+from cyelec.render.text_fit import fit_text_lines, wrap_text_chars
 
 
 def _meter_tail_spec(result: ElectricalDesignResult) -> str:
@@ -51,22 +52,6 @@ def _esc(val: object) -> str:
     return html.escape(str(val), quote=True)
 
 
-def _truncate(text: str, max_len: int) -> str:
-    return text if len(text) <= max_len else f"{text[: max_len - 1]}…"
-
-
-def _split_sld_label(description: str, max_line: int = 16) -> tuple[str, str]:
-    """Split verbose circuit descriptions into two readable SLD lines preserving room identity."""
-    if " - " in description:
-        left, right = description.split(" - ", 1)
-        return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
-    if "(" in description and description.endswith(")"):
-        left, right = description.rsplit("(", 1)
-        right = right.rstrip(")")
-        return _truncate(left.strip(), max_line), _truncate(right.strip(), max_line)
-    return _truncate(description, max_line), ""
-
-
 def render_sld_svg(result: ElectricalDesignResult) -> str:
     """Render deterministic IEC 60617 / BS 7671 A3-landscape vector SVG Single-Line Diagram."""
     eac = result.eac_compliance
@@ -95,12 +80,54 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     bus_y = 330
     cx_incomer = width // 2
 
+    # Loss-free header: full project title + subtitle, font-fitted then wrapped (never cut)
+    hdr_w = float(width - 68)
+    title_txt = f"{t('sld_title', lang)} — {result.building.project_name}"
+    title_lines, title_fs = fit_text_lines(
+        title_txt, hdr_w, 16.0, max_lines=1, min_font_px=11.0, bold=True
+    )
+    sub_txt = (
+        f"Standard: {eac.eac_profile.value} | "
+        f"Supply: {eac.recommended_supply_tier} | "
+        f"Earthing: {result.earthing_system.value} "
+        f"(Ze/Ra={result.ze_or_ra_ohm:.1f} Ω) | "
+        f"DB: {result.building.db_anchor.id}"
+        f"{' | ' + branding_line if branding_line else ''}"
+    )
+    sub_lines, sub_fs = fit_text_lines(sub_txt, hdr_w, 11.0, max_lines=1, min_font_px=9.0)
+    title_lh = round(title_fs * 1.25, 1)
+    sub_lh = round(sub_fs * 1.35, 1)
+    hdr_extra = int(math.ceil((len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * sub_lh))
+    hdr_parts: list[str] = []
+    hy = 44.0
+    for ln in title_lines:
+        hdr_parts.append(
+            f'  <text x="34" y="{hy:.1f}" class="title" style="font-size:{title_fs}px;">'
+            f"{_esc(ln)}</text>"
+        )
+        hy += title_lh
+    hy = 44.0 + (len(title_lines) - 1) * title_lh + 18.0
+    for ln in sub_lines:
+        hdr_parts.append(
+            f'  <text x="34" y="{hy:.1f}" class="sub" style="font-size:{sub_fs}px;">'
+            f"{_esc(ln)}</text>"
+        )
+        hy += sub_lh
+
+    # Full circuit descriptions wrapped inside the 96 px load boxes (no ellipsis)
+    desc_wrap: list[tuple[list[str], float]] = [
+        fit_text_lines(c.spec.description, 88.0, 8.2, max_lines=3, min_font_px=7.2)
+        for c in circuits
+    ]
+    max_desc_lines = max((len(dl) for dl, _ in desc_wrap), default=1)
+    desc_lh = 10.4
+    load_box_h = int(math.ceil(14 + max_desc_lines * desc_lh + 3 + 8 + 16 + 8))
+    load_bottom = 660 + sub_offset_y - 16 + load_box_h
+    height = max(height, load_bottom + 30 + 185)
+
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        (
-            '<svg xmlns="http://www.w3.org/2000/svg" class="cy-e201" '
-            f'viewBox="0 0 {width} {height}" width="{width}" height="{height}">'
-        ),
+        "__SVG_OPEN__",
         "  <style>",
         (
             '    .cy-e201 text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; '
@@ -116,25 +143,11 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         "    .cy-e201 .pass { fill: #155724; font-weight: 700; font-size: 9px; }",
         "    .cy-e201 .fail { fill: #721c24; font-weight: 700; font-size: 9px; }",
         "  </style>",
-        f'  <rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff" />',
-        (
-            f'  <rect x="16" y="16" width="{width - 32}" height="{height - 32}" '
-            'fill="none" stroke="#1b365d" stroke-width="2.2" />'
-        ),
-        (
-            f'  <text x="34" y="44" class="title">'
-            f"{_esc(t('sld_title', lang))} — {_esc(result.building.project_name)}</text>"
-        ),
-        (
-            f'  <text x="34" y="62" class="sub">'
-            f"Standard: {_esc(eac.eac_profile.value)} | "
-            f"Supply: {_esc(eac.recommended_supply_tier)} | "
-            f"Earthing: {_esc(result.earthing_system.value)} "
-            f"(Ze/Ra={result.ze_or_ra_ohm:.1f} Ω) | "
-            f"DB: {_esc(result.building.db_anchor.id)}"
-            f"{' | ' + _esc(branding_line) if branding_line else ''}</text>"
-        ),
+        "__SHEET_FRAME__",
+        *hdr_parts,
     ]
+    if hdr_extra > 0:
+        parts.append(f'  <g transform="translate(0,{hdr_extra})">')
 
     # ------------------------------------------------------------------
     # 1. EAC Supply Incomer -> Meter -> Tails -> Isolator -> [100mA Type-S] -> Busbar
@@ -252,7 +265,9 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
 
     # Surge Protection Device (HMY 58.18-1 parameters: Type, Iimp, In, Up, Uc) off incomer
     spd_x = cx_incomer - 245
-    spd_y = iso_y + 62
+    # Tap between isolator (bottom iso_y+20) & Type-S RCD (top rcd_s_y-19) so the dashed
+    # SPD connection never strikes through the RCD label text.
+    spd_y = iso_y + 36
     spd_title = "SPD TYPE 1+2 (12.5kA)" if lps_req else "SPD TYPE 2 (40kA)"
     spd_sub1 = "Iimp 10/350µs · Up≤1.5kV · Uc=275V" if lps_req else "In 20kA · Up≤1.5kV · Uc=275V"
     spd_sub2 = "IEC 62305-2 + HMY 58.18-1" if lps_req else "BS 7671 Reg 443.4 + HMY 58.18-1"
@@ -565,7 +580,9 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         status_cls = "pass" if circ.overall_pass else "fail"
         status_txt = "PASS" if circ.overall_pass else "FAIL"
         badge_bg = "#d4edda" if circ.overall_pass else "#f8d7da"
-        desc_l1, desc_l2 = _split_sld_label(s.description, 17)
+        desc_lines, desc_fs = desc_wrap[idx]
+        kw_y = load_y - 2 + max_desc_lines * desc_lh + 1
+        badge_y = kw_y + 8
 
         parts.extend(
             [
@@ -641,29 +658,26 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                     f'  <text x="{cx}" y="{cable_y + 34}" text-anchor="middle" class="xs">'
                     f"ΔV={circ.voltage_drop_pct:.2f}% (≤{s.vd_limit_pct:.0f}%)</text>"
                 ),
-                # Load terminal block + PASS/FAIL badge
+                # Load terminal block + PASS/FAIL badge (full wrapped description, no ellipsis)
                 (
-                    f'  <rect x="{cx - 48}" y="{load_y - 16}" width="96" height="72" '
+                    f'  <rect x="{cx - 48}" y="{load_y - 16}" width="96" height="{load_box_h}" '
                     'rx="4" fill="#edf2f7" stroke="#4a5568" stroke-width="1.2" />'
                 ),
-                (
-                    f'  <text x="{cx}" y="{load_y - 2}" text-anchor="middle" class="xs">'
-                    f"{_esc(desc_l1)}</text>"
+                *(
+                    f'  <text x="{cx}" y="{load_y - 2 + li * desc_lh:.1f}" text-anchor="middle" '
+                    f'class="xs" style="font-size:{desc_fs}px;">{_esc(dl)}</text>'
+                    for li, dl in enumerate(desc_lines)
                 ),
                 (
-                    f'  <text x="{cx}" y="{load_y + 10}" text-anchor="middle" class="xs">'
-                    f"{_esc(desc_l2 or f'{s.diversified_load_w / 1000.0:.2f} kW (div)')}</text>"
-                ),
-                (
-                    f'  <text x="{cx}" y="{load_y + 23}" text-anchor="middle" class="xs">'
+                    f'  <text x="{cx}" y="{kw_y:.1f}" text-anchor="middle" class="xs">'
                     f"{s.diversified_load_w / 1000.0:.2f} kW (div)</text>"
                 ),
                 (
-                    f'  <rect x="{cx - 24}" y="{load_y + 31}" width="48" height="16" '
+                    f'  <rect x="{cx - 24}" y="{badge_y:.1f}" width="48" height="16" '
                     f'rx="3" fill="{badge_bg}" />'
                 ),
                 (
-                    f'  <text x="{cx}" y="{load_y + 42}" text-anchor="middle" '
+                    f'  <text x="{cx}" y="{badge_y + 11:.1f}" text-anchor="middle" '
                     f'class="{status_cls}">{status_txt}</text>'
                 ),
             ]
@@ -672,8 +686,6 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     # ------------------------------------------------------------------
     # 4. EAC / ETEK Statutory Plan-Approval Title Block (bottom strip)
     # ------------------------------------------------------------------
-    tb_y = height - 185
-    tb_h = 152
     tb_w = width - 64
     sign_w = 472
     sign_x = width - sign_w
@@ -698,6 +710,66 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         if (result.branding and result.branding.etek_reg_no)
         else "__________________"
     )
+    # Loss-free stacked title-block rows: every row is font-fitted then word-wrapped to its
+    # pane width, and the block (and sheet) grow instead of clipping any statutory text.
+    left_w = float(sign_x - 48 - 16)
+    right_w = float(sign_w - 32)
+    left_rows: list[tuple[str, str, float, float, bool]] = [
+        ("CYPRUS EAC PLAN-APPROVAL SINGLE-LINE DIAGRAM — DESIGN SUMMARY", "hdr", 11.5, 24.0, True),
+        (
+            f"Project: {result.building.project_name} | "
+            f"Type: {result.building.building_type.value} | "
+            f"Area: {result.building.total_floor_area_m2:.2f} m²",
+            "sm", 9.0, 22.0, False,
+        ),
+        (
+            f"EAC Supply Tier: {eac.recommended_supply_tier} | "
+            f"Connected: {eac.total_connected_kva:.2f} kVA | "
+            f"Diversified: {eac.total_diversified_kva:.2f} kVA | "
+            f"PV: {result.building.pv_capacity_kva:.2f} kVA",
+            "sm", 9.0, 20.0, False,
+        ),
+        (f"Load Balance: {imb_txt}", "sm", 9.0, 20.0, False),
+        (
+            f"Provenance: cyelec-pipeline v{prov.pipeline_version} | "
+            f"SHA-256: {prov.input_sha256[:16]} | "
+            f"UTC: {prov.timestamp_utc} | Status: {blocker_txt}",
+            "xs", 8.2, 22.0, False,
+        ),
+        (f"Standards: {std_summary}", "xs", 8.2, 20.0, False),
+    ]
+    right_rows: list[tuple[str, str, float, float, bool]] = [
+        (t("etek_signoff", lang).upper(), "hdr", 11.5, 24.0, True),
+        (f"Licensed Engineer: {eng_val}", "sm", 9.0, 28.0, False),
+        (f"ETEK Reg. No.: {etek_val}  Date: ____________", "sm", 9.0, 28.0, False),
+        ("Signature & Official Stamp:", "sm", 9.0, 34.0, False),
+    ]
+
+    def _stack(
+        rows: list[tuple[str, str, float, float, bool]], pane_w: float, x: float
+    ) -> tuple[list[tuple[float, str]], float]:
+        """Return [(y_offset, svg_text_attrs_and_body)] relative to tb_y + used height."""
+        out: list[tuple[float, str]] = []
+        y = 0.0
+        for txt, cls, fs0, gap, bold in rows:
+            lines, fs = fit_text_lines(
+                txt, pane_w, fs0, max_lines=1, min_font_px=max(7.0, fs0 - 2.0), bold=bold
+            )
+            y += gap
+            lh = round(fs * 1.3, 1)
+            for li, ln in enumerate(lines):
+                yy = y + li * lh
+                out.append(
+                    (yy, f'x="{x:.0f}" class="{cls}" style="font-size:{fs}px;">{_esc(ln)}</text>')
+                )
+            y += (len(lines) - 1) * lh
+        return out, y
+
+    left_items, left_used = _stack(left_rows, left_w, 48.0)
+    right_items, right_used = _stack(right_rows, right_w, float(sign_x + 16))
+    tb_h = int(math.ceil(max(152.0, left_used + 24.0, right_used + 24.0)))
+    height = max(height, load_bottom + 30 + tb_h + 33)
+    tb_y = height - 33 - tb_h
     parts.extend(
         [
             (
@@ -708,56 +780,22 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 f'  <line x1="{sign_x}" y1="{tb_y}" x2="{sign_x}" '
                 f'y2="{tb_y + tb_h}" stroke="#1b365d" stroke-width="1.4" />'
             ),
-            (
-                f'  <text x="48" y="{tb_y + 24}" class="hdr">'
-                "CYPRUS EAC PLAN-APPROVAL SINGLE-LINE DIAGRAM — DESIGN SUMMARY</text>"
-            ),
-            (
-                f'  <text x="48" y="{tb_y + 46}" class="sm">'
-                f"Project: {_esc(result.building.project_name)} | "
-                f"Type: {_esc(result.building.building_type.value)} | "
-                f"Area: {result.building.total_floor_area_m2:.2f} m²</text>"
-            ),
-            (
-                f'  <text x="48" y="{tb_y + 66}" class="sm">'
-                f"EAC Supply Tier: {_esc(eac.recommended_supply_tier)} | "
-                f"Connected: {eac.total_connected_kva:.2f} kVA | "
-                f"Diversified: {eac.total_diversified_kva:.2f} kVA | "
-                f"PV: {result.building.pv_capacity_kva:.2f} kVA</text>"
-            ),
-            (
-                f'  <text x="48" y="{tb_y + 86}" class="sm">'
-                f"Load Balance: {_esc(imb_txt)}</text>"
-            ),
-            (
-                f'  <text x="48" y="{tb_y + 108}" class="xs">'
-                f"Provenance: cyelec-pipeline v{_esc(prov.pipeline_version)} | "
-                f"SHA-256: {_esc(prov.input_sha256[:16])} | "
-                f"UTC: {_esc(prov.timestamp_utc)} | Status: {blocker_txt}</text>"
-            ),
-            (
-                f'  <text x="48" y="{tb_y + 128}" class="xs">'
-                f"Standards: {_esc(std_summary)}</text>"
-            ),
-            # Right pane: Statutory ETEK Stamp & Sign-Off Box (widened to prevent right-edge clip)
-            (
-                f'  <text x="{sign_x + 16}" y="{tb_y + 24}" class="hdr">'
-                f"{_esc(t('etek_signoff', lang).upper())}</text>"
-            ),
-            (
-                f'  <text x="{sign_x + 16}" y="{tb_y + 52}" class="sm">'
-                f"Licensed Engineer: {_esc(eng_val)}</text>"
-            ),
-            (
-                f'  <text x="{sign_x + 16}" y="{tb_y + 80}" class="sm">'
-                f"ETEK Reg. No.: {_esc(etek_val)}  Date: ____________</text>"
-            ),
-            (
-                f'  <text x="{sign_x + 16}" y="{tb_y + 114}" class="sm">'
-                "Signature &amp; Official Stamp:</text>"
-            ),
-            "</svg>",
         ]
+    )
+    for yy, frag in (*left_items, *right_items):
+        parts.append(f'  <text y="{tb_y + yy:.1f}" {frag}')
+    if hdr_extra > 0:
+        parts.append("  </g>")
+    parts.append("</svg>")
+    svg_h = height + hdr_extra
+    parts[1] = (
+        '<svg xmlns="http://www.w3.org/2000/svg" class="cy-e201" '
+        f'viewBox="0 0 {width} {svg_h}" width="{width}" height="{svg_h}">'
+    )
+    parts[parts.index("__SHEET_FRAME__")] = (
+        f'  <rect x="0" y="0" width="{width}" height="{svg_h}" fill="#ffffff" />\n'
+        f'  <rect x="16" y="16" width="{width - 32}" height="{svg_h - 32}" '
+        'fill="none" stroke="#1b365d" stroke-width="2.2" />'
     )
     return "\n".join(parts)
 
@@ -1085,10 +1123,12 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
             f"Ib={s.design_current_ib_a:.1f}A dV={circ.voltage_drop_pct:.1f}%",
             dxfattribs={"layer": "E-SLD-TEXT", "height": 165.0},
         ).set_placement((cx - 820.0, 7_900.0))
-        msp.add_text(
-            _truncate(s.description, 16),
-            dxfattribs={"layer": "E-SLD-TEXT", "height": 165.0},
-        ).set_placement((cx - 820.0, 5_500.0))
+        # Full circuit description, word-wrapped onto stacked TEXT lines (never truncated)
+        for li, d_ln in enumerate(wrap_text_chars(s.description, 16)):
+            msp.add_text(
+                d_ln,
+                dxfattribs={"layer": "E-SLD-TEXT", "height": 165.0},
+            ).set_placement((cx - 820.0, 5_500.0 - li * 250.0))
 
     _add_sld_paper_space_sheet(doc, result, sheet_w=sheet_w, sheet_h=sheet_h)
     return doc
@@ -1124,29 +1164,36 @@ def _add_sld_paper_space_sheet(
         dxfattribs={"layer": "E-SLD-TITLE"},
     )
 
-    tb_h = 26.0
-    psp.add_line((ix0, iy0 + tb_h), (ix1, iy0 + tb_h), dxfattribs={"layer": "E-SLD-TITLE"})
     eac = result.eac_compliance
     br = result.branding
     firm = br.firm_name if br and br.firm_name else "ETEK LICENSED PRACTICE"
     eng = br.engineer_name if br and br.engineer_name else "ETEK REVIEW PENDING"
     reg = br.etek_reg_no if br and br.etek_reg_no else "ETEK-E"
-    psp.add_text(
-        f"SINGLE-LINE DIAGRAM ({tab_name}) — {result.building.project_name[:38]}",
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 3.4},
-    ).set_placement((ix0 + 5.0, iy0 + 18.0))
-    psp.add_text(
+    # Full-length title-block rows word-wrapped to the paper width; strip grows to fit.
+    avail_mm = (ix1 - ix0) - 10.0
+    tb_rows: list[tuple[str, float]] = [
+        (f"SINGLE-LINE DIAGRAM ({tab_name}) — {result.building.project_name}", 3.4),
         (
             f"SUPPLY: {eac.recommended_supply_tier} | "
             f"EARTH: {result.earthing_system.value} ({result.ze_or_ra_ohm:.1f} OHM) | "
-            f"FIRM: {firm[:22]} | ENG: {eng[:16]} ({reg[:20]}) | DWG E-201"
+            f"FIRM: {firm} | ENG: {eng} ({reg}) | DWG E-201",
+            2.4,
         ),
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 2.4},
-    ).set_placement((ix0 + 5.0, iy0 + 9.0))
-    psp.add_text(
-        f"ETEK SIGN-OFF REQUIRED | SHA256: {result.provenance.input_sha256[:20]}",
-        dxfattribs={"layer": "E-SLD-TEXT", "height": 2.1},
-    ).set_placement((ix0 + 5.0, iy0 + 3.0))
+        (f"ETEK SIGN-OFF REQUIRED | SHA256: {result.provenance.input_sha256[:20]}", 2.1),
+    ]
+    tb_lines: list[tuple[str, float]] = [
+        (ln, h)
+        for txt, h in tb_rows
+        for ln in wrap_text_chars(txt, max(20, int(avail_mm / (h * 0.62))))
+    ]
+    tb_h = max(26.0, 4.0 + sum(h * 1.75 for _, h in tb_lines) + 2.0)
+    psp.add_line((ix0, iy0 + tb_h), (ix1, iy0 + tb_h), dxfattribs={"layer": "E-SLD-TITLE"})
+    ty_mm = iy0 + tb_h - 2.0
+    for ln, h in tb_lines:
+        ty_mm -= h * 1.75  # top-down baselines with 0.75*h leading
+        psp.add_text(ln, dxfattribs={"layer": "E-SLD-TEXT", "height": h}).set_placement(
+            (ix0 + 5.0, ty_mm)
+        )
 
     vp_w = (ix1 - ix0) - 8.0
     vp_h = (iy1 - (iy0 + tb_h)) - 8.0

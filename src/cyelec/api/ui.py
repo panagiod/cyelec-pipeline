@@ -179,7 +179,7 @@ def render_etek_workbench_html(
     }}
     .lang-switch a:hover:not(.active) {{ background: rgba(255, 255, 255, 0.16); }}
     header h1 {{ margin: 0; font-size: 16px; letter-spacing: 0.2px; }}
-    header .meta {{ font-size: 11px; opacity: 0.85; white-space: nowrap; }}
+    header .meta {{ font-size: 11px; opacity: 0.85; white-space: normal; overflow-wrap: anywhere; }}
     .layout {{
       display: grid;
       grid-template-columns: 332px minmax(0, 1fr);
@@ -229,6 +229,9 @@ def render_etek_workbench_html(
       gap: 8px;
     }}
     .row2 > div {{ min-width: 0; }}
+    /* rows holding long-option selects / long placeholders stack full-width (no clipping) */
+    .row2.stack {{ grid-template-columns: minmax(0, 1fr); gap: 4px; }}
+    select.fit-auto {{ width: auto; min-width: 140px; max-width: 100%; }}
     .sidebar-actions {{
       position: sticky;
       bottom: 0;
@@ -254,9 +257,9 @@ def render_etek_workbench_html(
       color: #1e3a8a;
     }}
     .file-pill span {{
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      min-width: 0;
       font-weight: 600;
     }}
     .btn {{
@@ -449,7 +452,7 @@ def render_etek_workbench_html(
       margin: 4px 0;
       font-size: 11px;
     }}
-    .layer-row span {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .layer-row span {{ white-space: normal; overflow-wrap: anywhere; min-width: 0; }}
     .auth-backdrop, .fs-backdrop {{
       position: fixed;
       inset: 0;
@@ -543,11 +546,11 @@ def render_etek_workbench_html(
       .layout {{ grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 10px; }}
       .kpi-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .tabs {{
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
+        flex-wrap: wrap;
+        row-gap: 2px;
         padding-bottom: 2px;
       }}
+      .tab {{ white-space: normal; text-align: left; }}
       .sidebar-actions {{
         position: static;
         margin: 12px 0 0 0;
@@ -780,7 +783,7 @@ def render_etek_workbench_html(
           <option value="heat_pump_ufh">Air-to-Water Heat Pump (3P) + UFH Manifolds</option>
           <option value="vrv">VRV / VRF Central (3P) + Indoor FCUs</option>
         </select>
-        <div class="row2">
+        <div class="row2 stack">
           <div>
             <label for="briefEvKw">EV Wallbox (Sec. 722)</label>
             <select id="briefEvKw">
@@ -809,7 +812,7 @@ def render_etek_workbench_html(
             <input id="briefPvWp" type="number" step="5" min="300" max="750" value="550" />
           </div>
         </div>
-        <div class="row2">
+        <div class="row2 stack">
           <div>
             <label for="briefEarthing">Site Earthing</label>
             <select id="briefEarthing">
@@ -1076,7 +1079,7 @@ def render_etek_workbench_html(
             <button id="btnSheetElv" class="btn btn-secondary btn-sm"
               onclick="selectDrawingSheet('elv')">E-103 ELV &amp; Security</button>
             <span style="margin-left:4px;">|</span>
-            <select id="anchorTargetSel" style="width:176px;" title="Select key anchor to relocate"
+            <select id="anchorTargetSel" class="fit-auto" title="Select key anchor to relocate"
               onchange="updateAnchorBtnLabel()">
               <option value="db">Anchor: DB1 / MDB</option>
               <option value="meter">Anchor: EAC Meter</option>
@@ -1298,7 +1301,8 @@ def render_etek_workbench_html(
             <button class="btn btn-primary btn-sm" onclick="createAndSaveRevision()">
               Save as New Revision
             </button>
-            <select id="projectSel" style="width:220px;" onchange="loadRevisions()"></select>
+            <select id="projectSel" class="fit-auto" style="min-width:220px;"
+              onchange="loadRevisions()"></select>
             <button class="btn btn-secondary btn-sm" onclick="diffLatestRevisions()">
               Diff Latest 2 Revisions
             </button>
@@ -1380,7 +1384,7 @@ def render_etek_workbench_html(
               <input id="memEmail" type="email" placeholder="Member Email"
                 style="margin-bottom:4px;" />
               <input id="memName" placeholder="Full Name" style="margin-bottom:4px;" />
-              <div class="row2" style="margin-bottom:6px;">
+              <div class="row2 stack" style="margin-bottom:6px;">
                 <input id="memPass" type="password" placeholder="Temp Password (8+)" />
                 <select id="memRole">
                   <option value="engineer">Engineer</option>

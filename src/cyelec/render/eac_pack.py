@@ -91,7 +91,7 @@ def render_eac_submission_pack_html(
             f"<td><code>{esc(key)}</code></td>"
             f"<td><strong>{esc(path.name)}</strong></td>"
             f"<td class='r'>{path.stat().st_size:,} B</td>"
-            f"<td><code>{esc(sha[:24])}…</code></td>"
+            f"<td><code class='sha'>{esc(sha)}</code></td>"
             "</tr>"
         )
 
@@ -220,6 +220,7 @@ def render_eac_submission_pack_html(
     }}
     .sig-line {{ border-top: 1px solid #4a5568; padding-top: 4px; font-size: 8pt; color: #4a5568; }}
     code {{ font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }}
+    code.sha {{ font-size: 6.5pt; word-break: break-all; overflow-wrap: anywhere; }}
   </style>
 </head>
 <body>

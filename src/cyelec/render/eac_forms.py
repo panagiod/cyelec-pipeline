@@ -569,7 +569,7 @@ def render_eac_application_form_html(result: Phase2DesignResult) -> str:
             "<tr>"
             f"<td>{esc(c.spec.board_id)}</td>"
             f"<td><strong>{esc(c.spec.circuit_id)}</strong>/{esc(c.phase.value)}</td>"
-            f"<td>{esc(c.spec.description[:34])}</td>"
+            f"<td>{esc(c.spec.description)}</td>"
             f"<td style='text-align:center'><strong>{wcode}</strong></td>"
             f"<td style='text-align:center'>{pts_n}</td>"
             f"<td>{c.cable_mm2:g}/{c.cpc_mm2:g}</td>"

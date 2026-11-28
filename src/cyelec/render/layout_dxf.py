@@ -20,6 +20,7 @@ from ezdxf.lldxf.const import DXFError
 from cyelec.models.building import Room
 from cyelec.models.electrical import CircuitCategory
 from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
+from cyelec.render.text_fit import dxf_char_budget, wrap_text_chars
 from cyelec.synth.sample_plan import render_building_to_dxf
 
 LayoutDiscipline = Literal["combined", "lighting", "power", "elv"]
@@ -1425,7 +1426,6 @@ def _add_iso_paper_space_sheet(
 
     # Bottom-Right Cyprus EAC / ETEK Title Block inside right strip
     tb_top = inner_y0 + (98.0 if size_tag == "A3" else 132.0)
-    psp.add_line((strip_x0, tb_top), (inner_x1, tb_top), dxfattribs={"layer": "E-TITLE"})
 
     eac = result.design.eac_compliance
     br = result.design.branding
@@ -1447,27 +1447,51 @@ def _add_iso_paper_space_sheet(
         f"EARTH: {result.design.earthing_system.value} ({result.design.ze_or_ra_ohm:.1f} OHM)"
     )
     plot_txt = (
-        f"PLOT: {meta.district[:10]} {meta.sheet_plan}/{meta.plot_no}".strip()
+        f"PLOT: {meta.district} {meta.sheet_plan}/{meta.plot_no}".strip()
         if meta and (meta.district or meta.plot_no)
         else "STD H+: SW=1.2m SK=0.45m KT=1.15m"
     )
-    tb_rows = [
-        (tb_top - 9.0, f"{disc_title}{floor_lbl}", 2.7),
-        (tb_top - 18.0, f"{sheet_label} | SCALE 1:{scale_denom} (METRIC)", 2.2),
-        (tb_top - 28.0, f"PROJ: {result.design.building.project_name[:34]}", 2.0),
-        (tb_top - 38.0, f"SUPPLY: {eac.recommended_supply_tier[:30]}", 2.0),
-        (tb_top - 48.0, earth_txt, 2.0),
-        (tb_top - 58.0, plot_txt[:36], 1.9),
-        (tb_top - 68.0, f"FIRM: {firm[:36]}", 2.0),
-        (tb_top - 78.0, f"ENG: {eng[:34]}", 2.0),
-        (tb_top - 87.0, f"REG: {reg[:28]} | {dwg_no}", 2.0),
-        (tb_top - 95.0, f"SHA: {result.design.provenance.input_sha256[:16]} | SIGN-OFF", 1.8),
+    # (text, nominal height, gap-after) - every field is printed in FULL (wrapped). The
+    # block keeps its classic 10 mm row rhythm when everything fits on one line each and
+    # otherwise tightens / steps the text down, finally growing upward (arrow & scale bar
+    # follow tb_top) - nothing is ever truncated.
+    tb_fields: list[tuple[str, float, float]] = [
+        (f"{disc_title}{floor_lbl}", 2.7, 9.0),
+        (f"{sheet_label} | SCALE 1:{scale_denom} (METRIC)", 2.2, 10.0),
+        (f"PROJ: {result.design.building.project_name}", 2.0, 10.0),
+        (f"SUPPLY: {eac.recommended_supply_tier}", 2.0, 10.0),
+        (earth_txt, 2.0, 10.0),
+        (plot_txt, 1.9, 10.0),
+        (f"FIRM: {firm}", 2.0, 10.0),
+        (f"ENG: {eng}", 2.0, 9.0),
+        (f"REG: {reg} | {dwg_no}", 2.0, 8.0),
+        (f"SHA: {result.design.provenance.input_sha256[:16]} | SIGN-OFF", 1.8, 0.0),
     ]
-    for ty, txt, h in tb_rows:
-        if ty > inner_y0 + 1.5:
-            psp.add_text(txt, dxfattribs={"layer": "E-TITLE", "height": h}).set_placement(
+    tb_text_w = strip_w - 7.0
+    tb_avail = tb_top - inner_y0 - 3.0
+    scale_k = 1.0
+    while True:
+        tb_lines = [
+            (wrap_text_chars(txt, dxf_char_budget(tb_text_w, h * scale_k)), h * scale_k, gap)
+            for txt, h, gap in tb_fields
+        ]
+        extra = sum((len(ls) - 1) * h * 1.45 for ls, h, _g in tb_lines)
+        need = 9.0 + sum(g for _l, _h, g in tb_lines) + extra
+        if need <= tb_avail or scale_k <= 0.75:
+            break
+        scale_k = round(scale_k - 0.05, 2)
+    if need > tb_avail:
+        tb_top += need - tb_avail
+    psp.add_line((strip_x0, tb_top), (inner_x1, tb_top), dxfattribs={"layer": "E-TITLE"})
+    ty = tb_top - 9.0
+    for ls, h, gap in tb_lines:
+        for k, seg in enumerate(ls):
+            if k:
+                ty -= h * 1.45
+            psp.add_text(seg, dxfattribs={"layer": "E-TITLE", "height": h}).set_placement(
                 (strip_x0 + 3.5, ty)
             )
+        ty -= gap
 
     # North Arrow inside right strip above title block
     nx, ny = strip_x0 + strip_w * 0.5, tb_top + 16.0

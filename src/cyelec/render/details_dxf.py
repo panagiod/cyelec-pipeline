@@ -10,6 +10,12 @@ from ezdxf.filemanagement import new as new_dxf
 
 from cyelec.models.electrical import ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
+from cyelec.render.text_fit import (
+    dxf_char_budget,
+    text_width_px,
+    wrap_text_chars,
+    wrap_text_to_width,
+)
 
 GENERAL_NOTES_CYPRUS: list[str] = [
     "1. ALL WORKS SHALL STRICTLY COMPLY WITH BS 7671 (18TH ED. A2), CYS HD 384 & EAC (AHK) RULES.",
@@ -113,12 +119,26 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
             "4. PROTECTION: INDIVIDUAL 30MA TYPE A RCBO PER FINAL CIRCUIT; "
             "TYPE 1+2 SPD (12.5KA 10/350US) AT ORIGIN."
         )
+    # Every note is printed in full: wrapped to the 188 mm column, the font stepped down
+    # (2.1 -> 1.6 mm) only as far as needed for all notes to fit above the heights table.
+    note_h = 2.1
+    while True:
+        budget = dxf_char_budget(188.0, note_h)
+        wrapped_notes = [wrap_text_chars(n, budget) for n in notes_dxf]
+        n_lines = sum(len(w) for w in wrapped_notes)
+        pitch = note_h * 1.45
+        need = n_lines * pitch + len(wrapped_notes) * (7.2 - 2.1 * 1.45)
+        if need <= (h_tot - 29.0) - (166.0 + 12.0) or note_h <= 1.6:
+            break
+        note_h = round(note_h - 0.1, 2)
     y_cursor = h_tot - 29.0
-    for note in notes_dxf:
-        msp.add_text(note[:92], dxfattribs={"layer": "E-TITLE", "height": 2.1}).set_placement(
-            (8.0, y_cursor)
-        )
-        y_cursor -= 7.2
+    for wn in wrapped_notes:
+        for k, seg in enumerate(wn):
+            msp.add_text(
+                seg if k == 0 else f"   {seg}", dxfattribs={"layer": "E-TITLE", "height": note_h}
+            ).set_placement((8.0, y_cursor))
+            y_cursor -= pitch
+        y_cursor -= 7.2 - 2.1 * 1.45
 
     # Mounting Heights Table (y=12..166)
     mh_top = 166.0
@@ -140,16 +160,20 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
     msp.add_line((8.0, y_row - 2.0), (194.0, y_row - 2.0), dxfattribs={"layer": "E-TITLE"})
     y_row -= 7.0
     for item, height_s, req_s in MOUNTING_HEIGHTS_CYPRUS:
-        msp.add_text(item[:40], dxfattribs={"layer": "E-TITLE", "height": 2.0}).set_placement(
-            (8.0, y_row)
-        )
+        item_l = wrap_text_chars(item, dxf_char_budget(92.0, 2.0))
+        req_l = wrap_text_chars(req_s, dxf_char_budget(50.0, 1.9))
+        for k, seg in enumerate(item_l):
+            msp.add_text(seg, dxfattribs={"layer": "E-TITLE", "height": 2.0}).set_placement(
+                (8.0, y_row - k * 2.8)
+            )
         msp.add_text(height_s, dxfattribs={"layer": "E-NOTES", "height": 2.0}).set_placement(
             (104.0, y_row)
         )
-        msp.add_text(req_s[:26], dxfattribs={"layer": "E-TITLE", "height": 1.9}).set_placement(
-            (144.0, y_row)
-        )
-        y_row -= 7.6
+        for k, seg in enumerate(req_l):
+            msp.add_text(seg, dxfattribs={"layer": "E-TITLE", "height": 1.9}).set_placement(
+                (144.0, y_row - k * 2.7)
+            )
+        y_row -= 7.6 + (max(len(item_l), len(req_l)) - 1) * 2.8
 
     # Vertical divider between Notes/Table and 3 Vector Details
     msp.add_line((200.0, 0.0), (200.0, h_tot - 14.0), dxfattribs={"layer": "E-TITLE"})
@@ -348,21 +372,13 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
     return doc
 
 
-def _wrap_note_lines(text: str, max_chars: int = 86) -> list[str]:
-    """Word-wrap a note string cleanly to stay within a fixed SVG column width."""
-    words = text.split()
-    lines: list[str] = []
-    cur = ""
-    for w in words:
-        cand = f"{cur} {w}".strip()
-        if len(cand) <= max_chars or not cur:
-            cur = cand
-        else:
-            lines.append(cur)
-            cur = f"   {w}"
-    if cur:
-        lines.append(cur)
-    return lines
+def _wrap_note_lines(text: str, max_w: float, font_px: float) -> list[str]:
+    """Word-wrap a note to `max_w` px (real glyph metrics); continuation lines indented."""
+    first = wrap_text_to_width(text, max_w, font_px)
+    if len(first) == 1:
+        return first
+    rest = wrap_text_to_width(text[len(first[0]) :].strip(), max_w - 18.0, font_px)
+    return [first[0], *(f"   {ln}" for ln in rest)]
 
 
 def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult) -> str:
@@ -371,15 +387,13 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     eac = design.eac_compliance
     br = design.branding
     meta = design.eac_metadata
-    firm = escape(br.firm_name if br and br.firm_name else "ETEK Licensed Electrical Practice")
-    eng = escape(br.engineer_name if br and br.engineer_name else "ETEK Review Pending")
-    reg = escape(br.etek_reg_no if br and br.etek_reg_no else "ETEK-E")
-    proj = escape(design.building.project_name[:38])
-    tier_s = escape(eac.recommended_supply_tier)
+    firm = br.firm_name if br and br.firm_name else "ETEK Licensed Electrical Practice"
+    eng = br.engineer_name if br and br.engineer_name else "ETEK Review Pending"
+    reg = br.etek_reg_no if br and br.etek_reg_no else "ETEK-E"
     excl_m = eac.bathroom_socket_exclusion_m
     main_a = eac.recommended_main_breaker_a
     tail_mm2 = 16 if main_a <= 63 else 25
-    plot_str = escape(
+    plot_str = (
         f"{meta.district} | Sheet/Plan: {meta.sheet_plan} | Plot: {meta.plot_no}"
         if meta and (meta.district or meta.plot_no)
         else "Verify Cadastral Plot & Site Boundary"
@@ -400,7 +414,7 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     note_els: list[str] = []
     ny = 109
     for note in notes_list:
-        for line in _wrap_note_lines(note, max_chars=82):
+        for line in _wrap_note_lines(note, 598.0, 9.8):
             note_els.append(f'  <text x="34" y="{ny}" class="note">{escape(line)}</text>')
             ny += 14
         ny += 4
@@ -409,19 +423,99 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     tbl_title_y = max(ny + 18, 434)
     tbl_hdr_y = tbl_title_y + 8
     mh_rows: list[str] = []
+    ry_top = tbl_hdr_y + 23
     for i, (item, h_s, req_s) in enumerate(MOUNTING_HEIGHTS_CYPRUS):
-        ry = tbl_hdr_y + 40 + i * 26
+        item_l = wrap_text_to_width(item, 268.0, 10.0)
+        h_l = wrap_text_to_width(h_s, 122.0, 10.0, bold=True)
+        req_l = wrap_text_to_width(req_s, 186.0, 9.5)
+        n_l = max(len(item_l), len(h_l), len(req_l))
+        row_h = 26 + (n_l - 1) * 12
+        ry = ry_top + 17
         bg = "#f8fafc" if i % 2 == 0 else "#ffffff"
-        mh_rows.append(
-            f'  <rect x="30" y="{ry - 17}" width="606" height="26" fill="{bg}" stroke="#e2e8f0"/>'
-            f'  <text x="38" y="{ry}" class="td">{escape(item)}</text>'
-            f'  <text x="314" y="{ry}" class="td-h">{escape(h_s)}</text>'
-            f'  <text x="444" y="{ry}" class="td-m">{escape(req_s)}</text>'
+        cells = "".join(
+            f'  <text x="{x}" y="{ry + k * 12}" class="{cls}">{escape(ln)}</text>'
+            for x, cls, lines in ((38, "td", item_l), (314, "td-h", h_l), (444, "td-m", req_l))
+            for k, ln in enumerate(lines)
         )
+        mh_rows.append(
+            f'  <rect x="30" y="{ry_top}" width="606" height="{row_h}" fill="{bg}" '
+            f'stroke="#e2e8f0"/>{cells}'
+        )
+        ry_top += row_h
     mh_svg = "\n".join(mh_rows)
 
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" class="cy-e301" viewBox="0 0 1320 900"
-     width="1320" height="900">
+    # Title bar: full project / tier / earthing string, never truncated. It sits right of
+    # the sheet title when it fits on <= 2 lines, otherwise it wraps below it (bar grows).
+    title_txt = "E-301 — CYPRUS EAC (ΑΗΚ) & BS 7671 DETAILS, EARTHING & NOTES"
+    sub_txt = (
+        f"{design.building.project_name} · {eac.recommended_supply_tier} · "
+        f"{design.earthing_system.value}"
+    )
+    side_w = 1286.0 - 34.0 - text_width_px(title_txt, 15.0, bold=True) - 28.0
+    side_lines = wrap_text_to_width(sub_txt, side_w, 10.5)
+    if len(side_lines) <= 2:
+        bar_extra = 0
+        y0 = 47 if len(side_lines) == 1 else 40
+        sub_svg = "\n".join(
+            f'  <text x="1286" y="{y0 + k * 14}" text-anchor="end" class="wsub">'
+            f"{escape(ln)}</text>"
+            for k, ln in enumerate(side_lines)
+        )
+    else:
+        full_lines = wrap_text_to_width(sub_txt, 1252.0, 10.5)
+        bar_extra = len(full_lines) * 14
+        sub_svg = "\n".join(
+            f'  <text x="34" y="{64 + k * 14}" class="wsub">{escape(ln)}</text>'
+            for k, ln in enumerate(full_lines)
+        )
+    bar_h = 48 + bar_extra
+    g_open = f'<g transform="translate(0,{bar_extra})">' if bar_extra else ""
+    g_close = "</g>" if bar_extra else ""
+
+    # Bottom title block: every line wrapped to the strip width; strip grows downward.
+    tb_specs = (
+        ("tb-h", 12.5, True, 23, f"FIRM: {firm} \u00a0|\u00a0 ENGINEER: {eng} ({reg})"),
+        (
+            "tb-s",
+            11.0,
+            False,
+            23,
+            f"CADASTRAL: {plot_str} \u00a0|\u00a0 DRAWING: E-301 (ISO A3 — NOT TO SCALE)",
+        ),
+        (
+            "tb-m",
+            10.0,
+            False,
+            21,
+            f"SHA256: {sha_short} · ETEK STATUTORY REVIEW & STAMP REQUIRED BEFORE EAC SUBMISSION",
+        ),
+    )
+    tb_els: list[str] = []
+    tb_y = 800 + 24
+    for cls, fs, bold, gap, txt in tb_specs:
+        for k, ln in enumerate(wrap_text_to_width(txt, 1252.0, fs, bold=bold)):
+            if k:
+                tb_y += int(fs * 1.4)
+            tb_els.append(f'  <text x="34" y="{tb_y}" class="{cls}">{escape(ln)}</text>')
+        tb_y += gap
+    tb_svg = "\n".join(tb_els)
+    tb_h = max(82, tb_y - gap - 800 + 14)
+    body_h = 800 + tb_h + 18
+    svg_h = body_h + bar_extra
+
+    # Detail-1 labels wrapped clear of the MEC riser (x=795) and the MET bar (x>=958)
+    fgl_l = wrap_text_to_width("Finished Ground Level (FGL)", 108.0, 10.0)
+    fgl_svg = "\n".join(
+        f'  <text x="680" y="{178 - (len(fgl_l) - 1 - k) * 12}" class="dtxt">{escape(ln)}</text>'
+        for k, ln in enumerate(fgl_l)
+    )
+    mec_l = wrap_text_to_width("16 mm² Cu Main Earth (MEC)", 152.0, 10.5, bold=True)
+    mec_svg = "\n".join(
+        f'  <text x="800" y="{135 - (len(mec_l) - 1 - k) * 13}" class="dgrn">{escape(ln)}</text>'
+        for k, ln in enumerate(mec_l)
+    )
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" class="cy-e301" viewBox="0 0 1320 {svg_h}"
+     width="1320" height="{svg_h}">
   <style>
     .cy-e301 text {{ font-family: "DejaVu Sans", Arial, sans-serif; }}
     .cy-e301 .wtitle {{ font-size: 15px; font-weight: 700; fill: #ffffff; }}
@@ -443,15 +537,13 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     .cy-e301 .tb-s {{ font-size: 11px; fill: #334155; }}
     .cy-e301 .tb-m {{ font-size: 10px; fill: #64748b; }}
   </style>
-  <rect x="0" y="0" width="1320" height="900" fill="#ffffff"/>
-  <rect x="18" y="18" width="1284" height="864" fill="none" stroke="#1b365d" stroke-width="2.2"/>
-  <rect x="18" y="18" width="1284" height="48" fill="#1b365d"/>
-  <text x="34" y="48" class="wtitle">
-    E-301 — CYPRUS EAC (ΑΗΚ) &amp; BS 7671 DETAILS, EARTHING &amp; NOTES
-  </text>
-  <text x="1286" y="47" text-anchor="end" class="wsub">
-    {proj} · {tier_s} · {design.earthing_system.value}
-  </text>
+  <rect x="0" y="0" width="1320" height="{svg_h}" fill="#ffffff"/>
+  <rect x="18" y="18" width="1284" height="{svg_h - 36}" fill="none" stroke="#1b365d"
+        stroke-width="2.2"/>
+  <rect x="18" y="18" width="1284" height="{bar_h}" fill="#1b365d"/>
+  <text x="34" y="48" class="wtitle">{escape(title_txt)}</text>
+{sub_svg}
+{g_open}
 
   <!-- Left Column (x=30..636): General Notes + Mounting Heights Table -->
   <text x="34" y="87" class="sec">
@@ -477,14 +569,14 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     DETAIL 1 — TT COPPER EARTH ROD PIT &amp; EQUIPOTENTIAL BONDING (BS 7671 CH. 54)
   </text>
   <line x1="676" y1="184" x2="914" y2="184" stroke="#64748b" stroke-width="2"/>
-  <text x="680" y="178" class="dtxt">Finished Ground Level (FGL)</text>
+{fgl_svg}
   <rect x="768" y="184" width="54" height="42" fill="#e2e8f0" stroke="#334155" stroke-width="1.5"/>
   <line x1="795" y1="198" x2="795" y2="288" stroke="#15803d" stroke-width="4"/>
   <circle cx="795" cy="198" r="5" fill="#15803d"/>
   <text x="812" y="248" class="dgrn">Ø16×1200mm Cu Earth Rod</text>
   <text x="812" y="266" class="dtxt">Concrete Inspection Pit (Ra ≤ {ra_ohm} Ω)</text>
   <polyline points="795,198 795,142 958,142" fill="none" stroke="#15803d" stroke-width="2.6"/>
-  <text x="798" y="135" class="dgrn">16 mm² Cu Main Earth (MEC)</text>
+{mec_svg}
   <rect x="958" y="126" width="70" height="32" fill="#dcfce7" stroke="#15803d" stroke-width="2"/>
   <text x="993" y="147" text-anchor="middle" class="d1-h">MET</text>
   <line x1="1028" y1="136" x2="1076" y2="126" stroke="#15803d" stroke-width="2"/>
@@ -554,16 +646,10 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
   <line x1="672" y1="758" x2="1276" y2="758" stroke="#0f172a" stroke-width="2"/>
 
   <!-- Bottom Titleblock Strip -->
-  <rect x="18" y="800" width="1284" height="82" fill="#f8fafc" stroke="#1b365d" stroke-width="1.8"/>
-  <text x="34" y="824" class="tb-h">
-    FIRM: {firm} &#160;|&#160; ENGINEER: {eng} ({reg})
-  </text>
-  <text x="34" y="847" class="tb-s">
-    CADASTRAL: {plot_str} &#160;|&#160; DRAWING: E-301 (ISO A3 — NOT TO SCALE)
-  </text>
-  <text x="34" y="868" class="tb-m">
-    SHA256: {sha_short} · ETEK STATUTORY REVIEW &amp; STAMP REQUIRED BEFORE EAC SUBMISSION
-  </text>
+  <rect x="18" y="800" width="1284" height="{tb_h}" fill="#f8fafc" stroke="#1b365d"
+        stroke-width="1.8"/>
+{tb_svg}
+{g_close}
 </svg>
 """
 
