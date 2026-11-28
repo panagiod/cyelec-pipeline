@@ -636,6 +636,15 @@ def _finalize_board(
     )
 
 
+def is_spd_type12_required(design: ElectricalDesignResult) -> bool:
+    """Return True when SPD Type 1+2 is mandatory (IEC 62305 LPS or EAC HMY 58.18-1 overhead)."""
+    lps_req = bool(design.lightning_risk is not None and design.lightning_risk.lps_required)
+    is_overhead = bool(
+        design.eac_metadata is not None and design.eac_metadata.supply_connection_type == "overhead"
+    )
+    return lps_req or is_overhead
+
+
 def compute_din_rail_layouts(
     design: ElectricalDesignResult,
 ) -> list[DinRailBoardLayout]:
@@ -647,9 +656,9 @@ def compute_din_rail_layouts(
     min_icu = 10.0 if ipf_origin > 6.0 else 6.0
     is_commercial = design.building.building_type in _COMMERCIAL_BUILDING_TYPES
     main_in = eac.recommended_main_breaker_a
-    lps_req = bool(design.lightning_risk and design.lightning_risk.lps_required)
-    spd_txt = "SPD TYPE 1+2 50kA" if lps_req else "SPD TYPE 2 40kA"
-    spd_lbl = "T1+2 50kA" if lps_req else "T2 40kA"
+    spd_t12 = is_spd_type12_required(design)
+    spd_txt = "SPD TYPE 1+2 50kA" if spd_t12 else "SPD TYPE 2 40kA"
+    spd_lbl = "T1+2 50kA" if spd_t12 else "T2 40kA"
 
     layouts: list[DinRailBoardLayout] = []
     has_sub_boards = len(design.building.sub_boards) > 0
@@ -1580,6 +1589,8 @@ def compute_din_rail_layouts(
 def compute_lightning_risk_iec62305(
     building: BuildingModel,
     brief: ResidentialSystemsBrief,
+    *,
+    is_overhead_supply: bool = False,
 ) -> tuple[LightningRiskAssessment, list[ReviewFlag]]:
     """Compute simplified IEC 62305-2 residential lightning risk (R1 vs RT = 1e-5)."""
     all_pts = [p for r in building.rooms for p in r.polygon_mm]
@@ -1621,11 +1632,12 @@ def compute_lightning_risk_iec62305(
     lps_class = (
         "Class IV External LPS Required" if lps_req else "External LPS Not Required (R1 <= RT)"
     )
-    spd_req = (
-        "Type 1+2 Combined SPD (12.5kA 10/350µs) at MDB + DC SPD for Roof PV"
-        if (lps_req or building.pv_capacity_kva > 0)
-        else "Type 2 SPD (40kA 8/20µs) at MDB (BS 7671 Reg 443.4)"
-    )
+    if lps_req or building.pv_capacity_kva > 0:
+        spd_req = "Type 1+2 Combined SPD (12.5kA 10/350µs) at MDB + DC SPD for Roof PV"
+    elif is_overhead_supply:
+        spd_req = "Type 1+2 Combined SPD (12.5kA 10/350µs) at MDB (EAC HMY 58.18-1 Overhead Feed)"
+    else:
+        spd_req = "Type 2 SPD (40kA 8/20µs) at MDB (BS 7671 Reg 443.4)"
 
     assessment = LightningRiskAssessment(
         ng_flashes_km2_yr=ng,

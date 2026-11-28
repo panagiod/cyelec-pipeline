@@ -16,7 +16,7 @@ import uuid
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anyio
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
@@ -1067,8 +1067,7 @@ def create_app(
             response.headers[hk] = hv
         return response
 
-    @api.get("/", response_class=HTMLResponse)
-    def workbench_ui(request: Request) -> HTMLResponse:
+    def _render_workbench(request: Request, ui_lang: Literal["en", "el"]) -> HTMLResponse:
         auth_req = os.environ.get("CYELEC_AUTH_REQUIRED", "").strip().lower() in (
             "1",
             "true",
@@ -1083,15 +1082,46 @@ def create_app(
                 dwg_available=is_dwg_converter_available(),
                 auth_required=auth_req,
                 invite_code_required=invite_req,
+                ui_lang=ui_lang,
             )
         )
+
+    @api.get("/", response_class=HTMLResponse)
+    def workbench_ui(request: Request) -> HTMLResponse:
+        raw_lang = request.query_params.get("lang", "en").strip().lower()
+        ui_lang: Literal["en", "el"] = "el" if raw_lang == "el" else "en"
+        return _render_workbench(request, ui_lang)
+
+    @api.get("/el", response_class=HTMLResponse)
+    def workbench_ui_el(request: Request) -> HTMLResponse:
+        return _render_workbench(request, "el")
 
     @api.get("/guide", response_class=HTMLResponse)
     def user_guide_ui(request: Request) -> HTMLResponse:
         from cyelec.api.docs_ui import render_user_guide_html
+        from cyelec.api.ui_i18n import render_user_guide_el_html
 
+        raw_lang = request.query_params.get("lang", "en").strip().lower()
+        if raw_lang == "el":
+            return HTMLResponse(
+                content=render_user_guide_el_html(
+                    base_url=_safe_base_url(request),
+                    show_api_docs=not disable_openapi,
+                )
+            )
         return HTMLResponse(
             content=render_user_guide_html(
+                base_url=_safe_base_url(request),
+                show_api_docs=not disable_openapi,
+            )
+        )
+
+    @api.get("/el/guide", response_class=HTMLResponse)
+    def user_guide_ui_el(request: Request) -> HTMLResponse:
+        from cyelec.api.ui_i18n import render_user_guide_el_html
+
+        return HTMLResponse(
+            content=render_user_guide_el_html(
                 base_url=_safe_base_url(request),
                 show_api_docs=not disable_openapi,
             )

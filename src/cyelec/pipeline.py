@@ -271,9 +271,16 @@ def run_phase1_pipeline(
         review_flags.extend(circ.flags)
 
     lightning_risk = None
+    is_overhead_supply = bool(
+        overrides is not None
+        and overrides.eac_metadata is not None
+        and overrides.eac_metadata.supply_connection_type == "overhead"
+    )
     if residential_brief.include_site_works:
         lightning_risk, lps_flags = compute_lightning_risk_iec62305(
-            effective_building, residential_brief
+            effective_building,
+            residential_brief,
+            is_overhead_supply=is_overhead_supply,
         )
         review_flags.extend(lps_flags)
 

@@ -664,3 +664,96 @@ def test_main_and_secondary_board_designs_e204_and_e202_riser(tmp_path: Path) ->
     assert "E-204 MAIN" in resp.json()["boards_svg"]
 
 
+def test_greek_workbench_and_guide_routes(tmp_path: Path) -> None:
+    """Verify Greek UI (/el, /?lang=el) & Guide (/el/guide, /guide?lang=el) and EN switcher."""
+    app = create_app(db_path=tmp_path / "i18n_api.db")
+    client = TestClient(app)
+
+    # English default at / stays untouched with EN|ΕΛ switcher
+    en_resp = client.get("/")
+    assert en_resp.status_code == 200
+    assert '<html lang="en">' in en_resp.text
+    assert 'href="/el"' in en_resp.text
+    assert "Run Deterministic Solve" in en_resp.text
+    assert '<option value="el" selected>' not in en_resp.text
+
+    # Greek Workbench at /el and /?lang=el
+    for path in ("/el", "/?lang=el"):
+        el_resp = client.get(path)
+        assert el_resp.status_code == 200
+        assert "Content-Security-Policy" in el_resp.headers
+        assert '<html lang="el">' in el_resp.text
+        assert 'const UI_LANG = "el";' in el_resp.text
+        assert "Πλατφόρμα Μελετών" in el_resp.text
+        assert "Εκτέλεση Επίλυσης" in el_resp.text
+        assert "Σχέδια Πινάκων (E-204)" in el_resp.text
+        assert "ΕΝΟΤΗΤΑ 01 — Ηλεκτρικοί Πίνακες" in el_resp.text
+        assert '<option value="el" selected>Ελληνικά (EL)</option>' in el_resp.text
+        assert 'href="/el/guide"' in el_resp.text
+        assert 'href="/"' in el_resp.text
+
+    # Greek User Guide at /el/guide and /guide?lang=el
+    for path in ("/el/guide", "/guide?lang=el"):
+        g_resp = client.get(path)
+        assert g_resp.status_code == 200
+        assert "Content-Security-Policy" in g_resp.headers
+        assert '<html lang="el">' in g_resp.text
+        assert "Οδηγός Χρήσης" in g_resp.text
+        assert 'href="/el"' in g_resp.text
+
+    # English /guide links to /el/guide
+    g_en = client.get("/guide")
+    assert g_en.status_code == 200
+    assert 'href="/el/guide"' in g_en.text
+
+
+def test_overhead_eac_supply_escalates_spd_type12_everywhere(tmp_path: Path) -> None:
+    """EAC HMY 58.18-1 Footnote *1: overhead feed escalates SPD to Type 1+2 across all outputs."""
+    from cyelec.models.electrical import DesignOverrides, EacProjectMetadata
+    from cyelec.render.details_dxf import render_details_notes_svg
+    from cyelec.render.sld import render_sld_svg
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    bldg = generate_benchmark_dxf(BenchmarkTemplate.APARTMENT_3BED)
+    p2_ug = run_phase2_pipeline(bldg)
+    p2_oh = run_phase2_pipeline(
+        bldg,
+        overrides=DesignOverrides(
+            eac_metadata=EacProjectMetadata(supply_connection_type="overhead"),
+        ),
+    )
+
+    assert not is_spd_type12_required(p2_ug.design)
+    assert is_spd_type12_required(p2_oh.design)
+
+    # Lightning risk SPD recommendation
+    assert p2_ug.design.lightning_risk is not None
+    assert p2_oh.design.lightning_risk is not None
+    assert "Type 2" in p2_ug.design.lightning_risk.spd_requirement
+    assert "Type 1+2" in p2_oh.design.lightning_risk.spd_requirement
+
+    # DIN-Rail / Board designs (E-204)
+    from cyelec.render.board_designs import render_board_designs_svg
+
+    ug_devs = [dev for row in p2_ug.design.din_rail_boards[0].rows for dev in row.items]
+    oh_devs = [dev for row in p2_oh.design.din_rail_boards[0].rows for dev in row.items]
+    assert any("SPD TYPE 2" in dev for dev in ug_devs)
+    assert any("SPD TYPE 1+2" in dev for dev in oh_devs)
+    assert "T1+2 50kA" in render_board_designs_svg(p2_oh)
+
+    # BOQ switchgear item
+    assert p2_ug.design.boq is not None and p2_oh.design.boq is not None
+    ug_spd = [it for it in p2_ug.design.boq.items if "SPD" in it.description_en]
+    oh_spd = [it for it in p2_oh.design.boq.items if "SPD" in it.description_en]
+    assert ug_spd and "Type 2" in ug_spd[0].description_en
+    assert oh_spd and "Type 1+2" in oh_spd[0].description_en
+    assert oh_spd[0].unit_rate_eur > ug_spd[0].unit_rate_eur
+
+    # SLD (E-201) and Details/Notes (E-301) SVGs
+    assert "SPD TYPE 2" in render_sld_svg(p2_ug.design)
+    assert "SPD TYPE 1+2" in render_sld_svg(p2_oh.design)
+    assert "TYPE 1+2 SPD" not in render_details_notes_svg(p2_ug)
+    assert "TYPE 1+2 SPD" in render_details_notes_svg(p2_oh)
+
+
+

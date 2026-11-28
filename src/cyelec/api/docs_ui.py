@@ -373,6 +373,7 @@ def render_user_guide_html(base_url: str = "", *, show_api_docs: bool = True) ->
     </a>
     <div class="nav-links">
       <a class="nav-btn nav-btn-primary" href="/">&larr; Open Workbench</a>
+      <a class="nav-btn" href="/el/guide">Ελληνικά (ΕΛ)</a>
       {docs_nav_link}
       <span style="font-size:11px;opacity:0.85;">v{__version__}</span>
     </div>

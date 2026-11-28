@@ -290,3 +290,115 @@ def test_workbench_full_interactive_regression(workbench_url: str, tmp_path: Pat
     assert console_errors == [], f"Browser console errors: {console_errors}"
     assert page_errors == [], f"Uncaught page errors: {page_errors}"
     assert http_errors == [], f"HTTP >=400 errors: {http_errors}"
+
+
+@pytest.mark.ui
+def test_greek_workbench_playwright_regression(workbench_url: str, tmp_path: Path) -> None:
+    """Chrome E2E regression for Greek /el Workbench, /el/guide, dropdowns & overhead SPD."""
+    shot_dir = Path(os.environ.get("CYELEC_SCREENSHOT_DIR", str(tmp_path / "screenshots")))
+    shot_dir.mkdir(parents=True, exist_ok=True)
+
+    console_errors: list[str] = []
+    page_errors: list[str] = []
+    http_errors: list[str] = []
+
+    with playwright_sync.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(**_chrome_launch_kwargs())
+        except Exception:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+        page = ctx.new_page()
+        page.on(
+            "console",
+            lambda m: console_errors.append(f"{m.type}: {m.text}")
+            if m.type == "error"
+            else None,
+        )
+        page.on("pageerror", lambda e: page_errors.append(str(e)))
+        page.on(
+            "response",
+            lambda r: http_errors.append(f"HTTP {r.status} {r.url}")
+            if r.status >= 400 and not r.url.endswith("/favicon.ico")
+            else None,
+        )
+
+        # 1. Load /el & verify Greek UI + auto-solve + 0 overflow
+        page.goto(f"{workbench_url}/el", wait_until="networkidle", timeout=60000)
+        page.wait_for_function(
+            "() => document.getElementById('kSupply').textContent !== '-'",
+            timeout=45000,
+        )
+        assert page.evaluate("() => document.documentElement.lang") == "el"
+        assert (
+            page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth + 2")
+            is False
+        )
+        assert page.locator("#reportLang").input_value() == "el"
+        assert "Επιτυχής επίλυση" in (page.locator("#statusLine").text_content() or "")
+        s5_txt = page.locator("#stage5EngSummary").inner_text()
+        assert "Ηλεκτρικοί Πίνακες" in s5_txt
+        assert "Συμμόρφωση" in s5_txt
+        page.screenshot(path=str(shot_dir / "06_greek_el_desktop.png"), full_page=False)
+
+        # 2. Greek BOQ sections (ΕΝΟΤΗΤΑ 01..10)
+        page.click("button.tab:has-text('Προμέτρηση')")
+        sec_headers = page.locator("#boqBody tr.boq-sec-row").all_inner_texts()
+        assert len(sec_headers) >= 7
+        assert sec_headers[0].startswith("ΕΝΟΤΗΤΑ 01"), f"Greek BOQ headers: {sec_headers[:3]}"
+        assert sec_headers[-1].startswith("ΕΝΟΤΗΤΑ 10"), f"Greek BOQ headers: {sec_headers[-3:]}"
+
+        # 3. Overhead EAC supply dropdown marks button dirty + escalates SPD to Type 1+2
+        page.click("#eacMetaBox summary")
+        page.select_option("#eacSupplyConn", "overhead")
+        assert "●" in (page.locator("#btnRunSolve").text_content() or "")
+        prev_st = page.locator("#statusLine").text_content() or ""
+        page.click("#btnRunSolve")
+        page.wait_for_function(
+            "(prev) => { const t = document.getElementById('statusLine').textContent || ''; "
+            "return t !== prev && t.includes('Επιτυχής επίλυση'); }",
+            arg=prev_st,
+            timeout=45000,
+        )
+        assert "Type 1+2" in page.locator("#stage5EngSummary").inner_text()
+        page.click("button.tab:has-text('Μονογραμμικό')")
+        assert "SPD TYPE 1+2" in (page.locator("#sldSvg").inner_html() or "")
+
+        # 4. Anchor selector updates #btnDbMode even while relocate mode is active
+        page.click("button.tab:has-text('Σχέδια Κάτοψης')")
+        page.click("#btnDbMode")
+        page.select_option("#anchorTargetSel", "meter")
+        assert "Μετρητής" in (page.locator("#btnDbMode").text_content() or "")
+        page.click("#btnDbMode")
+
+        # 5. Workspace empty #projectSel shows Greek placeholder
+        page.click("button.tab:has-text('Έργα, Αναθεωρήσεις')")
+        page.wait_for_function(
+            "() => document.getElementById('projectSel').options.length >= 1",
+            timeout=15000,
+        )
+
+        # 6. Mobile 390x844 zero overflow + /el/guide + EN switcher
+        page.set_viewport_size({"width": 390, "height": 844})
+        time.sleep(0.2)
+        assert (
+            page.evaluate("() => document.documentElement.scrollWidth > window.innerWidth + 2")
+            is False
+        )
+        page.goto(f"{workbench_url}/el/guide", wait_until="networkidle", timeout=30000)
+        assert "Οδηγός Χρήσης" in page.content()
+
+        page.goto(f"{workbench_url}/el", wait_until="networkidle", timeout=30000)
+        page.click("#langSwitch a[href='/']")
+        page.wait_for_function("() => document.documentElement.lang === 'en'", timeout=20000)
+
+        browser.close()
+
+    assert console_errors == [], f"Greek UI console errors: {console_errors}"
+    assert page_errors == [], f"Greek UI uncaught page errors: {page_errors}"
+    assert http_errors == [], f"Greek UI HTTP >=400 errors: {http_errors}"
+

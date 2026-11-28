@@ -217,9 +217,9 @@ def generate_boq(
         1,
         sw["main_isolator_4p"] if is_3p_supply else sw["main_isolator_2p"],
     )
-    needs_lps_spd = bool(
-        design.lightning_risk is not None and design.lightning_risk.lps_required
-    )
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    needs_lps_spd = is_spd_type12_required(design)
     if needs_lps_spd:
         _add(
             "Switchgear",

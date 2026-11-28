@@ -79,7 +79,9 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
         circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
     n = max(1, len(circuits))
     sub_board_ids = {sm.board_id for sm in result.sub_mains}
-    lps_req = bool(result.lightning_risk and result.lightning_risk.lps_required)
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    lps_req = is_spd_type12_required(result)
 
     # Dynamic width comfortably fitting 13+ circuits while maintaining A3 landscape aspect
     col_w = 112
@@ -778,7 +780,9 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
     n = max(1, len(circuits))
     sub_board_ids = {sm.board_id for sm in result.sub_mains}
-    lps_req = bool(result.lightning_risk and result.lightning_risk.lps_required)
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    lps_req = is_spd_type12_required(result)
 
     col_w = 2400.0
     margin = 1200.0

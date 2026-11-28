@@ -106,7 +106,9 @@ def render_details_notes_dxf(result: Phase2DesignResult | ElectricalDesignResult
         dxfattribs={"layer": "E-NOTES", "height": 3.0},
     ).set_placement((8.0, h_tot - 22.0))
     notes_dxf = list(GENERAL_NOTES_CYPRUS)
-    if design.lightning_risk and design.lightning_risk.lps_required:
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    if is_spd_type12_required(design):
         notes_dxf[3] = (
             "4. PROTECTION: INDIVIDUAL 30MA TYPE A RCBO PER FINAL CIRCUIT; "
             "TYPE 1+2 SPD (12.5KA 10/350US) AT ORIGIN."
@@ -384,7 +386,9 @@ def render_details_notes_svg(result: Phase2DesignResult | ElectricalDesignResult
     )
     sha_short = design.provenance.input_sha256[:16]
     ra_ohm = f"{design.ze_or_ra_ohm:.0f}"
-    lps_req = bool(design.lightning_risk and design.lightning_risk.lps_required)
+    from cyelec.solver.residential_engineering import is_spd_type12_required
+
+    lps_req = is_spd_type12_required(design)
 
     notes_list = list(GENERAL_NOTES_CYPRUS)
     if lps_req:

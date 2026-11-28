@@ -6,6 +6,12 @@ import html
 
 from cyelec import __version__
 from cyelec.api.docs_ui import render_workbench_guide_tab_html
+from cyelec.api.ui_i18n import (
+    UiLang,
+    get_js_i18n_json,
+    localize_workbench_html_to_el,
+    render_workbench_guide_tab_el_html,
+)
 
 
 def render_etek_workbench_html(
@@ -16,12 +22,17 @@ def render_etek_workbench_html(
     dwg_available: bool = False,
     auth_required: bool = False,
     invite_code_required: bool = False,
+    ui_lang: UiLang = "en",
 ) -> str:
-    """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard served at GET /."""
+    """Return self-contained HTML/CSS/JS ETEK Engineer Review Dashboard (EN at / or EL at /el)."""
     prefix = base_url.rstrip("/")
     og_img = html.escape(f"{prefix}/og-thumbnail.jpg", quote=True)
     logo_url = html.escape(f"{prefix}/logo.png", quote=True)
-    guide_tab_html = render_workbench_guide_tab_html(show_api_docs=show_api_docs)
+    guide_tab_html = (
+        render_workbench_guide_tab_el_html(show_api_docs=show_api_docs)
+        if ui_lang == "el"
+        else render_workbench_guide_tab_html(show_api_docs=show_api_docs)
+    )
     api_docs_link = (
         '<a class="hdr-link" href="/docs" target="_blank" rel="noopener">API Docs</a>'
         if show_api_docs
@@ -37,12 +48,26 @@ def render_etek_workbench_html(
     fmt_list = " / ".join(exts)
     mf_exts = ".dxf/.dwg" if dwg_available else ".dxf"
     upload_label = (
-        f"Or Upload Architectural Floorplan(s) ({fmt_list} — select 2+ {mf_exts} for multi-floor)"
+        f"Ή Ανεβάστε Αρχιτεκτονική Κάτοψη ({fmt_list} — επιλέξτε 2+ {mf_exts} για πολυώροφο)"
+        if ui_lang == "el"
+        else (
+            f"Or Upload Architectural Floorplan(s) ({fmt_list} — "
+            f"select 2+ {mf_exts} for multi-floor)"
+        )
     )
+    en_cls = "active" if ui_lang == "en" else ""
+    el_cls = "active" if ui_lang == "el" else ""
+    lang_switch_html = (
+        '<div id="langSwitch" class="lang-switch" role="group" aria-label="Language">'
+        f'<a href="/" class="{en_cls}" title="English">EN</a>'
+        f'<a href="/el" class="{el_cls}" title="Ελληνικά">ΕΛ</a>'
+        "</div>"
+    )
+    js_i18n_json = get_js_i18n_json(ui_lang)
     auth_req_js = "true" if auth_required else "false"
     invite_req_js = "true" if invite_code_required else "false"
     invite_disp = "block" if invite_code_required else "none"
-    return f"""<!DOCTYPE html>
+    html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -133,6 +158,26 @@ def render_etek_workbench_html(
       white-space: nowrap;
     }}
     .hdr-link:hover {{ background: rgba(2, 132, 199, 0.6); }}
+    .lang-switch {{
+      display: inline-flex;
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      border-radius: 5px;
+      overflow: hidden;
+      background: rgba(15, 23, 42, 0.25);
+    }}
+    .lang-switch a {{
+      color: #e2e8f0;
+      text-decoration: none;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 8px;
+      line-height: 1.2;
+    }}
+    .lang-switch a.active {{
+      background: #ffffff;
+      color: var(--navy);
+    }}
+    .lang-switch a:hover:not(.active) {{ background: rgba(255, 255, 255, 0.16); }}
     header h1 {{ margin: 0; font-size: 16px; letter-spacing: 0.2px; }}
     header .meta {{ font-size: 11px; opacity: 0.85; white-space: nowrap; }}
     .layout {{
@@ -593,6 +638,7 @@ def render_etek_workbench_html(
       <h1>CyElec — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
     </div>
     <div class="hdr-right">
+      {lang_switch_html}
       <button id="hdrAccountBtn" class="acct-pill" onclick="openAuthModal('login')">
         Sign In / Register
       </button>
@@ -1357,6 +1403,8 @@ def render_etek_workbench_html(
   </div>
 
   <script>
+    const UI_LANG = "{ui_lang}";
+    const T = {js_i18n_json};
     const ROOM_TYPES = [
       'living_room', 'kitchen', 'kitchen_living', 'master_bedroom', 'bedroom',
       'bathroom', 'ensuite', 'wc', 'corridor', 'utility', 'veranda', 'storage',
@@ -1471,9 +1519,7 @@ def render_etek_workbench_html(
       const txt = document.getElementById('pendingEditsTxt');
       if (!bar || !txt) return;
       if (cnt > 0) {{
-        txt.textContent =
-          `${{cnt}} pending circuit override(s) staged — ` +
-          'click Apply & Re-Solve to recalculate BS 7671 checks and SLD.';
+        txt.textContent = `${{cnt}} ${{T.pendingPrefix}} ${{T.pendingSuffix}}`;
         bar.style.display = 'flex';
       }} else {{
         bar.style.display = 'none';
@@ -1514,26 +1560,28 @@ def render_etek_workbench_html(
       runSolve();
     }}
 
-    function updateAnchorBtnLabel() {{
-      if (dbRelocateMode) return;
+    function _anchorShortLabel() {{
       const sel = document.getElementById('anchorTargetSel');
-      const lbl = sel ? sel.options[sel.selectedIndex].text.replace('Anchor: ', '') : 'DB1';
-      const shortLbl = lbl.startsWith('DB1') ? 'DB1' : lbl;
+      const raw = sel ? sel.options[sel.selectedIndex].text : 'DB1';
+      const lbl = raw.replace(/^Anchor:\\s*/i, '').replace(/^Σημείο:\\s*/i, '');
+      return lbl.startsWith('DB1') ? 'DB1' : lbl;
+    }}
+
+    function updateAnchorBtnLabel() {{
+      const shortLbl = _anchorShortLabel();
       const btn = document.getElementById('btnDbMode');
-      if (btn) btn.textContent = `Relocate ${{shortLbl}} on Floorplan`;
+      if (!btn) return;
+      btn.textContent = dbRelocateMode
+        ? `${{T.clickPlacePrefix}} ${{shortLbl}} ${{T.cancelTag}}`
+        : `${{T.relocatePrefix}} ${{shortLbl}} ${{T.relocateSuffix}}`;
     }}
 
     function toggleDbMode() {{
       dbRelocateMode = !dbRelocateMode;
       const btn = document.getElementById('btnDbMode');
       const box = document.getElementById('floorplanSvg');
-      const sel = document.getElementById('anchorTargetSel');
-      const lbl = sel ? sel.options[sel.selectedIndex].text.replace('Anchor: ', '') : 'DB1';
-      const shortLbl = lbl.startsWith('DB1') ? 'DB1' : lbl;
       btn.className = dbRelocateMode ? 'btn btn-active btn-sm' : 'btn btn-secondary btn-sm';
-      btn.textContent = dbRelocateMode
-        ? `Click Floorplan to Place ${{shortLbl}} (Cancel)`
-        : `Relocate ${{shortLbl}} on Floorplan`;
+      updateAnchorBtnLabel();
       box.classList.toggle('db-mode', dbRelocateMode);
     }}
 
@@ -1729,7 +1777,7 @@ def render_etek_workbench_html(
       const lps = d.lightning_risk;
       if (lps) {{
         const cls = lps.lps_required ? 'b-warn' : 'b-pass';
-        const vTxt = lps.lps_required ? 'LPS Class IV Req.' : 'No External LPS';
+        const vTxt = lps.lps_required ? T.lpsReq : T.noLps;
         chips.push(
           `<div class="s5-chip"><strong>IEC 62305-2:</strong>
             <span class="badge ${{cls}}">${{escapeHtml(vTxt)}}</span>
@@ -1742,13 +1790,13 @@ def render_etek_workbench_html(
         const bStr = boards.map(b => {{
           const bid = escapeHtml(b.board_id);
           const cap = `${{b.total_modules_used}}/${{b.total_modules_capacity}}M`;
-          return `<code>${{bid}}</code> ${{cap}} (${{Math.round(b.spare_pct)}}% spare)`;
+          return `<code>${{bid}}</code> ${{cap}} (${{Math.round(b.spare_pct)}}% ${{T.spare}})`;
         }}).join(' · ');
         const allSel = boards.every(b => b.selectivity_pass);
         chips.push(
-          `<div class="s5-chip"><strong>DIN-Rail DBs:</strong> ${{bStr}}
+          `<div class="s5-chip"><strong>${{T.dinDbs}}:</strong> ${{bStr}}
             <span class="badge ${{allSel ? 'b-pass' : 'b-fail'}}">
-              ${{allSel ? 'Selectivity PASS' : 'Check Icu'}}
+              ${{allSel ? T.selPass : T.selCheck}}
             </span></div>`
         );
       }}
@@ -1759,15 +1807,15 @@ def render_etek_workbench_html(
         const battTxt = pvs.battery_enabled
           ? (` · BESS ${{pvs.battery_nominal_kwh}} kWh LFP `
              + `(${{pvs.battery_bus_voltage_v}}V${{epsTag}})`)
-          : ' · Storage-Ready';
+          : T.storageReady;
         chips.push(
-          `<div class="s5-chip"><strong>EAC 2026 PV/BESS (PVS-S-1.2):</strong>
+          `<div class="s5-chip"><strong>${{T.pvBessHdr}}</strong>
             ${{pvs.module_count}}×${{pvs.module_wp}}Wp = ${{pvs.array_dc_kwp}} kWp
             (${{pvs.strings_count}}×${{pvs.modules_per_string}}s,
             Voc 0°C=${{pvs.string_voc_cold_0c_v}}V,
             ΔV_DC=${{pvs.dc_voltage_drop_pct}}%)${{escapeHtml(battTxt)}}
             <span class="badge ${{pvOk ? 'b-pass' : 'b-warn'}}">
-              ${{pvOk ? 'DC PASS' : 'CHECK'}}
+              ${{pvOk ? 'DC PASS' : T.check}}
             </span></div>`
         );
       }}
@@ -1796,20 +1844,21 @@ def render_etek_workbench_html(
           <td class="r">${{minMax}}</td>
           <td class="r">${{u0Str}}</td>
           <td class="c"><span class="badge ${{passAll ? 'b-pass' : 'b-warn'}}">
-            ${{passAll ? 'PASS' : 'CHECK'}}</span></td>
+            ${{passAll ? T.pass : T.check}}</span></td>
         </tr>`;
         }}).join('');
         luxHtml = `<details style="margin-top:6px;border:1px solid var(--border);
             border-radius:5px;padding:6px 10px;background:#f8fafc;">
           <summary style="cursor:pointer;font-weight:700;font-size:11.5px;color:var(--navy);">
-            Point-by-Point 2D Photometrics &amp; Uniformity U₀ (BS EN 12464-1):
-            <span class="badge ${{lCls}}">${{okCnt}}/${{lumens.length}} Compliant</span>
+            ${{T.photTitle}}:
+            <span class="badge ${{lCls}}">${{okCnt}}/${{lumens.length}} ${{T.compliant}}</span>
           </summary>
           <div class="tbl-wrap" style="margin-top:8px;">
             <table><thead><tr>
-              <th>Room</th><th class="r">Area</th><th class="c">Luminaires</th>
-              <th class="r">Target</th><th class="r">E_avg</th><th class="r">E_min / E_max</th>
-              <th class="r">U₀ (Emin/Eavg)</th><th class="c">Check</th>
+              <th>${{T.thRoom}}</th><th class="r">${{T.thArea}}</th>
+              <th class="c">${{T.thLums}}</th><th class="r">${{T.thTarget}}</th>
+              <th class="r">E_avg</th><th class="r">E_min / E_max</th>
+              <th class="r">U₀ (Emin/Eavg)</th><th class="c">${{T.thCheck}}</th>
             </tr></thead><tbody>${{lRows}}</tbody></table>
           </div>
         </details>`;
@@ -1839,17 +1888,18 @@ def render_etek_workbench_html(
       const isBlankBoq = Boolean(boq && (boq.is_tender_blank_rates || boq.tender_blank_rates));
       document.getElementById('kBoq').textContent = boq
         ? (isBlankBoq
-            ? 'Tender BOQ (Unpriced)'
+            ? T.unpricedBoq
             : `€${{boq.grand_total_eur.toLocaleString('en-US', {{minimumFractionDigits:2}})}}`)
         : '-';
 
       const blk = d.review_flags.filter(f => f.severity === 'blocker').length;
       const wrn = d.review_flags.filter(f => f.severity === 'warning').length;
       const inf = d.review_flags.filter(f => f.severity === 'info').length;
-      document.getElementById('kFlags').textContent = `${{blk}} Blk / ${{wrn}} Wrn / ${{inf}} Info`;
+      document.getElementById('kFlags').textContent =
+        `${{blk}} ${{T.blk}} / ${{wrn}} ${{T.wrn}} / ${{inf}} ${{T.info}}`;
       const tabFlagsBtn = document.getElementById('tabBtnFlags');
       if (tabFlagsBtn) {{
-        tabFlagsBtn.textContent = `ETEK Review Flags (${{blk}}B/${{wrn}}W)`;
+        tabFlagsBtn.textContent = `${{T.flagsTab}} (${{blk}}B/${{wrn}}W)`;
       }}
 
       if (pb) {{
@@ -1885,9 +1935,9 @@ def render_etek_workbench_html(
         </tr>`).join('');
         document.getElementById('subMainsBox').innerHTML = `<div class="tbl-wrap"><table>
           <thead><tr>
-            <th>Sub-Board</th><th>Parent</th><th class="c">Floor</th><th>Upstream Protection</th>
-            <th class="c">Sub-Main Cable</th><th class="r">Sub ΔV</th>
-            <th class="r">Cumul. L/P ΔV</th><th class="r">Sub Ipf</th>
+            <th>${{T.subBoard}}</th><th>${{T.parent}}</th><th class="c">${{T.floor}}</th>
+            <th>${{T.upProt}}</th><th class="c">${{T.subCable}}</th><th class="r">Sub ΔV</th>
+            <th class="r">${{T.cumulLpVd}}</th><th class="r">Sub Ipf</th>
           </tr></thead><tbody>${{rows}}</tbody></table></div>`;
       }} else {{
         document.getElementById('subMainsBox').innerHTML = '';
@@ -1905,7 +1955,9 @@ def render_etek_workbench_html(
         const curCg = Number(ov.grouping_count || s.grouping_count);
         const phSelect = s.is_three_phase ? '3P' : `
           <select class="phase-sel" data-cid="${{cid}}" data-field="phase">
-            <option value="AUTO" ${{curPhase==='AUTO'?'selected':''}}>Auto (${{phVal}})</option>
+            <option value="AUTO" ${{curPhase==='AUTO'?'selected':''}}>
+              ${{T.autoPhase}} (${{phVal}})
+            </option>
             <option value="L1" ${{curPhase==='L1'?'selected':''}}>L1</option>
             <option value="L2" ${{curPhase==='L2'?'selected':''}}>L2</option>
             <option value="L3" ${{curPhase==='L3'?'selected':''}}>L3</option>
@@ -1913,6 +1965,7 @@ def render_etek_workbench_html(
         const cgInput = `<input class="mini-input" type="number" min="1" max="20"
           data-cid="${{cid}}" data-field="grouping_count" value="${{curCg}}" />`;
         const bCls = c.overall_pass ? 'b-pass' : 'b-fail';
+        const stTxt = c.overall_pass ? T.pass : T.fail;
         return `<tr>
           <td><strong>${{cid}}</strong></td>
           <td><code>${{bid}}</code></td>
@@ -1925,7 +1978,7 @@ def render_etek_workbench_html(
           <td class="r">${{s.length_m.toFixed(1)}}</td>
           <td class="r">${{c.iz_derated_a.toFixed(1)}}/${{c.required_iz_a.toFixed(1)}}</td>
           <td class="r">${{c.voltage_drop_pct.toFixed(2)}}%</td>
-          <td class="c"><span class="badge ${{bCls}}">${{c.overall_pass?'PASS':'FAIL'}}</span></td>
+          <td class="c"><span class="badge ${{bCls}}">${{stTxt}}</span></td>
         </tr>`;
       }}).join('');
       updatePendingEditsBar();
@@ -1960,18 +2013,20 @@ def render_etek_workbench_html(
         const lang = document.getElementById('reportLang').value;
         const vatPct = Math.round((boq.vat_rate != null ? boq.vat_rate : 0.19) * 100);
         const blank = Boolean(boq.is_tender_blank_rates || boq.tender_blank_rates);
-        const SEC_TITLES = {{
-          '01': 'SEC 01 — Switchgear & Distribution Boards',
-          '02': 'SEC 02 — Cables & Containment',
-          '03': 'SEC 03 — Lighting & Switching',
-          '04': 'SEC 04 — Power Outlets & Fixed Accessories',
-          '05': 'SEC 05 — Mechanical, HVAC, Shutters & Plant',
-          '06': 'SEC 06 — ELV, Security, Intercom & Life Safety',
-          '07': 'SEC 07 — Earthing, Bonding & Lightning Protection',
-          '08': 'SEC 08 — External Site Works & Trenching',
-          '09': 'SEC 09 — Smart Home / KNX Automation',
-          '10': 'SEC 10 — Testing, Commissioning & As-Builts (HMY 58)',
+        const SEC_TITLES_EL = {{
+          '01': 'ΕΝΟΤΗΤΑ 01 — Ηλεκτρικοί Πίνακες & Υλικό Διανομής',
+          '02': 'ΕΝΟΤΗΤΑ 02 — Καλώδια, Σωληνώσεις & Σχάρες',
+          '03': 'ΕΝΟΤΗΤΑ 03 — Φωτισμός & Διακόπτες',
+          '04': 'ΕΝΟΤΗΤΑ 04 — Ρευματοδότες & Μόνιμα Εξαρτήματα',
+          '05': 'ΕΝΟΤΗΤΑ 05 — Μηχανολογικά, Κλιματισμός, Ρολά & Αντλίες',
+          '06': 'ΕΝΟΤΗΤΑ 06 — Ασθενή Ρεύματα (ELV), Ασφάλεια & Πυρανίχνευση',
+          '07': 'ΕΝΟΤΗΤΑ 07 — Γείωση, Ισοδυναμικές & Αντικεραυνική Προστασία',
+          '08': 'ΕΝΟΤΗΤΑ 08 — Εξωτερικά Έργα Οικοπέδου & Εκσκαφές',
+          '09': 'ΕΝΟΤΗΤΑ 09 — Έξυπνο Σπίτι / Αυτοματισμός KNX',
+          '10': 'ΕΝΟΤΗΤΑ 10 — Έλεγχοι, Δοκιμές & Τεκμηρίωση ΑΗΚ (Η.Μ.Υ. 58)',
         }};
+        const isElBoq = (lang === 'el' || UI_LANG === 'el');
+        const SEC_TITLES = isElBoq ? SEC_TITLES_EL : T.boqSecTitles;
         const mapSec = (it) => {{
           const cat = String(it.category || '').toLowerCase();
           const desc = String(it.description_en || '').toLowerCase();
@@ -2033,32 +2088,38 @@ def render_etek_workbench_html(
               : (lang === 'bilingual'
                   ? `${{it.description_en}} / ${{it.description_el}}`
                   : it.description_en);
+            const rateCell = blank
+              ? `<em>${{escapeHtml(isElBoq ? 'Προσφορά' : T.tenderRate)}}</em>`
+              : '€' + it.unit_rate_eur.toFixed(2);
+            const totCell = blank
+              ? `<em>${{escapeHtml(isElBoq ? 'Τύπος' : T.tenderFormula)}}</em>`
+              : '€' + it.total_eur.toFixed(2);
             rowsHtml.push(`<tr>
               <td><code>${{escapeHtml(it.item_no)}}</code></td>
               <td>${{escapeHtml(it.category)}}</td>
               <td>${{escapeHtml(txt)}}</td>
               <td class="c">${{escapeHtml(it.unit)}}</td>
               <td class="r">${{it.quantity.toFixed(2)}}</td>
-              <td class="r">${{blank ? '<em>Tender</em>' : '€' + it.unit_rate_eur.toFixed(2)}}</td>
-              <td class="r">${{blank ? '<em>Formula</em>' : '€' + it.total_eur.toFixed(2)}}</td>
+              <td class="r">${{rateCell}}</td>
+              <td class="r">${{totCell}}</td>
             </tr>`);
           }}
           if (!blank) {{
+            const subLbl = isElBoq ? 'Μερικό Σύνολο (ΕΝΟΤΗΤΑ' : T.secSubtotal;
             rowsHtml.push(`<tr class="boq-sub-row">
-              <td colspan="6" class="r">Section Subtotal (SEC ${{code}})</td>
+              <td colspan="6" class="r">${{escapeHtml(subLbl)}} ${{code}})</td>
               <td class="r">€${{secSum.toFixed(2)}}</td>
             </tr>`);
           }}
         }}
         const totals = blank
-          ? `<tr><td colspan="7" class="r"><strong>Unpriced Tender BOQ Mode:
-              Excel export leaves Column G blank with live =ROUND(F*G,2) &amp;
-              ${{vatPct}}% Cyprus VAT formulas.</strong></td></tr>`
-          : `<tr><td colspan="6" class="r"><strong>Subtotal (excl. VAT)</strong></td>
+          ? `<tr><td colspan="7" class="r"><strong>${{T.boqTender}}
+              (${{vatPct}}% ${{T.boqVat}})</strong></td></tr>`
+          : `<tr><td colspan="6" class="r"><strong>${{T.boqSub}}</strong></td>
             <td class="r"><strong>€${{boq.subtotal_eur.toFixed(2)}}</strong></td></tr>
-          <tr><td colspan="6" class="r"><strong>Cyprus VAT (${{vatPct}}%)</strong></td>
+          <tr><td colspan="6" class="r"><strong>${{T.boqVat}} (${{vatPct}}%)</strong></td>
             <td class="r"><strong>€${{boq.vat_eur.toFixed(2)}}</strong></td></tr>
-          <tr><td colspan="6" class="r"><strong>GRAND TOTAL (EUR incl. VAT)</strong></td>
+          <tr><td colspan="6" class="r"><strong>${{T.boqGrand}}</strong></td>
             <td class="r"><strong>€${{boq.grand_total_eur.toFixed(2)}}</strong></td></tr>`;
         document.getElementById('boqBody').innerHTML = rowsHtml.join('') + totals;
       }}
@@ -2270,9 +2331,9 @@ def render_etek_workbench_html(
           body: JSON.stringify(payload)
         }});
         if (!resp.ok) throw new Error(await resp.text());
-        setStatus('Saved tenant firm branding, language & VAT defaults.', 'ok');
+        setStatus(T.savedDefaultsOk, 'ok');
       }} catch (err) {{
-        setStatus(`Save defaults failed: ${{err.message}}`, 'err');
+        setStatus(`${{T.saveDefaultsFail}}: ${{err.message}}`, 'err');
       }}
     }}
 
@@ -2281,9 +2342,9 @@ def render_etek_workbench_html(
       isSolving = true;
       const runBtn = document.getElementById('btnRunSolve');
       const zipBtn = document.getElementById('btnDownloadZip');
-      if (runBtn) {{ runBtn.disabled = true; runBtn.textContent = 'Solving...'; }}
+      if (runBtn) {{ runBtn.disabled = true; runBtn.textContent = T.solvingBtn; }}
       if (zipBtn) zipBtn.disabled = true;
-      setStatus('Running deterministic BS 7671 / EAC / NetworkX solve...', '');
+      setStatus(T.solving, '');
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
 
@@ -2344,12 +2405,12 @@ def render_etek_workbench_html(
         renderResult(data);
         const ms = resp.headers.get('X-Process-Time-Ms') || '?';
         const sha = data.result.design.provenance.input_sha256.slice(0, 12);
-        setStatus(`Solved cleanly in ${{ms}} ms (SHA-256: ${{sha}}).`, 'ok');
+        setStatus(`${{T.solvedCleanly}} ${{T.solvedIn}} ${{ms}} ms (SHA-256: ${{sha}}).`, 'ok');
       }} catch (err) {{
-        setStatus(`Solve failed: ${{err.message}}`, 'err');
+        setStatus(`${{T.solveFailed}}: ${{err.message}}`, 'err');
       }} finally {{
         isSolving = false;
-        if (runBtn) {{ runBtn.disabled = false; runBtn.textContent = 'Run Deterministic Solve'; }}
+        if (runBtn) {{ runBtn.disabled = false; runBtn.textContent = T.runSolveBtn; }}
         if (zipBtn) zipBtn.disabled = false;
       }}
     }}
@@ -2358,8 +2419,8 @@ def render_etek_workbench_html(
       if (isDownloading) return;
       isDownloading = true;
       const zipBtn = document.getElementById('btnDownloadZip');
-      if (zipBtn) {{ zipBtn.disabled = true; zipBtn.textContent = 'Building EAC ZIP Pack...'; }}
-      setStatus('Generating complete EAC DXF / SVG / PDF / Excel ZIP pack...', '');
+      if (zipBtn) {{ zipBtn.disabled = true; zipBtn.textContent = T.downloadingZip; }}
+      setStatus(T.downloadingStatus, '');
       const fileInput = document.getElementById('dxfFile');
       const overrides = collectOverrides();
       try {{
@@ -2411,12 +2472,12 @@ def render_etek_workbench_html(
         a.download = 'eac_submission_pack.zip';
         a.click();
         URL.revokeObjectURL(url);
-        setStatus('Downloaded eac_submission_pack.zip cleanly.', 'ok');
+        setStatus(T.downloadedZipOk, 'ok');
       }} catch (err) {{
-        setStatus(`Bundle download failed: ${{err.message}}`, 'err');
+        setStatus(`${{T.downloadFailed}}: ${{err.message}}`, 'err');
       }} finally {{
         isDownloading = false;
-        if (zipBtn) {{ zipBtn.disabled = false; zipBtn.textContent = 'Download EAC ZIP Pack'; }}
+        if (zipBtn) {{ zipBtn.disabled = false; zipBtn.textContent = T.downloadZipBtn; }}
       }}
     }}
 
@@ -2426,9 +2487,13 @@ def render_etek_workbench_html(
       const list = await resp.json();
       const sel = document.getElementById('projectSel');
       const cur = sel.value;
+      if (!list.length) {{
+        sel.innerHTML = `<option value="">${{escapeHtml(T.noProjects)}}</option>`;
+        return;
+      }}
       sel.innerHTML = list.map(p =>
         `<option value="${{escapeHtml(p.project_id)}}">`
-        + `${{escapeHtml(p.name)}} (${{p.revision_count}} rev)</option>`
+        + `${{escapeHtml(p.name)}} (${{p.revision_count}} ${{T.revLabel}})</option>`
       ).join('');
       if (cur && list.some(p => p.project_id === cur)) sel.value = cur;
       if (sel.value) loadRevisions();
@@ -2533,8 +2598,8 @@ def render_etek_workbench_html(
       </tr>`).join('');
       document.getElementById('revListBox').innerHTML = `<div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Rev</th><th>Input SHA</th><th>Supply Tier</th>
-          <th class="r">Div. kVA</th><th class="r">BOQ (EUR)</th><th>Timestamp</th>
+          <th>${{T.thRev}}</th><th>Input SHA</th><th>${{T.thSupplyTier}}</th>
+          <th class="r">Div. kVA</th><th class="r">BOQ (EUR)</th><th>${{T.thTimestamp}}</th>
         </tr></thead><tbody>${{rows}}</tbody></table></div>`;
     }}
 
@@ -2547,7 +2612,7 @@ def render_etek_workbench_html(
       }});
       const revs = await rResp.json();
       if (revs.length < 2) {{
-        box.textContent = 'Save at least 2 revisions to compare diffs.';
+        box.textContent = T.need2Revs;
         return;
       }}
       const a = revs[revs.length - 2].revision_number;
@@ -2604,8 +2669,8 @@ def render_etek_workbench_html(
       document.getElementById('mTabReg').classList.toggle('active', isReg);
       document.getElementById('modalRegFields').style.display = isReg ? 'block' : 'none';
       document.getElementById('mSubmitBtn').textContent = isReg
-        ? 'Create Firm Account'
-        : 'Sign In';
+        ? T.createFirmBtn
+        : T.signInBtn;
       document.getElementById('mError').textContent = '';
     }}
 
@@ -2724,9 +2789,9 @@ def render_etek_workbench_html(
 
     function firmLogout() {{
       try {{ sessionStorage.removeItem('cyelec_jwt'); }} catch (_) {{}}
-      document.getElementById('authBadge').textContent = 'Signed out.';
-      document.getElementById('hdrAccountBtn').textContent = 'Sign In / Register';
-      document.getElementById('wsStatus').textContent = 'Signed out.';
+      document.getElementById('authBadge').textContent = T.signedOut;
+      document.getElementById('hdrAccountBtn').textContent = T.signInRegBtn;
+      document.getElementById('wsStatus').textContent = T.signedOut;
       if (AUTH_REQUIRED) openAuthModal('login');
     }}
 
@@ -2785,7 +2850,7 @@ def render_etek_workbench_html(
                   data-reset-email="${{escapeHtml(m.email)}}">Reset PW</button>
               </div>`
             ).join('')
-          : 'No user accounts registered on this tenant yet.';
+          : T.noSeatsYet;
       }}
     }}
 
@@ -2830,6 +2895,22 @@ def render_etek_workbench_html(
       if (data.portal_url) window.open(data.portal_url, '_blank', 'noopener');
     }}
 
+    const CONFIG_SELECT_IDS = [
+      'eacProfile', 'earthing', 'supplyHeadroomSel', 'reportLang', 'vatRateSel',
+      'briefHvac', 'briefEvKw', 'briefConduitStyle', 'briefEarthing',
+      'eacDistrict', 'eacSupplyConn'
+    ];
+    for (const sid of CONFIG_SELECT_IDS) {{
+      const selEl = document.getElementById(sid);
+      if (selEl) {{
+        selEl.addEventListener('change', () => {{
+          const runBtn = document.getElementById('btnRunSolve');
+          if (runBtn && !isSolving) runBtn.textContent = T.runSolveDirty;
+          setStatus(T.settingsChanged, '');
+        }});
+      }}
+    }}
+
     window.addEventListener('DOMContentLoaded', async () => {{
       let savedJwt = '';
       let savedKey = '';
@@ -2852,7 +2933,7 @@ def render_etek_workbench_html(
       }}
 
       if (AUTH_REQUIRED && !savedKey) {{
-        setStatus('Sign in or create your firm account to start designing.', '');
+        setStatus(T.authSignInPrompt, '');
         openAuthModal('login');
         return;
       }}
@@ -2862,3 +2943,5 @@ def render_etek_workbench_html(
 </body>
 </html>
 """
+    return localize_workbench_html_to_el(html_out) if ui_lang == "el" else html_out
+
