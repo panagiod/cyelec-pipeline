@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 
 from cyelec.models.electrical import (
     BoqItem,
@@ -13,7 +14,10 @@ from cyelec.models.electrical import (
     ElectricalDesignResult,
 )
 from cyelec.models.spatial import DeviceType, SpatialLayoutResult
+from cyelec.solver.residential_engineering import is_spd_type12_required
 from cyelec.standards_loader import CyprusBoqRates, StandardsBundle
+
+_AddBoqItem = Callable[[str, str, str, str, float, float], None]
 
 
 def _merge_boq_rates(
@@ -58,51 +62,12 @@ def _merge_boq_rates(
     return merged, True
 
 
-def generate_boq(
+def _add_boq_cables_and_containment(
+    _add: _AddBoqItem,
     design: ElectricalDesignResult,
-    standards: StandardsBundle,
-    *,
-    spatial: SpatialLayoutResult | None = None,
-    rate_overrides: BoqRateOverrides | None = None,
-    tender_blank_rates: bool = False,
-) -> BoqSummary:
-    """Compute an itemized Cyprus electrical BOQ (EUR + VAT) with custom/tender support."""
-    rates, custom_applied = _merge_boq_rates(standards.boq_rates, rate_overrides)
-    eac = design.eac_compliance
-    items: list[BoqItem] = []
-    seq = 1
-
-    def _add(
-        category: str,
-        desc_en: str,
-        desc_el: str,
-        unit: str,
-        qty: float,
-        unit_rate: float,
-    ) -> None:
-        nonlocal seq
-        q = round(qty, 2)
-        if q <= 0.0:
-            return
-        eff_rate = 0.0 if tender_blank_rates else round(unit_rate, 2)
-        total = 0.0 if tender_blank_rates else round(q * eff_rate, 2)
-        items.append(
-            BoqItem(
-                item_no=f"BOQ-{seq:02d}",
-                category=category,
-                description_en=desc_en,
-                description_el=desc_el,
-                unit=unit,
-                quantity=q,
-                unit_rate_eur=eff_rate,
-                total_eur=total,
-            )
-        )
-        seq += 1
-
-    # ------------------------------------------------------------------
-    # 1. Cables (Cu PVC 70°C / XLPE 90°C) grouped by (size_mm2, is_3p)
-    # ------------------------------------------------------------------
+    rates: CyprusBoqRates,
+) -> None:
+    """Append BOQ Sections 1-2: copper cables, PVC conduits & galvanized cable tray."""
     cable_m: dict[tuple[float, bool], float] = defaultdict(float)
     conduit_20_m = 0.0
     conduit_25_m = 0.0
@@ -182,9 +147,14 @@ def generate_boq(
         rates.conduit_eur_per_m.get("cable_tray", 24.00),
     )
 
-    # ------------------------------------------------------------------
-    # 3. Distribution Boards & Switchgear
-    # ------------------------------------------------------------------
+
+def _add_boq_boards_and_switchgear(
+    _add: _AddBoqItem,
+    design: ElectricalDesignResult,
+    rates: CyprusBoqRates,
+) -> None:
+    """Append BOQ Section 3: distribution boards, isolators, MCCBs, RCBOs & SPDs."""
+    eac = design.eac_compliance
     sw = rates.switchgear_eur
     is_3p_supply = eac.supply_phases == 3
     _add(
@@ -217,8 +187,6 @@ def generate_boq(
         1,
         sw["main_isolator_4p"] if is_3p_supply else sw["main_isolator_2p"],
     )
-    from cyelec.solver.residential_engineering import is_spd_type12_required
-
     needs_lps_spd = is_spd_type12_required(design)
     if needs_lps_spd:
         _add(
@@ -387,9 +355,15 @@ def generate_boq(
         sw["rcd_type_s_100ma_2p"],
     )
 
-    # ------------------------------------------------------------------
-    # 4. Wiring Accessories & Final Points (exact placed devices or fallback)
-    # ------------------------------------------------------------------
+
+def _add_boq_accessories_and_points(
+    _add: _AddBoqItem,
+    design: ElectricalDesignResult,
+    rates: CyprusBoqRates,
+    standards: StandardsBundle,
+    spatial: SpatialLayoutResult | None,
+) -> None:
+    """Append BOQ Section 4: wiring accessories, switches, sockets & final points."""
     acc = rates.accessories_eur
     if spatial is not None and spatial.devices:
         dev_counts = Counter(d.device_type for d in spatial.devices)
@@ -530,9 +504,14 @@ def generate_boq(
             acc.get("fire_alarm_spur", 95.0),
         )
 
-    # ------------------------------------------------------------------
-    # 5. Earthing, Main Equipotential Bonding, PV AC Kit & EV Equipment
-    # ------------------------------------------------------------------
+
+def _add_boq_earthing_pv_ev(
+    _add: _AddBoqItem,
+    design: ElectricalDesignResult,
+    rates: CyprusBoqRates,
+) -> None:
+    """Append BOQ Section 5: earthing, main bonding, PV AC kit & EV equipment."""
+    acc = rates.accessories_eur
     if design.earthing_system == EarthingSystem.TT:
         _add(
             "Earthing",
@@ -608,9 +587,15 @@ def generate_boq(
             acc["ev_charger_22kw"] if is_22kw else acc["ev_charger_7kw"],
         )
 
-    # ------------------------------------------------------------------
-    # 6. Stage 5: Lighting Upgrades, Mechanical Plant, ELV, Site, KNX & Testing
-    # ------------------------------------------------------------------
+
+def _add_boq_stage5_and_commissioning(
+    _add: _AddBoqItem,
+    design: ElectricalDesignResult,
+    rates: CyprusBoqRates,
+    spatial: SpatialLayoutResult | None,
+) -> None:
+    """Append BOQ Section 6 & 10: Stage-5 residential/commercial systems & testing."""
+    acc = rates.accessories_eur
     brief = design.residential_brief
     if spatial is not None:
         dev_counts = Counter(d.device_type for d in spatial.devices)
@@ -894,6 +879,54 @@ def generate_boq(
         1,
         acc.get("testing_commissioning_hmy58_asbuilt", 450.0),
     )
+
+
+def generate_boq(
+    design: ElectricalDesignResult,
+    standards: StandardsBundle,
+    *,
+    spatial: SpatialLayoutResult | None = None,
+    rate_overrides: BoqRateOverrides | None = None,
+    tender_blank_rates: bool = False,
+) -> BoqSummary:
+    """Compute an itemized Cyprus electrical BOQ (EUR + VAT) with custom/tender support."""
+    rates, custom_applied = _merge_boq_rates(standards.boq_rates, rate_overrides)
+    items: list[BoqItem] = []
+    seq = 1
+
+    def _add(
+        category: str,
+        desc_en: str,
+        desc_el: str,
+        unit: str,
+        qty: float,
+        unit_rate: float,
+    ) -> None:
+        nonlocal seq
+        q = round(qty, 2)
+        if q <= 0.0:
+            return
+        eff_rate = 0.0 if tender_blank_rates else round(unit_rate, 2)
+        total = 0.0 if tender_blank_rates else round(q * eff_rate, 2)
+        items.append(
+            BoqItem(
+                item_no=f"BOQ-{seq:02d}",
+                category=category,
+                description_en=desc_en,
+                description_el=desc_el,
+                unit=unit,
+                quantity=q,
+                unit_rate_eur=eff_rate,
+                total_eur=total,
+            )
+        )
+        seq += 1
+
+    _add_boq_cables_and_containment(_add, design, rates)
+    _add_boq_boards_and_switchgear(_add, design, rates)
+    _add_boq_accessories_and_points(_add, design, rates, standards, spatial)
+    _add_boq_earthing_pv_ev(_add, design, rates)
+    _add_boq_stage5_and_commissioning(_add, design, rates, spatial)
 
     subtotal = 0.0 if tender_blank_rates else round(sum(item.total_eur for item in items), 2)
     vat_eur = 0.0 if tender_blank_rates else round(subtotal * rates.vat_rate, 2)

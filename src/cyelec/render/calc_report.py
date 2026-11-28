@@ -336,7 +336,7 @@ def render_calc_report_md(result: ElectricalDesignResult) -> str:
             [
                 "",
                 f"- **Subtotal (excl. VAT):** `€{boq.subtotal_eur:,.2f}`",
-                f"- **Cyprus VAT ({int(round(boq.vat_rate * 100))}%):** `€{boq.vat_eur:,.2f}`",
+                f"- **Cyprus VAT ({round(boq.vat_rate * 100)}%):** `€{boq.vat_eur:,.2f}`",
                 f"- **Grand Total (incl. VAT):** **`€{boq.grand_total_eur:,.2f}`**",
             ]
         )
@@ -562,7 +562,7 @@ def render_calc_report_html(result: ElectricalDesignResult) -> str:
                 f'<td class="r">€{it.total_eur:,.2f}</td>'
                 "</tr>"
             )
-        vat_pct = int(round(boq.vat_rate * 100))
+        vat_pct = round(boq.vat_rate * 100)
         boq_section = f"""
   <section>
     <h2>5b. {esc(t('boq_title', lang))}</h2>

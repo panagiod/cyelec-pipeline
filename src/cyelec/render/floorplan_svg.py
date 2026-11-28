@@ -12,20 +12,24 @@ Drafting standards implemented:
 
 from __future__ import annotations
 
-import html
+import itertools
+import logging
 import math
+from dataclasses import dataclass, field
 from typing import Literal
 
 from cyelec.models.building import Point2D
 from cyelec.models.electrical import CircuitCategory
 from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
 from cyelec.render.label_layout import LabelLayoutEngine, estimate_text_size
+from cyelec.render.svg_utils import esc as _esc
 from cyelec.render.text_fit import (
     fit_text_lines,
     hoist_svg_text_to_top,
     svg_text_mask,
     wrap_text_to_width,
 )
+from cyelec.solver.photometrics import render_lux_heatmap_svg_group
 
 SvgDiscipline = Literal["combined", "lighting", "power", "elv"]
 
@@ -90,8 +94,7 @@ _ELV_TYPES: frozenset[DeviceType] = frozenset(
 )
 
 
-def _esc(val: object) -> str:
-    return html.escape(str(val), quote=True)
+_logger = logging.getLogger(__name__)
 
 
 def _chain_nearest_neighbor(
@@ -259,176 +262,118 @@ def _render_iec_twin_socket(dx: float, dy: float, wall_angle_deg: float) -> list
     ]
 
 
-def render_floorplan_svg(
-    result: Phase2DesignResult,
-    *,
-    discipline: SvgDiscipline = "combined",
-    show_lux_heatmap: bool = False,
-) -> str:
-    """Render AutoCAD-grade architectural floorplan + discipline electrical overlay as SVG."""
-    building = result.design.building
-    spatial = result.spatial
-    eac = result.design.eac_compliance
+@dataclass
+class _FloorplanCanvas:
+    """Shared projection, label-layout, and SVG accumulator state for E-100..E-103 layers."""
 
-    all_pts = [p for r in building.rooms for p in r.polygon_mm]
-    if not all_pts:
-        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200"></svg>'
+    result: Phase2DesignResult
+    discipline: SvgDiscipline
+    show_lux_heatmap: bool
+    scale: float
+    minx: float
+    maxy: float
+    pad_left: float
+    pad_top: float
+    draw_w: float
+    canvas_bounds: tuple[float, float, float, float]
+    layout: LabelLayoutEngine
+    parts: list[str]
+    deferred_tags: list[tuple[float, float, str, str]] = field(default_factory=list)
 
-    minx = min(p.x_mm for p in all_pts)
-    maxx = max(p.x_mm for p in all_pts)
-    miny = min(p.y_mm for p in all_pts)
-    maxy = max(p.y_mm for p in all_pts)
+    def tx(self, x_mm: float) -> float:
+        return self.pad_left + (x_mm - self.minx) * self.scale
 
-    if discipline == "lighting":
-        active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_TYPES]
-    elif discipline == "power":
-        active_devices = [d for d in spatial.devices if d.device_type in _POWER_TYPES]
-    elif discipline == "elv":
-        active_devices = [d for d in spatial.devices if d.device_type in _ELV_TYPES]
-    else:
-        active_devices = [
-            d for d in spatial.devices if d.device_type in (_LIGHTING_TYPES | _POWER_TYPES)
-        ]
+    def ty(self, y_mm: float) -> float:
+        return self.pad_top + (self.maxy - y_mm) * self.scale
 
-    # Expand bounds so exterior devices (Meter, Earth Pit, CCTV, Gate, EV, Pool) fit cleanly
-    for dev in active_devices:
-        minx = min(minx, dev.location_mm.x_mm - 350.0)
-        maxx = max(maxx, dev.location_mm.x_mm + 350.0)
-        miny = min(miny, dev.location_mm.y_mm - 350.0)
-        maxy = max(maxy, dev.location_mm.y_mm + 350.0)
+    def poly_points(self, pts: list[Point2D]) -> str:
+        return " ".join(f"{self.tx(p.x_mm):.1f},{self.ty(p.y_mm):.1f}" for p in pts)
 
-    span_x = max(1000.0, maxx - minx)
-    span_y = max(1000.0, maxy - miny)
+    def find_free_badge_center(
+        self,
+        bx: float,
+        by: float,
+        w: float,
+        h: float,
+    ) -> tuple[float, float, bool]:
+        """Locate a collision-free badge center near (bx, by) inside the drawing canvas."""
+        min_x, min_y, max_x, max_y = self.canvas_bounds
 
-    # Map architectural mm -> SVG pixels (flipping Y axis so north is up)
-    pad_left = 60.0
-    pad_right = 258.0  # Legend + Mounting Heights sidebar
-    pad_bottom = 52.0
-    draw_w = 900.0
-    svg_w = int(math.ceil(pad_left + draw_w + pad_right))
+        def _box_at(px: float, py: float) -> tuple[float, float, float, float]:
+            return (px - w * 0.5 - 1.2, py - h * 0.5 - 1.2, px + w * 0.5 + 1.2, py + h * 0.5 + 1.2)
 
-    sheet_title = (
-        "E-101 LIGHTING, PHOTOMETRICS & SWITCHING LAYOUT"
-        if discipline == "lighting"
-        else (
-            "E-102 POWER, SOCKETS & MECHANICAL PLANT LAYOUT"
-            if discipline == "power"
-            else (
-                "E-103 ELV, SECURITY, INTERCOM & LIFE SAFETY LAYOUT"
-                if discipline == "elv"
-                else "E-100 COMBINED LV ELECTRICAL LAYOUT (COORDINATION)"
+        def _is_clear(px: float, py: float) -> bool:
+            if px - w * 0.5 < min_x or px + w * 0.5 > max_x:
+                return False
+            if py - h * 0.5 < min_y or py + h * 0.5 > max_y:
+                return False
+            return not self.layout.has_text_collision(_box_at(px, py), pad=1.2)
+
+        if _is_clear(bx, by):
+            return bx, by, False
+        for r in (12.0, 20.0, 30.0, 42.0, 56.0, 72.0):
+            for ang in (0.0, 180.0, -90.0, 90.0, -45.0, 45.0, -135.0, 135.0):
+                ra = math.radians(ang)
+                cx = bx + r * math.cos(ra)
+                cy = by + r * math.sin(ra)
+                if _is_clear(cx, cy):
+                    return cx, cy, True
+        return bx, by, False
+
+    def badge(
+        self,
+        bx: float,
+        by: float,
+        text: str,
+        *,
+        fill: str,
+        stroke: str,
+        fg: str,
+        w: float = 18.0,
+        h: float = 10.5,
+        anchor: str | None = None,
+        font_px: float = 5.8,
+    ) -> tuple[float, float]:
+        """Draw a collision-free rectangular text badge (with leader line if shifted)."""
+        est_w, _ = estimate_text_size(text, font_px, bold=True)
+        eff_w = max(w, est_w + 5.0)
+        eff_h = max(h, font_px * 1.55)
+        fx, fy, shifted = self.find_free_badge_center(bx, by, eff_w, eff_h)
+        self.layout.register_badge(fx, fy, eff_w, eff_h)
+        if shifted:
+            self.parts.append(
+                f'  <line x1="{bx:.1f}" y1="{by:.1f}" x2="{fx:.1f}" y2="{fy:.1f}" '
+                'stroke="#64748b" stroke-width="0.7" style="pointer-events:none;" />'
             )
+            self.parts.append(
+                f'  <circle cx="{bx:.1f}" cy="{by:.1f}" r="1.8" fill="{stroke}" '
+                'style="pointer-events:none;" />'
+            )
+        a_attr = f' data-anchor="{anchor}"' if anchor else ""
+        self.parts.append(
+            f'  <rect{a_attr} x="{fx - eff_w / 2:.1f}" y="{fy - eff_h / 2:.1f}" '
+            f'width="{eff_w:.1f}" height="{eff_h:.1f}" fill="{fill}" stroke="{stroke}" '
+            'stroke-width="1.35" rx="2" />'
         )
-    )
-    # Full-length title band: wrap (never truncate) the title + project name and subtitle.
-    title_max_w = svg_w - pad_left - 24.0
-    title_lines, title_fs = fit_text_lines(
-        f"{sheet_title} — {building.project_name}",
-        title_max_w,
-        13.5,
-        max_lines=2,
-        min_font_px=11.0,
-        bold=True,
-    )
-    sub_txt = (
-        f"Area: {building.total_floor_area_m2:.1f} m² | "
-        f"Profile: {eac.eac_profile.value} "
-        f"(Bath excl: {eac.bathroom_socket_exclusion_m:.1f} m) | "
-        f"Points: {len(active_devices)} | "
-        f"Total Conduit: {spatial.total_conduit_m:.1f} m"
-    )
-    sub_lines = wrap_text_to_width(sub_txt, title_max_w, 9.8)
-    title_lh = title_fs * 1.2
-    sub_y0 = 26.0 + (len(title_lines) - 1) * title_lh + 16.0
-    hdr_extra = (len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * 12.5
-    pad_top = 64.0 + math.ceil(hdr_extra)
-
-    scale = draw_w / span_x
-    draw_h = max(480.0, span_y * scale)
-    svg_h = int(math.ceil(pad_top + draw_h + pad_bottom))
-
-    # Layout engine strictly bounded to the drawing canvas (excluding title band & legend sidebar)
-    canvas_bounds = (
-        10.0,
-        pad_top - 10.0,
-        pad_left + draw_w + 8.0,
-        svg_h - 10.0,
-    )
-    layout = LabelLayoutEngine(canvas_bounds)
-
-    def tx(x_mm: float) -> float:
-        return pad_left + (x_mm - minx) * scale
-
-    def ty(y_mm: float) -> float:
-        return pad_top + (maxy - y_mm) * scale
-
-    def poly_points(pts: list[Point2D]) -> str:
-        return " ".join(f"{tx(p.x_mm):.1f},{ty(p.y_mm):.1f}" for p in pts)
-
-    room_floor: dict[str, str] = {r.id: r.floor for r in building.rooms}
-    board_mm_by_id: dict[str, tuple[float, float]] = {
-        building.db_anchor.id: (
-            building.db_anchor.location_mm.x_mm,
-            building.db_anchor.location_mm.y_mm,
+        self.parts.append(
+            f'  <text x="{fx:.1f}" y="{fy + font_px * 0.36:.1f}" text-anchor="middle" '
+            f'class="badge-txt" style="fill:{fg};font-size:{font_px:.1f}px;'
+            f'font-weight:700;pointer-events:none;">{_esc(text)}</text>'
         )
-    }
-    board_id_by_floor: dict[str, str] = {}
-    for sb in building.sub_boards:
-        board_mm_by_id[sb.board_id] = (sb.location_mm.x_mm, sb.location_mm.y_mm)
-        board_id_by_floor[sb.floor] = sb.board_id
+        return fx, fy
 
-    parts: list[str] = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        (
-            f'<svg xmlns="http://www.w3.org/2000/svg" class="cy-plan" '
-            f'viewBox="0 0 {svg_w} {svg_h}" width="{svg_w}" height="{svg_h}" '
-            f'data-minx="{minx:.2f}" data-maxy="{maxy:.2f}" '
-            f'data-scale="{scale:.6f}" data-pad-left="{pad_left:.2f}" '
-            f'data-pad-top="{pad_top:.2f}">'
-        ),
-        "  <style>",
-        (
-            '    .cy-plan text { font-family: "DejaVu Sans", "Noto Sans", Arial, sans-serif; '
-            "fill: #1a202c; }"
-        ),
-        "    .cy-plan .fp-title { font-size: 13.5px; font-weight: 700; fill: #0f2942; }",
-        "    .cy-plan .fp-sub { font-size: 9.8px; fill: #475569; }",
-        "    .cy-plan .room-poly { cursor: pointer; transition: fill-opacity 0.12s; }",
-        "    .cy-plan .room-poly:hover { stroke: #1b365d; stroke-width: 2; }",
-        (
-            "    .cy-plan .room-lbl { font-weight: 600; fill: #334155; pointer-events: none; "
-            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.2px; stroke-linejoin: round; }"
-        ),
-        (
-            "    .cy-plan .room-area { font-size: 7.2px; fill: #64748b; pointer-events: none; "
-            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.0px; stroke-linejoin: round; }"
-        ),
-        (
-            "    .cy-plan .dev-tag { font-size: 6.6px; font-weight: 700; fill: #0f172a; "
-            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.6px; stroke-linejoin: round; }"
-        ),
-        "    .cy-plan .leg-hdr { font-size: 9.6px; font-weight: 700; fill: #0f2942; }",
-        "    .cy-plan .leg-txt { font-size: 8.2px; fill: #1e293b; }",
-        "  </style>",
-        f'  <rect x="0" y="0" width="{svg_w}" height="{svg_h}" fill="#ffffff" />',
-        # Crisp drafting frame border
-        (
-            f'  <rect x="6" y="6" width="{svg_w - 12}" height="{svg_h - 12}" '
-            'fill="none" stroke="#cbd5e1" stroke-width="1.0" />'
-        ),
-    ]
-    for i, t_line in enumerate(title_lines):
-        fs_attr = f' style="font-size:{title_fs:.1f}px;"' if title_fs != 13.5 else ""
-        parts.append(
-            f'  <text x="{pad_left:.0f}" y="{26.0 + i * title_lh:.1f}" class="fp-title"{fs_attr}>'
-            f"{_esc(t_line)}</text>"
-        )
-    for i, s_line in enumerate(sub_lines):
-        parts.append(
-            f'  <text x="{pad_left:.0f}" y="{sub_y0 + i * 12.5:.1f}" class="fp-sub">'
-            f"{_esc(s_line)}</text>"
-        )
 
+def _render_rooms_wet_zones_and_furniture(ctx: _FloorplanCanvas) -> None:
+    """Render Layers 1-3: interactive room polygons, optional lux heatmap, wet zones & fixtures."""
+    building = ctx.result.design.building
+    spatial = ctx.result.spatial
+    discipline = ctx.discipline
+    show_lux_heatmap = ctx.show_lux_heatmap
+    scale = ctx.scale
+    tx = ctx.tx
+    ty = ctx.ty
+    poly_points = ctx.poly_points
+    parts = ctx.parts
     # 1. Room fills (interactive polygons for Pass-2 visual room override)
     for room in building.rooms:
         fill = "#f1f5f9" if room.is_wet_room else ("#f0fdf4" if room.is_outdoor else "#fafbfc")
@@ -443,8 +388,6 @@ def render_floorplan_svg(
     # 1b. Optional 2D Working-Plane Photometric Lux Heatmap Overlay (E-101)
     if show_lux_heatmap and discipline in ("lighting", "combined"):
         try:
-            from cyelec.solver.photometrics import render_lux_heatmap_svg_group
-
             hm_svg = render_lux_heatmap_svg_group(
                 building,
                 spatial.devices,
@@ -455,7 +398,7 @@ def render_floorplan_svg(
             if hm_svg:
                 parts.append(hm_svg)
         except Exception:
-            pass
+            _logger.debug("Skipping photometric lux heatmap overlay on error.", exc_info=True)
 
     # 2. BS 7671 Section 701 Wet Zones (Power & Combined sheets)
     if discipline in ("combined", "power"):
@@ -495,6 +438,15 @@ def render_floorplan_svg(
                     'stroke-width="0.85" stroke-dasharray="3,2" style="pointer-events:none;" />'
                 )
 
+
+
+def _render_walls_windows_and_doors(ctx: _FloorplanCanvas) -> None:
+    """Render Layer 4: double-line masonry walls, glazed windows, and door swing arcs."""
+    building = ctx.result.design.building
+    scale = ctx.scale
+    tx = ctx.tx
+    ty = ctx.ty
+    parts = ctx.parts
     # 4. AutoCAD-Style Double-Line Masonry Walls, Glazed Windows, and Quarter-Circle Door Swings
     ext_thick_px = max(4.4, min(11.0, 200.0 * scale))
     int_thick_px = max(2.4, min(6.5, 100.0 * scale))
@@ -562,6 +514,23 @@ def render_floorplan_svg(
             'stroke-dasharray="3,2" style="pointer-events:none;" />'
         )
 
+
+
+def _render_conduits_and_wiring(
+    ctx: _FloorplanCanvas,
+    active_devices: list[PlacedDevice],
+    room_floor: dict[str, str],
+    board_mm_by_id: dict[str, tuple[float, float]],
+    board_id_by_floor: dict[str, str],
+) -> None:
+    """Render Layer 5: discipline home-run arrows, switch wiring arcs & loop conduits."""
+    result = ctx.result
+    building = result.design.building
+    spatial = result.spatial
+    discipline = ctx.discipline
+    tx = ctx.tx
+    ty = ctx.ty
+    parts = ctx.parts
     # 5. Conduit / Circuit Representation (strictly grouped PER FLOOR so zero arcs jump floor gaps)
     cat_map = {c.spec.circuit_id: c.spec.category for c in result.design.circuits}
     board_map = {c.spec.circuit_id: c.spec.board_id for c in result.design.circuits}
@@ -569,7 +538,7 @@ def render_floorplan_svg(
         bid: (tx(bx_mm), ty(by_mm)) for bid, (bx_mm, by_mm) in board_mm_by_id.items()
     }
     use_homerun = result.design.residential_brief.conduit_drafting_style == "homerun_arcs"
-    deferred_tags: list[tuple[float, float, str, str]] = []  # (x, y, text, color_or_empty)
+    deferred_tags = ctx.deferred_tags
 
     if discipline == "elv":
         smoke_by_flr: dict[str, list[PlacedDevice]] = {}
@@ -584,7 +553,7 @@ def render_floorplan_svg(
                 board_mm_by_id[building.db_anchor.id],
             )
             chain = _chain_nearest_neighbor(flr_smokes, start_mm)
-            for a_d, b_d in zip(chain, chain[1:], strict=False):
+            for a_d, b_d in itertools.pairwise(chain):
                 if (
                     math.hypot(
                         b_d.location_mm.x_mm - a_d.location_mm.x_mm,
@@ -617,7 +586,7 @@ def render_floorplan_svg(
                 board_mm_by_id[building.db_anchor.id],
             )
             chain = _chain_nearest_neighbor(flr_knx, start_mm)
-            for a_d, b_d in zip(chain, chain[1:], strict=False):
+            for a_d, b_d in itertools.pairwise(chain):
                 if (
                     math.hypot(
                         b_d.location_mm.x_mm - a_d.location_mm.x_mm,
@@ -732,7 +701,7 @@ def render_floorplan_svg(
                 deferred_tags.append((hx, hy, f"{cid}→DB", c_stroke))
 
             if not is_ext:
-                for idx, (a_d, b_d) in enumerate(zip(ordered, ordered[1:], strict=False)):
+                for idx, (a_d, b_d) in enumerate(itertools.pairwise(ordered)):
                     d_mm = math.hypot(
                         b_d.location_mm.x_mm - a_d.location_mm.x_mm,
                         b_d.location_mm.y_mm - a_d.location_mm.y_mm,
@@ -827,7 +796,7 @@ def render_floorplan_svg(
                 if grp_key not in chained_groups_done:
                     chained_groups_done.add(grp_key)
                     for idx_c, (a_d, b_d) in enumerate(
-                        zip(ordered_t, ordered_t[1:], strict=False)
+                        itertools.pairwise(ordered_t)
                     ):
                         ax, ay = tx(a_d.location_mm.x_mm), ty(a_d.location_mm.y_mm)
                         bx, by = tx(b_d.location_mm.x_mm), ty(b_d.location_mm.y_mm)
@@ -846,77 +815,16 @@ def render_floorplan_svg(
                             'style="pointer-events:none;" />'
                         )
 
-    # 6. Helper to safely place any text-bearing badge with zero overlap against prior texts
-    def _find_free_badge_center(
-        bx: float,
-        by: float,
-        w: float,
-        h: float,
-    ) -> tuple[float, float, bool]:
-        min_x, min_y, max_x, max_y = canvas_bounds
 
-        def _box_at(px: float, py: float) -> tuple[float, float, float, float]:
-            return (px - w * 0.5 - 1.2, py - h * 0.5 - 1.2, px + w * 0.5 + 1.2, py + h * 0.5 + 1.2)
 
-        def _is_clear(px: float, py: float) -> bool:
-            if px - w * 0.5 < min_x or px + w * 0.5 > max_x:
-                return False
-            if py - h * 0.5 < min_y or py + h * 0.5 > max_y:
-                return False
-            box = _box_at(px, py)
-            return not layout.has_text_collision(box, pad=1.2)
-
-        if _is_clear(bx, by):
-            return bx, by, False
-        for r in (12.0, 20.0, 30.0, 42.0, 56.0, 72.0):
-            for ang in (0.0, 180.0, -90.0, 90.0, -45.0, 45.0, -135.0, 135.0):
-                ra = math.radians(ang)
-                cx = bx + r * math.cos(ra)
-                cy = by + r * math.sin(ra)
-                if _is_clear(cx, cy):
-                    return cx, cy, True
-        return bx, by, False
-
-    def _badge(
-        bx: float,
-        by: float,
-        text: str,
-        *,
-        fill: str,
-        stroke: str,
-        fg: str,
-        w: float = 18.0,
-        h: float = 10.5,
-        anchor: str | None = None,
-        font_px: float = 5.8,
-    ) -> tuple[float, float]:
-        est_w, _ = estimate_text_size(text, font_px, bold=True)
-        eff_w = max(w, est_w + 5.0)
-        eff_h = max(h, font_px * 1.55)
-        fx, fy, shifted = _find_free_badge_center(bx, by, eff_w, eff_h)
-        layout.register_badge(fx, fy, eff_w, eff_h)
-        if shifted:
-            parts.append(
-                f'  <line x1="{bx:.1f}" y1="{by:.1f}" x2="{fx:.1f}" y2="{fy:.1f}" '
-                'stroke="#64748b" stroke-width="0.7" style="pointer-events:none;" />'
-            )
-            parts.append(
-                f'  <circle cx="{bx:.1f}" cy="{by:.1f}" r="1.8" fill="{stroke}" '
-                'style="pointer-events:none;" />'
-            )
-        a_attr = f' data-anchor="{anchor}"' if anchor else ""
-        parts.append(
-            f'  <rect{a_attr} x="{fx - eff_w / 2:.1f}" y="{fy - eff_h / 2:.1f}" '
-            f'width="{eff_w:.1f}" height="{eff_h:.1f}" fill="{fill}" stroke="{stroke}" '
-            'stroke-width="1.35" rx="2" />'
-        )
-        parts.append(
-            f'  <text x="{fx:.1f}" y="{fy + font_px * 0.36:.1f}" text-anchor="middle" '
-            f'class="badge-txt" style="fill:{fg};font-size:{font_px:.1f}px;'
-            f'font-weight:700;pointer-events:none;">{_esc(text)}</text>'
-        )
-        return fx, fy
-
+def _render_db_and_subboard_badges(ctx: _FloorplanCanvas) -> None:
+    """Render Layer 7: Main DB / MDB and secondary sub-board clickable badges."""
+    building = ctx.result.design.building
+    layout = ctx.layout
+    tx = ctx.tx
+    ty = ctx.ty
+    _find_free_badge_center = ctx.find_free_badge_center
+    parts = ctx.parts
     # 7. Distribution Board Anchor (DB1 / MDB) & Sub-Boards
     dbx = tx(building.db_anchor.location_mm.x_mm)
     dby = ty(building.db_anchor.location_mm.y_mm)
@@ -963,6 +871,21 @@ def render_floorplan_svg(
             ]
         )
 
+
+
+def _render_placed_devices_and_tags(
+    ctx: _FloorplanCanvas,
+    active_devices: list[PlacedDevice],
+) -> None:
+    """Render Layer 8: IEC 60617 / Cyprus device symbols, room labels & de-collided circuit tags."""
+    building = ctx.result.design.building
+    discipline = ctx.discipline
+    layout = ctx.layout
+    tx = ctx.tx
+    ty = ctx.ty
+    _badge = ctx.badge
+    parts = ctx.parts
+    deferred_tags = ctx.deferred_tags
     # 8. Placed Electrical Devices (Authentic IEC 60617 / Cyprus Symbols)
     for dev in active_devices:
         dx = tx(dev.location_mm.x_mm)
@@ -1239,6 +1162,17 @@ def render_floorplan_svg(
             f'class="dev-tag"{style_attr}>{_esc(t_str)}</text>'
         )
 
+
+
+def _render_legend_sidebar(ctx: _FloorplanCanvas) -> None:
+    """Render Layer 9: discipline symbol legend, mounting heights & photometric lux scale."""
+    eac = ctx.result.design.eac_compliance
+    discipline = ctx.discipline
+    show_lux_heatmap = ctx.show_lux_heatmap
+    pad_left = ctx.pad_left
+    pad_top = ctx.pad_top
+    draw_w = ctx.draw_w
+    parts = ctx.parts
     # 9. Legend + Standard Mounting Heights Sidebar
     lx = pad_left + draw_w + 22.0
     ly = pad_top
@@ -1370,6 +1304,190 @@ def render_floorplan_svg(
                 f'  <text x="{lx + 168:.0f}" y="{hy + 45:.0f}" class="leg-txt">500+ lx</text>',
             ]
         )
+
+
+
+def render_floorplan_svg(
+    result: Phase2DesignResult,
+    *,
+    discipline: SvgDiscipline = "combined",
+    show_lux_heatmap: bool = False,
+) -> str:
+    """Render AutoCAD-grade architectural floorplan + discipline electrical overlay as SVG."""
+    building = result.design.building
+    spatial = result.spatial
+    eac = result.design.eac_compliance
+
+    all_pts = [p for r in building.rooms for p in r.polygon_mm]
+    if not all_pts:
+        return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200"></svg>'
+
+    minx = min(p.x_mm for p in all_pts)
+    maxx = max(p.x_mm for p in all_pts)
+    miny = min(p.y_mm for p in all_pts)
+    maxy = max(p.y_mm for p in all_pts)
+
+    if discipline == "lighting":
+        active_devices = [d for d in spatial.devices if d.device_type in _LIGHTING_TYPES]
+    elif discipline == "power":
+        active_devices = [d for d in spatial.devices if d.device_type in _POWER_TYPES]
+    elif discipline == "elv":
+        active_devices = [d for d in spatial.devices if d.device_type in _ELV_TYPES]
+    else:
+        active_devices = [
+            d for d in spatial.devices if d.device_type in (_LIGHTING_TYPES | _POWER_TYPES)
+        ]
+
+    # Expand bounds so exterior devices (Meter, Earth Pit, CCTV, Gate, EV, Pool) fit cleanly
+    for dev in active_devices:
+        minx = min(minx, dev.location_mm.x_mm - 350.0)
+        maxx = max(maxx, dev.location_mm.x_mm + 350.0)
+        miny = min(miny, dev.location_mm.y_mm - 350.0)
+        maxy = max(maxy, dev.location_mm.y_mm + 350.0)
+
+    span_x = max(1000.0, maxx - minx)
+    span_y = max(1000.0, maxy - miny)
+
+    # Map architectural mm -> SVG pixels (flipping Y axis so north is up)
+    pad_left = 60.0
+    pad_right = 258.0  # Legend + Mounting Heights sidebar
+    pad_bottom = 52.0
+    draw_w = 900.0
+    svg_w = math.ceil(pad_left + draw_w + pad_right)
+
+    sheet_title = (
+        "E-101 LIGHTING, PHOTOMETRICS & SWITCHING LAYOUT"
+        if discipline == "lighting"
+        else (
+            "E-102 POWER, SOCKETS & MECHANICAL PLANT LAYOUT"
+            if discipline == "power"
+            else (
+                "E-103 ELV, SECURITY, INTERCOM & LIFE SAFETY LAYOUT"
+                if discipline == "elv"
+                else "E-100 COMBINED LV ELECTRICAL LAYOUT (COORDINATION)"
+            )
+        )
+    )
+    # Full-length title band: wrap (never truncate) the title + project name and subtitle.
+    title_max_w = svg_w - pad_left - 24.0
+    title_lines, title_fs = fit_text_lines(
+        f"{sheet_title} — {building.project_name}",
+        title_max_w,
+        13.5,
+        max_lines=2,
+        min_font_px=11.0,
+        bold=True,
+    )
+    sub_txt = (
+        f"Area: {building.total_floor_area_m2:.1f} m² | "
+        f"Profile: {eac.eac_profile.value} "
+        f"(Bath excl: {eac.bathroom_socket_exclusion_m:.1f} m) | "
+        f"Points: {len(active_devices)} | "
+        f"Total Conduit: {spatial.total_conduit_m:.1f} m"
+    )
+    sub_lines = wrap_text_to_width(sub_txt, title_max_w, 9.8)
+    title_lh = title_fs * 1.2
+    sub_y0 = 26.0 + (len(title_lines) - 1) * title_lh + 16.0
+    hdr_extra = (len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * 12.5
+    pad_top = 64.0 + math.ceil(hdr_extra)
+
+    scale = draw_w / span_x
+    draw_h = max(480.0, span_y * scale)
+    svg_h = math.ceil(pad_top + draw_h + pad_bottom)
+
+    # Layout engine strictly bounded to the drawing canvas (excluding title band & legend sidebar)
+    canvas_bounds = (
+        10.0,
+        pad_top - 10.0,
+        pad_left + draw_w + 8.0,
+        svg_h - 10.0,
+    )
+    layout = LabelLayoutEngine(canvas_bounds)
+
+    room_floor: dict[str, str] = {r.id: r.floor for r in building.rooms}
+    board_mm_by_id: dict[str, tuple[float, float]] = {
+        building.db_anchor.id: (
+            building.db_anchor.location_mm.x_mm,
+            building.db_anchor.location_mm.y_mm,
+        )
+    }
+    board_id_by_floor: dict[str, str] = {}
+    for sb in building.sub_boards:
+        board_mm_by_id[sb.board_id] = (sb.location_mm.x_mm, sb.location_mm.y_mm)
+        board_id_by_floor[sb.floor] = sb.board_id
+
+    parts: list[str] = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" class="cy-plan" '
+            f'viewBox="0 0 {svg_w} {svg_h}" width="{svg_w}" height="{svg_h}" '
+            f'data-minx="{minx:.2f}" data-maxy="{maxy:.2f}" '
+            f'data-scale="{scale:.6f}" data-pad-left="{pad_left:.2f}" '
+            f'data-pad-top="{pad_top:.2f}">'
+        ),
+        "  <style>",
+        (
+            '    .cy-plan text { font-family: "DejaVu Sans", "Noto Sans", Arial, sans-serif; '
+            "fill: #1a202c; }"
+        ),
+        "    .cy-plan .fp-title { font-size: 13.5px; font-weight: 700; fill: #0f2942; }",
+        "    .cy-plan .fp-sub { font-size: 9.8px; fill: #475569; }",
+        "    .cy-plan .room-poly { cursor: pointer; transition: fill-opacity 0.12s; }",
+        "    .cy-plan .room-poly:hover { stroke: #1b365d; stroke-width: 2; }",
+        (
+            "    .cy-plan .room-lbl { font-weight: 600; fill: #334155; pointer-events: none; "
+            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.2px; stroke-linejoin: round; }"
+        ),
+        (
+            "    .cy-plan .room-area { font-size: 7.2px; fill: #64748b; pointer-events: none; "
+            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.0px; stroke-linejoin: round; }"
+        ),
+        (
+            "    .cy-plan .dev-tag { font-size: 6.6px; font-weight: 700; fill: #0f172a; "
+            "paint-order: stroke; stroke: #ffffff; stroke-width: 2.6px; stroke-linejoin: round; }"
+        ),
+        "    .cy-plan .leg-hdr { font-size: 9.6px; font-weight: 700; fill: #0f2942; }",
+        "    .cy-plan .leg-txt { font-size: 8.2px; fill: #1e293b; }",
+        "  </style>",
+        f'  <rect x="0" y="0" width="{svg_w}" height="{svg_h}" fill="#ffffff" />',
+        # Crisp drafting frame border
+        (
+            f'  <rect x="6" y="6" width="{svg_w - 12}" height="{svg_h - 12}" '
+            'fill="none" stroke="#cbd5e1" stroke-width="1.0" />'
+        ),
+    ]
+    for i, t_line in enumerate(title_lines):
+        fs_attr = f' style="font-size:{title_fs:.1f}px;"' if title_fs != 13.5 else ""
+        parts.append(
+            f'  <text x="{pad_left:.0f}" y="{26.0 + i * title_lh:.1f}" class="fp-title"{fs_attr}>'
+            f"{_esc(t_line)}</text>"
+        )
+    for i, s_line in enumerate(sub_lines):
+        parts.append(
+            f'  <text x="{pad_left:.0f}" y="{sub_y0 + i * 12.5:.1f}" class="fp-sub">'
+            f"{_esc(s_line)}</text>"
+        )
+
+    ctx = _FloorplanCanvas(
+        result=result,
+        discipline=discipline,
+        show_lux_heatmap=show_lux_heatmap,
+        scale=scale,
+        minx=minx,
+        maxy=maxy,
+        pad_left=pad_left,
+        pad_top=pad_top,
+        draw_w=draw_w,
+        canvas_bounds=canvas_bounds,
+        layout=layout,
+        parts=parts,
+    )
+    _render_rooms_wet_zones_and_furniture(ctx)
+    _render_walls_windows_and_doors(ctx)
+    _render_conduits_and_wiring(ctx, active_devices, room_floor, board_mm_by_id, board_id_by_floor)
+    _render_db_and_subboard_badges(ctx)
+    _render_placed_devices_and_tags(ctx, active_devices)
+    _render_legend_sidebar(ctx)
 
     parts.append("</svg>")
     # Labels last: no wire, symbol, heatmap cell or fill can ever be painted over text.

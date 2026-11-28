@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
+import logging
 import math
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
+from ezdxf.document import Drawing
 from ezdxf.entities.dxfgfx import DXFGraphic
 from ezdxf.entities.insert import Insert
 from ezdxf.entities.lwpolyline import LWPolyline
@@ -52,6 +55,8 @@ from cyelec.models.building import (
 )
 from cyelec.models.electrical import ReviewFlag, ReviewSeverity
 from cyelec.standards_loader import StandardsBundle, load_standards, normalize_label
+
+_logger = logging.getLogger(__name__)
 
 _FurnitureKind = Literal[
     "bed",
@@ -179,6 +184,7 @@ def _iter_resolved_entities(
             try:
                 virtual = list(ent.virtual_entities())
             except Exception:
+                _logger.debug("Skipping non-explodable DXF INSERT block '%s'.", bname)
                 continue
             yield from _iter_resolved_entities(
                 virtual,
@@ -570,70 +576,34 @@ def _polygonize_rooms_from_walls(
     return filtered
 
 
-def ingest_dxf(
-    dxf_path: Path,
-    *,
-    standards: StandardsBundle | None = None,
-    standards_dir: Path | None = None,
-    project_name: str | None = None,
-    building_type: BuildingType | None = None,
-    pv_capacity_kva: float = 0.0,
-    tier2_fallback: RoomClassifierFallback | None = None,
-    layer_mapping: DxfLayerMapping | None = None,
-    auto_split_multi_plan: bool = True,
-) -> tuple[BuildingModel, list[ReviewFlag]]:
-    """Ingest a DXF floorplan into a validated BuildingModel plus ingestion ReviewFlags."""
-    if not dxf_path.is_file():
-        raise FileNotFoundError(f"DXF file not found: {dxf_path}")
+@dataclass
+class _DxfScanResult:
+    """Extracted metric-scaled CAD primitives from the initial DXF modelspace pass."""
 
-    std = standards or load_standards(standards_dir)
-    sha256 = hashlib.sha256(dxf_path.read_bytes()).hexdigest()
-    doc = read_dxf(str(dxf_path))
+    scale: float
+    room_raw_polys: list[Polygon]
+    text_labels: list[tuple[str, Point, str]]
+    leader_arrows: list[tuple[Point, Point]]
+    fixture_polys: list[tuple[Polygon, str | None]]
+    fixture_texts: list[tuple[str, Point]]
+    furniture_polys: list[tuple[Polygon, _FurnitureKind]]
+    wall_lines: list[tuple[Point2D, Point2D]]
+    layer0_lines: list[tuple[Point2D, Point2D]]
+    door_arcs: list[tuple[Point2D, float, float, float]]
+    fallback_door_arcs: list[tuple[Point2D, float, float, float]]
+    door_leaves: list[tuple[Point2D, Point2D]]
+    window_lines: list[tuple[Point2D, Point2D]]
+    db_points: list[tuple[str, Point2D]]
 
-    flags: list[ReviewFlag] = []
-    auditor = doc.audit()
-    if auditor.errors:
-        flags.append(
-            ReviewFlag(
-                code="DXF_AUDIT_ERRORS",
-                severity=ReviewSeverity.WARNING,
-                category="geometry",
-                message=(
-                    f"Input DXF '{dxf_path.name}' reported {len(auditor.errors)} ezdxf audit "
-                    "issue(s); geometry verified best-effort."
-                ),
-            )
-        )
 
-    # Detect unresolved external XREF attachments common in Cyprus architect DWGs
-    xref_names = sorted(
-        blk.name
-        for blk in doc.blocks
-        if blk.block is not None
-        and (
-            getattr(blk.block, "is_xref", False)
-            or getattr(blk.block, "is_xref_overlay", False)
-            or bool(str(blk.block.dxf.get("xref_path", "")).strip())
-        )
-    )
-    if xref_names:
-        flags.append(
-            ReviewFlag(
-                code="DXF_UNRESOLVED_XREFS",
-                severity=ReviewSeverity.WARNING,
-                category="geometry",
-                message=(
-                    f"Input CAD references {len(xref_names)} external XREF block(s) "
-                    f"({', '.join(xref_names[:5])}). Bind XREFs in AutoCAD (XREF -> Bind -> "
-                    "Insert) if architectural walls, grids, or sanitary fixtures are missing."
-                ),
-                requires_etek_signoff=True,
-            )
-        )
-
+def _scan_dxf_entities(
+    doc: Drawing,
+    resolved_entities: list[tuple[DXFGraphic, str, str | None]],
+    layer_mapping: DxfLayerMapping | None,
+    flags: list[ReviewFlag],
+) -> _DxfScanResult:
+    """Pass 1: infer metric scale and extract rooms, walls, openings, fixtures & annotations."""
     msp = doc.modelspace()
-    resolved_entities = list(_iter_resolved_entities(list(msp)))
-
     # First pass: compute raw coordinate span & door arc radii for unit/scale sanity checks
     xs: list[float] = []
     ys: list[float] = []
@@ -769,7 +739,7 @@ def ingest_dxf(
                 )
             elif isinstance(ent, LWPolyline):
                 pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
-                for a, b in zip(pts, pts[1:], strict=False):
+                for a, b in itertools.pairwise(pts):
                     wall_lines.append(
                         (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
                     )
@@ -782,7 +752,7 @@ def ingest_dxf(
                     )
             elif isinstance(ent, Spline):
                 s_pts = _flatten_spline_xy(ent, scale)
-                for a, b in zip(s_pts, s_pts[1:], strict=False):
+                for a, b in itertools.pairwise(s_pts):
                     wall_lines.append(
                         (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
                     )
@@ -915,7 +885,7 @@ def ingest_dxf(
                 _maybe_record_fallback_door_arc(ent)
             elif isinstance(ent, LWPolyline):
                 pts = [(float(x) * scale, float(y) * scale) for x, y in ent.get_points("xy")]
-                for a, b in zip(pts, pts[1:], strict=False):
+                for a, b in itertools.pairwise(pts):
                     layer0_lines.append(
                         (Point2D(x_mm=a[0], y_mm=a[1]), Point2D(x_mm=b[0], y_mm=b[1]))
                     )
@@ -969,6 +939,41 @@ def ingest_dxf(
                     furniture_polys.append((fpoly, fk))
                     break
 
+    return _DxfScanResult(
+        scale=scale,
+        room_raw_polys=room_raw_polys,
+        text_labels=text_labels,
+        leader_arrows=leader_arrows,
+        fixture_polys=fixture_polys,
+        fixture_texts=fixture_texts,
+        furniture_polys=furniture_polys,
+        wall_lines=wall_lines,
+        layer0_lines=layer0_lines,
+        door_arcs=door_arcs,
+        fallback_door_arcs=fallback_door_arcs,
+        door_leaves=door_leaves,
+        window_lines=window_lines,
+        db_points=db_points,
+    )
+
+
+def _build_and_classify_rooms(
+    scan: _DxfScanResult,
+    dxf_path: Path,
+    std: StandardsBundle,
+    tier2_fallback: RoomClassifierFallback | None,
+    flags: list[ReviewFlag],
+) -> tuple[list[Room], list[tuple[str, Polygon]], dict[str, list[ReviewFlag]]]:
+    """Pass 2: polygonize walls if needed, filter outer shells & classify room labels."""
+    room_raw_polys = scan.room_raw_polys
+    wall_lines = scan.wall_lines
+    layer0_lines = scan.layer0_lines
+    door_arcs = scan.door_arcs
+    fallback_door_arcs = scan.fallback_door_arcs
+    door_leaves = scan.door_leaves
+    window_lines = scan.window_lines
+    text_labels = scan.text_labels
+    leader_arrows = scan.leader_arrows
     # Fallback: drawings with walls drawn purely on layer "0" (legacy homeowner/AutoCAD plans)
     if not room_raw_polys and not wall_lines and layer0_lines:
         if len(layer0_lines) >= 80:
@@ -1313,69 +1318,23 @@ def ingest_dxf(
             "A-WALL, A-ROOM, A-DOOR) or supply DxfLayerMapping."
         )
 
-    # Automatic side-by-side / stacked multi-plan cluster splitting & non-floor sheet exclusion
-    sub_boards: list[SubBoardSpec] = []
-    auto_split_db_anchor: DistributionBoardAnchor | None = None
-    excluded_room_ids: set[str] = set()
-    room_id_remap: dict[str, str] = {r.id: r.id for r in rooms}
-    did_auto_split_floors = False
+    scan.room_raw_polys = room_raw_polys
+    scan.wall_lines = wall_lines
+    scan.door_arcs = door_arcs
+    return rooms, room_poly_pairs, room_flags_by_id
 
-    if auto_split_multi_plan:
-        split_res = split_side_by_side_plans(
-            rooms=rooms,
-            room_poly_pairs=room_poly_pairs,
-            text_labels=text_labels,
-            db_points=db_points,
-        )
-        rooms = split_res.rooms
-        room_poly_pairs = split_res.room_poly_pairs
-        room_raw_polys = [poly for _rid, poly in room_poly_pairs]
-        sub_boards = split_res.sub_boards
-        auto_split_db_anchor = split_res.db_anchor
-        excluded_room_ids = split_res.excluded_room_ids
-        room_id_remap = split_res.room_id_remap
-        did_auto_split_floors = split_res.did_split_floors
 
-        if split_res.did_exclude_non_floor and room_raw_polys:
-            retained_union = unary_union(room_raw_polys)
-            wall_lines = [
-                (p0, p1)
-                for p0, p1 in wall_lines
-                if retained_union.distance(
-                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
-                )
-                <= 1000.0
-            ]
-            door_arcs = [
-                arc
-                for arc in door_arcs
-                if retained_union.distance(Point(arc[0].x_mm, arc[0].y_mm)) <= 1000.0
-            ]
-            window_lines = [
-                (p0, p1)
-                for p0, p1 in window_lines
-                if retained_union.distance(
-                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
-                )
-                <= 1000.0
-            ]
-
-    for old_rid, r_flags in room_flags_by_id.items():
-        if old_rid in excluded_room_ids:
-            continue
-        new_rid = room_id_remap.get(old_rid, old_rid)
-        for rf in r_flags:
-            if new_rid != old_rid and f"Room {old_rid} " in rf.message:
-                updated_msg = rf.message.replace(f"Room {old_rid} ", f"Room {new_rid} ")
-                flags.append(rf.model_copy(update={"message": updated_msg}))
-            else:
-                flags.append(rf)
-
-    if auto_split_multi_plan:
-        flags.extend(split_res.flags)
-
-    rooms_by_id = {r.id: r for r in rooms}
-
+def _attach_fixtures_and_furniture(
+    scan: _DxfScanResult,
+    rooms: list[Room],
+    rooms_by_id: dict[str, Room],
+    room_poly_pairs: list[tuple[str, Polygon]],
+    flags: list[ReviewFlag],
+) -> None:
+    """Pass 3: attach sanitary fixtures (with wet-room life-safety promotion) and furniture."""
+    fixture_polys = scan.fixture_polys
+    fixture_texts = scan.fixture_texts
+    furniture_polys = scan.furniture_polys
     # Attach plumbing fixtures (using block-name hint or nearby text label)
     for f_idx, (fpoly, f_hint) in enumerate(fixture_polys, start=1):
         target_rid = _find_containing_room(
@@ -1424,7 +1383,7 @@ def ingest_dxf(
                 room_obj.normalized_type = promoted_type
                 room_obj.is_wet_room = True
                 room_obj.raw_label = promoted_lbl
-                flags = [
+                flags[:] = [
                     f
                     for f in flags
                     if not (
@@ -1469,6 +1428,27 @@ def ingest_dxf(
             )
         )
 
+
+
+def _build_walls_openings_and_db(
+    scan: _DxfScanResult,
+    rooms: list[Room],
+    room_poly_pairs: list[tuple[str, Polygon]],
+    auto_split_db_anchor: DistributionBoardAnchor | None,
+    flags: list[ReviewFlag],
+) -> tuple[
+    list[WallSegment],
+    list[DoorOpening],
+    list[WindowOpening],
+    DistributionBoardAnchor,
+]:
+    """Pass 4: build exterior/interior walls, doors, windows & resolve/infer DB1 anchor."""
+    room_raw_polys = scan.room_raw_polys
+    wall_lines = scan.wall_lines
+    door_arcs = scan.door_arcs
+    door_leaves = scan.door_leaves
+    window_lines = scan.window_lines
+    db_points = scan.db_points
     # Build WallSegments (exact exterior perimeter via room-union boundary)
     outer_ring = unary_union(room_raw_polys).boundary
 
@@ -1547,7 +1527,7 @@ def ingest_dxf(
             if touching_doors >= 3:
                 room_obj.normalized_type = RoomType.CORRIDOR
                 room_obj.raw_label = "Corridor / Hall (inferred)"
-                flags = [
+                flags[:] = [
                     f
                     for f in flags
                     if not (
@@ -1632,6 +1612,155 @@ def ingest_dxf(
             )
         )
 
+    return walls, doors, windows, db_anchor
+
+
+def ingest_dxf(
+    dxf_path: Path,
+    *,
+    standards: StandardsBundle | None = None,
+    standards_dir: Path | None = None,
+    project_name: str | None = None,
+    building_type: BuildingType | None = None,
+    pv_capacity_kva: float = 0.0,
+    tier2_fallback: RoomClassifierFallback | None = None,
+    layer_mapping: DxfLayerMapping | None = None,
+    auto_split_multi_plan: bool = True,
+) -> tuple[BuildingModel, list[ReviewFlag]]:
+    """Ingest a DXF floorplan into a validated BuildingModel plus ingestion ReviewFlags."""
+    if not dxf_path.is_file():
+        raise FileNotFoundError(f"DXF file not found: {dxf_path}")
+
+    std = standards or load_standards(standards_dir)
+    sha256 = hashlib.sha256(dxf_path.read_bytes()).hexdigest()
+    doc = read_dxf(str(dxf_path))
+
+    flags: list[ReviewFlag] = []
+    auditor = doc.audit()
+    if auditor.errors:
+        flags.append(
+            ReviewFlag(
+                code="DXF_AUDIT_ERRORS",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"Input DXF '{dxf_path.name}' reported {len(auditor.errors)} ezdxf audit "
+                    "issue(s); geometry verified best-effort."
+                ),
+            )
+        )
+
+    # Detect unresolved external XREF attachments common in Cyprus architect DWGs
+    xref_names = sorted(
+        blk.name
+        for blk in doc.blocks
+        if blk.block is not None
+        and (
+            getattr(blk.block, "is_xref", False)
+            or getattr(blk.block, "is_xref_overlay", False)
+            or bool(str(blk.block.dxf.get("xref_path", "")).strip())
+        )
+    )
+    if xref_names:
+        flags.append(
+            ReviewFlag(
+                code="DXF_UNRESOLVED_XREFS",
+                severity=ReviewSeverity.WARNING,
+                category="geometry",
+                message=(
+                    f"Input CAD references {len(xref_names)} external XREF block(s) "
+                    f"({', '.join(xref_names[:5])}). Bind XREFs in AutoCAD (XREF -> Bind -> "
+                    "Insert) if architectural walls, grids, or sanitary fixtures are missing."
+                ),
+                requires_etek_signoff=True,
+            )
+        )
+
+    msp = doc.modelspace()
+    resolved_entities = list(_iter_resolved_entities(list(msp)))
+
+    scan = _scan_dxf_entities(doc, resolved_entities, layer_mapping, flags)
+    scale = scan.scale
+    rooms, room_poly_pairs, room_flags_by_id = _build_and_classify_rooms(
+        scan, dxf_path, std, tier2_fallback, flags
+    )
+    room_raw_polys = scan.room_raw_polys
+    text_labels = scan.text_labels
+    db_points = scan.db_points
+    door_arcs = scan.door_arcs
+    wall_lines = scan.wall_lines
+    window_lines = scan.window_lines
+    # Automatic side-by-side / stacked multi-plan cluster splitting & non-floor sheet exclusion
+    sub_boards: list[SubBoardSpec] = []
+    auto_split_db_anchor: DistributionBoardAnchor | None = None
+    excluded_room_ids: set[str] = set()
+    room_id_remap: dict[str, str] = {r.id: r.id for r in rooms}
+    did_auto_split_floors = False
+
+    if auto_split_multi_plan:
+        split_res = split_side_by_side_plans(
+            rooms=rooms,
+            room_poly_pairs=room_poly_pairs,
+            text_labels=text_labels,
+            db_points=db_points,
+        )
+        rooms = split_res.rooms
+        room_poly_pairs = split_res.room_poly_pairs
+        room_raw_polys = [poly for _rid, poly in room_poly_pairs]
+        sub_boards = split_res.sub_boards
+        auto_split_db_anchor = split_res.db_anchor
+        excluded_room_ids = split_res.excluded_room_ids
+        room_id_remap = split_res.room_id_remap
+        did_auto_split_floors = split_res.did_split_floors
+
+        if split_res.did_exclude_non_floor and room_raw_polys:
+            retained_union = unary_union(room_raw_polys)
+            wall_lines = [
+                (p0, p1)
+                for p0, p1 in wall_lines
+                if retained_union.distance(
+                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
+                )
+                <= 1000.0
+            ]
+            door_arcs = [
+                arc
+                for arc in door_arcs
+                if retained_union.distance(Point(arc[0].x_mm, arc[0].y_mm)) <= 1000.0
+            ]
+            window_lines = [
+                (p0, p1)
+                for p0, p1 in window_lines
+                if retained_union.distance(
+                    Point((p0.x_mm + p1.x_mm) * 0.5, (p0.y_mm + p1.y_mm) * 0.5)
+                )
+                <= 1000.0
+            ]
+
+    for old_rid, r_flags in room_flags_by_id.items():
+        if old_rid in excluded_room_ids:
+            continue
+        new_rid = room_id_remap.get(old_rid, old_rid)
+        for rf in r_flags:
+            if new_rid != old_rid and f"Room {old_rid} " in rf.message:
+                updated_msg = rf.message.replace(f"Room {old_rid} ", f"Room {new_rid} ")
+                flags.append(rf.model_copy(update={"message": updated_msg}))
+            else:
+                flags.append(rf)
+
+    if auto_split_multi_plan:
+        flags.extend(split_res.flags)
+
+    rooms_by_id = {r.id: r for r in rooms}
+
+    scan.room_raw_polys = room_raw_polys
+    scan.door_arcs = door_arcs
+    scan.wall_lines = wall_lines
+    scan.window_lines = window_lines
+    _attach_fixtures_and_furniture(scan, rooms, rooms_by_id, room_poly_pairs, flags)
+    walls, doors, windows, db_anchor = _build_walls_openings_and_db(
+        scan, rooms, room_poly_pairs, auto_split_db_anchor, flags
+    )
     inferred_type = _infer_building_type(rooms)
     if building_type is not None:
         resolved_type = building_type
@@ -1834,7 +1963,8 @@ def ingest_multi_floor_dxf(
         )
     )
 
-    assert mdb_location is not None
+    if mdb_location is None:
+        raise RuntimeError("Multi-floor ingestion completed without resolving an MDB location.")
     model = BuildingModel(
         project_name=project_name or f"Multi-Floor Building ({floor_list})",
         building_type=resolved_type,

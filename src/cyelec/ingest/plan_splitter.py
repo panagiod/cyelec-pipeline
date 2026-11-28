@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from shapely.geometry import Point, Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from cyelec.ingest.room_classifier import clean_room_label
@@ -203,7 +204,7 @@ class _SpatialCluster:
     room_indices: list[int]
     bounds: tuple[float, float, float, float]  # (minx, miny, maxx, maxy)
     area_m2: float
-    union_geom: Polygon | object
+    union_geom: BaseGeometry
     title: PlanTitleMatch | None = None
 
 
@@ -499,9 +500,9 @@ def _merge_tiny_stray_clusters(
             continue
         best_major = min(
             major_indices,
-            key=lambda m_idx: float(c.union_geom.distance(clusters[m_idx].union_geom)),  # type: ignore[attr-defined]
+            key=lambda m_idx: float(c.union_geom.distance(clusters[m_idx].union_geom)),
         )
-        dist = float(c.union_geom.distance(clusters[best_major].union_geom))  # type: ignore[attr-defined]
+        dist = float(c.union_geom.distance(clusters[best_major].union_geom))
         if dist <= STRAY_FRAGMENT_MERGE_DIST_MM:
             merged_rooms[best_major].extend(c.room_indices)
         else:
@@ -649,7 +650,7 @@ def split_side_by_side_plans(
             ]
             if len(major_untitled) >= 2:
                 areas = [c.area_m2 for c in major_untitled]
-                if min(areas) / max(max(areas), 1e-6) >= UNTITLED_MIN_AREA_RATIO:
+                if min(areas) / max(*areas, 1e-6) >= UNTITLED_MIN_AREA_RATIO:
                     should_split = True
 
     if not should_split:
@@ -693,12 +694,12 @@ def split_side_by_side_plans(
         for mc in minor_kept:
             nearest = min(
                 major_kept,
-                key=lambda target: float(mc.union_geom.distance(target.union_geom)),  # type: ignore[attr-defined]
+                key=lambda target: float(mc.union_geom.distance(target.union_geom)),
             )
             nearest.room_indices.extend(mc.room_indices)
             nearest.room_indices.sort()
             nearest.union_geom = unary_union([polys[i] for i in nearest.room_indices])
-            nearest.bounds = nearest.union_geom.bounds  # type: ignore[attr-defined]
+            nearest.bounds = nearest.union_geom.bounds
             nearest.area_m2 = sum(rooms[i].area_m2 for i in nearest.room_indices)
         kept_clusters = major_kept
 
@@ -738,7 +739,8 @@ def split_side_by_side_plans(
     seen_codes: dict[str, int] = {}
     ordered_entries: list[tuple[float, float, float, str, _SpatialCluster]] = []
     for c in kept_clusters:
-        assert c.title is not None and c.title.floor_code is not None
+        if c.title is None or c.title.floor_code is None:
+            raise RuntimeError("Kept spatial cluster missing resolved floor code.")
         base_code = c.title.floor_code
         cnt = seen_codes.get(base_code, 0) + 1
         seen_codes[base_code] = cnt

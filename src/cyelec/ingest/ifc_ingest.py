@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,6 +22,8 @@ from cyelec.models.building import (
 )
 from cyelec.models.electrical import ReviewFlag, ReviewSeverity
 from cyelec.standards_loader import StandardsBundle, load_standards
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,7 @@ def ingest_ifc(
                 )
             )
         except Exception:
+            _logger.debug("Skipping IFC space with unreadable geometry.", exc_info=True)
             continue
 
     fixtures: list[IfcFixtureRecord] = []
@@ -268,6 +272,7 @@ def ingest_ifc(
                 )
             )
         except Exception:
+            _logger.debug("Skipping IFC sanitary terminal with unreadable geometry.", exc_info=True)
             continue
 
     db_loc: Point2D | None = None

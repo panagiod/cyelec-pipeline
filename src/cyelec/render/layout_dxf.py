@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import logging
 import math
 from collections import defaultdict
 from collections.abc import Sequence
@@ -19,9 +21,11 @@ from ezdxf.lldxf.const import DXFError
 
 from cyelec.models.building import Room
 from cyelec.models.electrical import CircuitCategory
-from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice
+from cyelec.models.spatial import DeviceType, Phase2DesignResult, PlacedDevice, SpatialLayoutResult
 from cyelec.render.text_fit import dxf_char_budget, wrap_text_chars
 from cyelec.synth.sample_plan import render_building_to_dxf
+
+_logger = logging.getLogger(__name__)
 
 LayoutDiscipline = Literal["combined", "lighting", "power", "elv"]
 
@@ -50,6 +54,7 @@ def _clone_underlay_to_r2018(src_doc: Drawing) -> Drawing:
             try:
                 target.layers.add(lname, color=int(getattr(lyr.dxf, "color", 7)))
             except Exception:
+                _logger.debug("Skipping underlay layer '%s' during R2018 clone.", lname)
                 continue
     t_msp = target.modelspace()
     importer = Importer(src_doc, target)
@@ -57,6 +62,7 @@ def _clone_underlay_to_r2018(src_doc: Drawing) -> Drawing:
         try:
             importer.import_entity(ent, t_msp)
         except Exception:
+            _logger.debug("Skipping non-importable underlay entity '%s'.", ent.dxftype())
             continue
     with suppress(Exception):
         importer.finalize()
@@ -249,6 +255,7 @@ def _build_multifloor_underlay_doc(result: Phase2DesignResult) -> Drawing | None
                 try:
                     tmp_blk.add_entity(ent.copy())
                 except Exception:
+                    _logger.debug("Skipping non-copyable underlay entity '%s'.", ent.dxftype())
                     continue
             importer.import_block(blk_name)
             importer.finalize()
@@ -645,93 +652,15 @@ def _add_dashed_curve(
         add_line(pts[k], pts[k + 1], dxfattribs={"layer": layer})
 
 
-def render_electrical_layout_dxf(
-    result: Phase2DesignResult,
-    *,
-    source_dxf_path: Path | None = None,
-    discipline: LayoutDiscipline = "combined",
-    force_clean_r2018: bool = False,
-) -> Drawing:
-    """Overlay IEC 60617 electrical blocks, offset conduits & true-scale ISO sheets onto DXF."""
-    orig_path = _resolve_original_dxf_path(result, source_dxf_path)
-    preserved_underlay = False
-    inv_scale = 1.0
-
-    mf_doc = _build_multifloor_underlay_doc(result) if orig_path is None else None
-    if mf_doc is not None:
-        doc = mf_doc
-        preserved_underlay = True
-        inv_scale = 1.0
-    elif orig_path is not None:
-        try:
-            raw_doc = _read_dxf_safe(orig_path)
-            needs_clone = force_clean_r2018 or (raw_doc.dxfversion != "AC1032")
-            if not needs_clone:
-                try:
-                    needs_clone = len(raw_doc.audit().errors) > 0
-                except Exception:
-                    needs_clone = True
-            doc = _clone_underlay_to_r2018(raw_doc) if needs_clone else raw_doc
-            preserved_underlay = True
-            unit_scale = result.design.building.source_unit_scale_to_mm
-            inv_scale = 1.0 / unit_scale if unit_scale > 0 else 1.0
-        except (OSError, DXFError):
-            doc = render_building_to_dxf(result.design.building)
-    else:
-        doc = render_building_to_dxf(result.design.building)
-
+def _add_dxf_wet_zones(
+    msp: Modelspace,
+    spatial: SpatialLayoutResult,
+    inv_scale: float,
+    discipline: LayoutDiscipline,
+) -> None:
+    """Add BS 7671 Section 701 wet-zone boundary polylines to modelspace."""
     def _s(v_mm: float) -> float:
-        return v_mm * inv_scale
-
-    for layer_name, color_idx in {**ELECTRICAL_LAYERS, **STAGE5_EXTRA_LAYERS}.items():
-        if layer_name not in doc.layers:
-            doc.layers.add(layer_name, color=color_idx)
-
-    _ensure_iec_blocks(doc, inv_scale)
-    msp = doc.modelspace()
-    spatial = result.spatial
-
-    # Mark DB1 / MDB and Sub-DB anchors cleanly with named CYELEC_DB block
-    db_anchor = result.design.building.db_anchor
-    db_anchors = [(db_anchor.id, db_anchor.location_mm)]
-    for sb in result.design.building.sub_boards:
-        db_anchors.append((sb.board_id, sb.location_mm))
-
-    occupied_boxes: list[tuple[float, float, float, float]] = []
-    # Seed occupied_boxes with existing architectural TEXT/MTEXT so E-* labels never overlap them
-    for ent in msp:
-        etype = ent.dxftype()
-        if etype not in ("TEXT", "MTEXT"):
-            continue
-        try:
-            ins = ent.dxf.insert
-            ex, ey = float(ins.x), float(ins.y)
-            if etype == "TEXT":
-                txt = str(ent.dxf.text or "")
-                th = max(float(getattr(ent.dxf, "height", 0.0) or _s(80.0)), _s(40.0))
-            else:
-                txt = str(ent.plain_text() if hasattr(ent, "plain_text") else "")
-                th = max(float(getattr(ent.dxf, "char_height", 0.0) or _s(80.0)), _s(40.0))
-            first_ln = txt.splitlines()[0] if txt else ""
-            if not first_ln:
-                continue
-            tw = max(th * 0.65 * min(len(first_ln), 32), th * 2.0)
-            n_lines = max(1, min(len(txt.splitlines()), 3))
-            pad_a = _s(20.0)
-            occupied_boxes.append(
-                (ex - pad_a, ey - pad_a, ex + tw + pad_a, ey + th * 1.25 * n_lines + pad_a)
-            )
-        except Exception:
-            continue
-
-    for db_id, db_pt in db_anchors:
-        dx, dy = _s(db_pt.x_mm), _s(db_pt.y_mm)
-        msp.add_blockref("CYELEC_DB", (dx, dy), dxfattribs={"layer": "E-TITLE"})
-        occupied_boxes.append((dx - _s(240.0), dy - _s(130.0), dx + _s(240.0), dy + _s(130.0)))
-        lbl_x, lbl_y = _place_decollided_label(dx, dy, db_id, _s(110.0), occupied_boxes, inv_scale)
-        msp.add_text(db_id, dxfattribs={"layer": "E-TITLE", "height": _s(110.0)}).set_placement(
-            (lbl_x, lbl_y)
-        )
+        return round(v_mm * inv_scale, 4)
 
     # 1. Section 701 wet-zone polygons (Power & Combined sheets)
     if discipline in ("combined", "power"):
@@ -754,6 +683,22 @@ def render_electrical_layout_dxf(
                     close=True,
                     dxfattribs={"layer": "E-WETZONE-EXCL"},
                 )
+
+
+
+def _add_dxf_conduit_routes(
+    doc: Drawing,
+    msp: Modelspace,
+    result: Phase2DesignResult,
+    inv_scale: float,
+    discipline: LayoutDiscipline,
+) -> tuple[dict[str, str], list[tuple[float, float, str, str]]]:
+    """Add home-run arrows, loop arcs & NetworkX conduit routes; return floor map & anchors."""
+    spatial = result.spatial
+    db_anchor = result.design.building.db_anchor
+
+    def _s(v_mm: float) -> float:
+        return round(v_mm * inv_scale, 4)
 
     # 2. Cyprus Home-Run Arrows + Loop Arcs (full NetworkX routes kept on E-ROUTE-CONDUIT)
     circuit_map = {c.spec.circuit_id: c for c in result.design.circuits}
@@ -877,7 +822,7 @@ def render_electrical_layout_dxf(
                         ),
                     )
                     if cond_layer != "E-COND-LITE" and len(ordered) >= 2:
-                        for a_dev, b_dev in zip(ordered, ordered[1:], strict=False):
+                        for a_dev, b_dev in itertools.pairwise(ordered):
                             dist_mm = math.hypot(
                                 b_dev.location_mm.x_mm - a_dev.location_mm.x_mm,
                                 b_dev.location_mm.y_mm - a_dev.location_mm.y_mm,
@@ -924,6 +869,22 @@ def render_electrical_layout_dxf(
                 sx1, sy1 = _s(s0.start_mm.x_mm), _s(s0.start_mm.y_mm)
                 sx2, sy2 = _s(s0.end_mm.x_mm), _s(s0.end_mm.y_mm)
                 msp.add_line((sx1, sy1), (sx2, sy2), dxfattribs={"layer": cond_layer})
+
+    return room_floor, trunk_callout_anchors
+
+
+def _add_dxf_device_blocks(
+    msp: Modelspace,
+    spatial: SpatialLayoutResult,
+    inv_scale: float,
+    discipline: LayoutDiscipline,
+    room_floor: dict[str, str],
+    occupied_boxes: list[tuple[float, float, float, float]],
+    trunk_callout_anchors: list[tuple[float, float, str, str]],
+) -> None:
+    """Insert wall-rotated IEC 60617 / ELV blocks, switch arcs & de-collided circuit tags."""
+    def _s(v_mm: float) -> float:
+        return round(v_mm * inv_scale, 4)
 
     # 3. Placed IEC 60617 / ELV named BLOCK references (wall-rotated) + de-collided circuit tags
     if discipline == "lighting":
@@ -1125,7 +1086,7 @@ def render_electrical_layout_dxf(
             if d.device_type in (DeviceType.SMOKE_DETECTOR, DeviceType.HEAT_DETECTOR):
                 smokes_by_flr[room_floor.get(d.room_id, "GF")].append(d)
         for flr_smokes in smokes_by_flr.values():
-            for a_d, b_d in zip(flr_smokes, flr_smokes[1:], strict=False):
+            for a_d, b_d in itertools.pairwise(flr_smokes):
                 if (
                     math.hypot(
                         b_d.location_mm.x_mm - a_d.location_mm.x_mm,
@@ -1146,7 +1107,7 @@ def render_electrical_layout_dxf(
             if d.device_type == DeviceType.KNX_KEYPAD:
                 knx_by_flr[room_floor.get(d.room_id, "GF")].append(d)
         for flr_knx in knx_by_flr.values():
-            for a_d, b_d in zip(flr_knx, flr_knx[1:], strict=False):
+            for a_d, b_d in itertools.pairwise(flr_knx):
                 if (
                     math.hypot(
                         b_d.location_mm.x_mm - a_d.location_mm.x_mm,
@@ -1169,6 +1130,20 @@ def render_electrical_layout_dxf(
         msp.add_text(callout, dxfattribs={"layer": cond_layer, "height": _s(55.0)}).set_placement(
             (lx, ly)
         )
+
+
+
+def _add_dxf_border_and_paper_space(
+    doc: Drawing,
+    msp: Modelspace,
+    result: Phase2DesignResult,
+    inv_scale: float,
+    discipline: LayoutDiscipline,
+    preserved_underlay: bool,
+) -> None:
+    """Add synthetic fallback border (when no architect underlay) & true-scale ISO sheets."""
+    def _s(v_mm: float) -> float:
+        return round(v_mm * inv_scale, 4)
 
     # 4. Model-space border ONLY for synthetic fallback (never overwrite real architect DXFs!)
     if not preserved_underlay:
@@ -1217,6 +1192,107 @@ def render_electrical_layout_dxf(
                 discipline=discipline,
             )
 
+
+
+def render_electrical_layout_dxf(
+    result: Phase2DesignResult,
+    *,
+    source_dxf_path: Path | None = None,
+    discipline: LayoutDiscipline = "combined",
+    force_clean_r2018: bool = False,
+) -> Drawing:
+    """Overlay IEC 60617 electrical blocks, offset conduits & true-scale ISO sheets onto DXF."""
+    orig_path = _resolve_original_dxf_path(result, source_dxf_path)
+    preserved_underlay = False
+    inv_scale = 1.0
+
+    mf_doc = _build_multifloor_underlay_doc(result) if orig_path is None else None
+    if mf_doc is not None:
+        doc = mf_doc
+        preserved_underlay = True
+        inv_scale = 1.0
+    elif orig_path is not None:
+        try:
+            raw_doc = _read_dxf_safe(orig_path)
+            needs_clone = force_clean_r2018 or (raw_doc.dxfversion != "AC1032")
+            if not needs_clone:
+                try:
+                    needs_clone = len(raw_doc.audit().errors) > 0
+                except Exception:
+                    needs_clone = True
+            doc = _clone_underlay_to_r2018(raw_doc) if needs_clone else raw_doc
+            preserved_underlay = True
+            unit_scale = result.design.building.source_unit_scale_to_mm
+            inv_scale = 1.0 / unit_scale if unit_scale > 0 else 1.0
+        except (OSError, DXFError):
+            doc = render_building_to_dxf(result.design.building)
+    else:
+        doc = render_building_to_dxf(result.design.building)
+
+    def _s(v_mm: float) -> float:
+        return v_mm * inv_scale
+
+    for layer_name, color_idx in {**ELECTRICAL_LAYERS, **STAGE5_EXTRA_LAYERS}.items():
+        if layer_name not in doc.layers:
+            doc.layers.add(layer_name, color=color_idx)
+
+    _ensure_iec_blocks(doc, inv_scale)
+    msp = doc.modelspace()
+    spatial = result.spatial
+
+    # Mark DB1 / MDB and Sub-DB anchors cleanly with named CYELEC_DB block
+    db_anchor = result.design.building.db_anchor
+    db_anchors = [(db_anchor.id, db_anchor.location_mm)]
+    for sb in result.design.building.sub_boards:
+        db_anchors.append((sb.board_id, sb.location_mm))
+
+    occupied_boxes: list[tuple[float, float, float, float]] = []
+    # Seed occupied_boxes with existing architectural TEXT/MTEXT so E-* labels never overlap them
+    for ent in msp:
+        etype = ent.dxftype()
+        if etype not in ("TEXT", "MTEXT"):
+            continue
+        try:
+            ins = ent.dxf.insert
+            ex, ey = float(ins.x), float(ins.y)
+            if etype == "TEXT":
+                txt = str(ent.dxf.text or "")
+                th = max(float(getattr(ent.dxf, "height", 0.0) or _s(80.0)), _s(40.0))
+            else:
+                txt = str(ent.plain_text() if hasattr(ent, "plain_text") else "")
+                th = max(float(getattr(ent.dxf, "char_height", 0.0) or _s(80.0)), _s(40.0))
+            first_ln = txt.splitlines()[0] if txt else ""
+            if not first_ln:
+                continue
+            tw = max(th * 0.65 * min(len(first_ln), 32), th * 2.0)
+            n_lines = max(1, min(len(txt.splitlines()), 3))
+            pad_a = _s(20.0)
+            occupied_boxes.append(
+                (ex - pad_a, ey - pad_a, ex + tw + pad_a, ey + th * 1.25 * n_lines + pad_a)
+            )
+        except Exception:
+            _logger.debug("Skipping underlay text entity during label de-collision scan.")
+            continue
+
+    for db_id, db_pt in db_anchors:
+        dx, dy = _s(db_pt.x_mm), _s(db_pt.y_mm)
+        msp.add_blockref("CYELEC_DB", (dx, dy), dxfattribs={"layer": "E-TITLE"})
+        occupied_boxes.append((dx - _s(240.0), dy - _s(130.0), dx + _s(240.0), dy + _s(130.0)))
+        lbl_x, lbl_y = _place_decollided_label(dx, dy, db_id, _s(110.0), occupied_boxes, inv_scale)
+        msp.add_text(db_id, dxfattribs={"layer": "E-TITLE", "height": _s(110.0)}).set_placement(
+            (lbl_x, lbl_y)
+        )
+
+    _add_dxf_wet_zones(msp, spatial, inv_scale, discipline)
+    room_floor, trunk_callout_anchors = _add_dxf_conduit_routes(
+        doc, msp, result, inv_scale, discipline
+    )
+    _add_dxf_device_blocks(
+        msp, spatial, inv_scale, discipline, room_floor, occupied_boxes, trunk_callout_anchors
+    )
+    _add_dxf_border_and_paper_space(
+        doc, msp, result, inv_scale, discipline, preserved_underlay
+    )
     return doc
 
 

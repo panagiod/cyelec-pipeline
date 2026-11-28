@@ -16,6 +16,7 @@ from cyelec.models.electrical import (
     SolvedCircuit,
     SolvedSubMain,
 )
+from cyelec.solver.bs7671 import tabulated_current
 from cyelec.standards_loader import CableEntry, StandardsBundle
 
 _SUBMAIN_STANDARD_RATINGS_A: tuple[int, ...] = (
@@ -55,18 +56,12 @@ def _submain_cpc_mm2(phase_mm2: float, entry: CableEntry) -> float:
 
 
 def _tabulated_current(entry: CableEntry, sub_board: SubBoardSpec, *, use_xlpe: bool) -> float:
-    if use_xlpe:
-        if sub_board.installation_method == "B":
-            val = entry.xlpe_method_b_3p_a if sub_board.is_three_phase else entry.xlpe_method_b_1p_a
-            if val is not None:
-                return val
-        else:
-            val = entry.xlpe_method_c_3p_a if sub_board.is_three_phase else entry.xlpe_method_c_1p_a
-            if val is not None:
-                return val
-    if sub_board.installation_method == "B":
-        return entry.method_b_3p_a if sub_board.is_three_phase else entry.method_b_1p_a
-    return entry.method_c_3p_a if sub_board.is_three_phase else entry.method_c_1p_a
+    return tabulated_current(
+        entry,
+        sub_board.installation_method,
+        sub_board.is_three_phase,
+        "xlpe_90c" if use_xlpe else "pvc_70c",
+    )
 
 
 def solve_submain(
@@ -182,7 +177,8 @@ def solve_submain(
         zs_ohm = resolved_ze_ra + r1_r2
 
         if earthing_system == EarthingSystem.TT:
-            assert rcd_idn_ma is not None
+            if rcd_idn_ma is None:
+                raise RuntimeError("TT sub-main requires a non-null selective RCD rating.")
             touch_v = (resolved_ze_ra + r2_ohm) * (rcd_idn_ma / 1000.0)
             ef_ok = touch_v <= eac_std.earthing.tt_touch_voltage_limit_v + 1e-9
         else:
@@ -193,7 +189,8 @@ def solve_submain(
         if thermal_ok and vd_ok and ef_ok:
             break
 
-    assert chosen is not None and best_eval is not None
+    if chosen is None or best_eval is None:
+        raise RuntimeError(f"No sub-main cable candidate evaluated for '{sub_board.board_id}'.")
     it_a, iz_a, thermal_ok, vd_v, vd_pct, r1_r2, zs_ohm, ef_ok = best_eval
     cpc_mm2 = _submain_cpc_mm2(chosen.size_mm2, chosen)
 

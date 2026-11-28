@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Literal
 
@@ -61,7 +62,7 @@ def _estimate_radial_length_m(
         return round(max(10.0, vertical_drop_m * 2.0), 1)
     ordered = sorted(rooms, key=lambda r: _manhattan_m(db, r.centroid_mm()))
     total = _manhattan_m(db, ordered[0].centroid_mm())
-    for prev, nxt in zip(ordered, ordered[1:], strict=False):
+    for prev, nxt in itertools.pairwise(ordered):
         total += _manhattan_m(prev.centroid_mm(), nxt.centroid_mm())
     total += vertical_drop_m * max(1, min(len(ordered), 3))
     return round(max(8.0, total), 1)
@@ -77,7 +78,7 @@ def _estimate_ring_length_m(
         return 30.0
     ordered = sorted(rooms, key=lambda r: (r.centroid_mm().x_mm, r.centroid_mm().y_mm))
     loop = _manhattan_m(db, ordered[0].centroid_mm())
-    for prev, nxt in zip(ordered, ordered[1:], strict=False):
+    for prev, nxt in itertools.pairwise(ordered):
         loop += _manhattan_m(prev.centroid_mm(), nxt.centroid_mm())
     loop += _manhattan_m(ordered[-1].centroid_mm(), db)
     # Add perimeter socket drop allowance per served room

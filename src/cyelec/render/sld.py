@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import math
 from pathlib import Path
 
@@ -14,9 +13,12 @@ from cyelec.models.electrical import (
     EarthingSystem,
     ElectricalDesignResult,
     PhaseAssignment,
+    SolvedCircuit,
 )
 from cyelec.render.i18n import format_branding_line, t
+from cyelec.render.svg_utils import esc as _esc
 from cyelec.render.text_fit import fit_text_lines, wrap_text_chars
+from cyelec.solver.residential_engineering import is_spd_type12_required
 
 
 def _meter_tail_spec(result: ElectricalDesignResult) -> str:
@@ -48,107 +50,18 @@ _PHASE_HEX: dict[PhaseAssignment, str] = {
 }
 
 
-def _esc(val: object) -> str:
-    return html.escape(str(val), quote=True)
-
-
-def render_sld_svg(result: ElectricalDesignResult) -> str:
-    """Render deterministic IEC 60617 / BS 7671 A3-landscape vector SVG Single-Line Diagram."""
+def _render_sld_incomer(
+    parts: list[str],
+    result: ElectricalDesignResult,
+    circuits: list[SolvedCircuit],
+    margin_x: int,
+    cx_incomer: int,
+    bus_x1: int,
+    bus_y: int,
+    lps_req: bool,
+) -> None:
+    """Render SLD Section 1: EAC incomer, meter, isolator, TT Type-S RCD, SPD, earthing & PV."""
     eac = result.eac_compliance
-    prov = result.provenance
-    lang = result.report_language
-    branding_line = format_branding_line(result.branding)
-    circuits = list(result.circuits)
-    if result.sub_mains:
-        sm_order = {sm.board_id: i for i, sm in enumerate(result.sub_mains)}
-        circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
-    n = max(1, len(circuits))
-    sub_board_ids = {sm.board_id for sm in result.sub_mains}
-    from cyelec.solver.residential_engineering import is_spd_type12_required
-
-    lps_req = is_spd_type12_required(result)
-
-    # Dynamic width comfortably fitting 13+ circuits while maintaining A3 landscape aspect
-    col_w = 112
-    margin_x = 56
-    width = max(1580, margin_x * 2 + n * col_w)
-    sub_offset_y = 118 if result.sub_mains else 0
-    height = 1045 + sub_offset_y
-
-    bus_x0 = margin_x + 30
-    bus_x1 = width - margin_x - 30
-    bus_y = 330
-    cx_incomer = width // 2
-
-    # Loss-free header: full project title + subtitle, font-fitted then wrapped (never cut)
-    hdr_w = float(width - 68)
-    title_txt = f"{t('sld_title', lang)} — {result.building.project_name}"
-    title_lines, title_fs = fit_text_lines(
-        title_txt, hdr_w, 16.0, max_lines=1, min_font_px=11.0, bold=True
-    )
-    sub_txt = (
-        f"Standard: {eac.eac_profile.value} | "
-        f"Supply: {eac.recommended_supply_tier} | "
-        f"Earthing: {result.earthing_system.value} "
-        f"(Ze/Ra={result.ze_or_ra_ohm:.1f} Ω) | "
-        f"DB: {result.building.db_anchor.id}"
-        f"{' | ' + branding_line if branding_line else ''}"
-    )
-    sub_lines, sub_fs = fit_text_lines(sub_txt, hdr_w, 11.0, max_lines=1, min_font_px=9.0)
-    title_lh = round(title_fs * 1.25, 1)
-    sub_lh = round(sub_fs * 1.35, 1)
-    hdr_extra = int(math.ceil((len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * sub_lh))
-    hdr_parts: list[str] = []
-    hy = 44.0
-    for ln in title_lines:
-        hdr_parts.append(
-            f'  <text x="34" y="{hy:.1f}" class="title" style="font-size:{title_fs}px;">'
-            f"{_esc(ln)}</text>"
-        )
-        hy += title_lh
-    hy = 44.0 + (len(title_lines) - 1) * title_lh + 18.0
-    for ln in sub_lines:
-        hdr_parts.append(
-            f'  <text x="34" y="{hy:.1f}" class="sub" style="font-size:{sub_fs}px;">'
-            f"{_esc(ln)}</text>"
-        )
-        hy += sub_lh
-
-    # Full circuit descriptions wrapped inside the 96 px load boxes (no ellipsis)
-    desc_wrap: list[tuple[list[str], float]] = [
-        fit_text_lines(c.spec.description, 88.0, 8.2, max_lines=3, min_font_px=7.2)
-        for c in circuits
-    ]
-    max_desc_lines = max((len(dl) for dl, _ in desc_wrap), default=1)
-    desc_lh = 10.4
-    load_box_h = int(math.ceil(14 + max_desc_lines * desc_lh + 3 + 8 + 16 + 8))
-    load_bottom = 660 + sub_offset_y - 16 + load_box_h
-    height = max(height, load_bottom + 30 + 185)
-
-    parts: list[str] = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        "__SVG_OPEN__",
-        "  <style>",
-        (
-            '    .cy-e201 text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; '
-            "fill: #1a202c; }"
-        ),
-        "    .cy-e201 .title { font-size: 16px; font-weight: 700; fill: #1b365d; }",
-        "    .cy-e201 .sub { font-size: 11px; fill: #4a5568; }",
-        "    .cy-e201 .hdr { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
-        "    .cy-e201 .lbl { font-size: 10px; font-weight: 600; }",
-        "    .cy-e201 .sm { font-size: 9px; fill: #2d3748; }",
-        "    .cy-e201 .xs { font-size: 8.2px; fill: #4a5568; }",
-        "    .cy-e201 .pill { font-size: 9.5px; font-weight: 700; fill: #ffffff; }",
-        "    .cy-e201 .pass { fill: #155724; font-weight: 700; font-size: 9px; }",
-        "    .cy-e201 .fail { fill: #721c24; font-weight: 700; font-size: 9px; }",
-        "  </style>",
-        "__SHEET_FRAME__",
-        *hdr_parts,
-    ]
-    if hdr_extra > 0:
-        parts.append(f'  <g transform="translate(0,{hdr_extra})">')
-
     # ------------------------------------------------------------------
     # 1. EAC Supply Incomer -> Meter -> Tails -> Isolator -> [100mA Type-S] -> Busbar
     # ------------------------------------------------------------------
@@ -163,7 +76,6 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     show_tt_rcd_s = (
         result.earthing_system == EarthingSystem.TT and result.include_tt_main_rcd_s
     )
-    spare_ways = max(2, math.ceil(len(circuits) * 0.2))
     has_pv = result.building.pv_capacity_kva > 0.0
     meter_hdr = "EAC BIDIRECTIONAL METER" if has_pv else "EAC kWh METER"
     meter_w = 196 if has_pv else 156
@@ -433,6 +345,21 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             ]
         )
 
+
+
+def _render_sld_busbar_and_submains(
+    parts: list[str],
+    result: ElectricalDesignResult,
+    circuits: list[SolvedCircuit],
+    bus_x0: int,
+    bus_x1: int,
+    bus_y: int,
+    sub_board_ids: set[str],
+) -> None:
+    """Render SLD Section 2: harmonized main busbar, 20% spare badge & multi-floor sub-mains."""
+    eac = result.eac_compliance
+    n = max(1, len(circuits))
+    spare_ways = max(2, math.ceil(len(circuits) * 0.20))
     # ------------------------------------------------------------------
     # 2. Harmonized BS 7671 Main Busbar + 20% Spare Ways Badge
     # ------------------------------------------------------------------
@@ -546,6 +473,25 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
                 ]
             )
 
+
+
+def _render_sld_final_feeders(
+    parts: list[str],
+    result: ElectricalDesignResult,
+    circuits: list[SolvedCircuit],
+    bus_x0: int,
+    bus_x1: int,
+    bus_y: int,
+    sub_board_ids: set[str],
+    sub_offset_y: int,
+    desc_wrap: list[tuple[list[str], float]],
+    max_desc_lines: int,
+    desc_lh: float,
+    load_box_h: int,
+) -> None:
+    """Render SLD Section 3: final circuit columns, devices, cable specs, ΔV & PASS/FAIL pills."""
+    eac = result.eac_compliance
+    n = max(1, len(circuits))
     # ------------------------------------------------------------------
     # 3. Final Circuit Feeders (MCB/RCBO, Cable Spec, Length, Ib, ΔV, PASS/FAIL)
     # ------------------------------------------------------------------
@@ -683,6 +629,19 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
             ]
         )
 
+
+
+def _render_sld_titleblock(
+    parts: list[str],
+    result: ElectricalDesignResult,
+    width: int,
+    height: int,
+    load_bottom: int,
+) -> int:
+    """Render SLD Section 4: statutory EAC/ETEK title & sign-off block; return final height."""
+    eac = result.eac_compliance
+    prov = result.provenance
+    lang = result.report_language
     # ------------------------------------------------------------------
     # 4. EAC / ETEK Statutory Plan-Approval Title Block (bottom strip)
     # ------------------------------------------------------------------
@@ -767,7 +726,7 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
 
     left_items, left_used = _stack(left_rows, left_w, 48.0)
     right_items, right_used = _stack(right_rows, right_w, float(sign_x + 16))
-    tb_h = int(math.ceil(max(152.0, left_used + 24.0, right_used + 24.0)))
+    tb_h = math.ceil(max(152.0, left_used + 24.0, right_used + 24.0))
     height = max(height, load_bottom + 30 + tb_h + 33)
     tb_y = height - 33 - tb_h
     parts.extend(
@@ -784,6 +743,122 @@ def render_sld_svg(result: ElectricalDesignResult) -> str:
     )
     for yy, frag in (*left_items, *right_items):
         parts.append(f'  <text y="{tb_y + yy:.1f}" {frag}')
+    return height
+
+
+def render_sld_svg(result: ElectricalDesignResult) -> str:
+    """Render deterministic IEC 60617 / BS 7671 A3-landscape vector SVG Single-Line Diagram."""
+    eac = result.eac_compliance
+    lang = result.report_language
+    branding_line = format_branding_line(result.branding)
+    circuits = list(result.circuits)
+    if result.sub_mains:
+        sm_order = {sm.board_id: i for i, sm in enumerate(result.sub_mains)}
+        circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
+    n = max(1, len(circuits))
+    sub_board_ids = {sm.board_id for sm in result.sub_mains}
+    lps_req = is_spd_type12_required(result)
+
+    # Dynamic width comfortably fitting 13+ circuits while maintaining A3 landscape aspect
+    col_w = 112
+    margin_x = 56
+    width = max(1580, margin_x * 2 + n * col_w)
+    sub_offset_y = 118 if result.sub_mains else 0
+    height = 1045 + sub_offset_y
+
+    bus_x0 = margin_x + 30
+    bus_x1 = width - margin_x - 30
+    bus_y = 330
+    cx_incomer = width // 2
+
+    # Loss-free header: full project title + subtitle, font-fitted then wrapped (never cut)
+    hdr_w = float(width - 68)
+    title_txt = f"{t('sld_title', lang)} — {result.building.project_name}"
+    title_lines, title_fs = fit_text_lines(
+        title_txt, hdr_w, 16.0, max_lines=1, min_font_px=11.0, bold=True
+    )
+    sub_txt = (
+        f"Standard: {eac.eac_profile.value} | "
+        f"Supply: {eac.recommended_supply_tier} | "
+        f"Earthing: {result.earthing_system.value} "
+        f"(Ze/Ra={result.ze_or_ra_ohm:.1f} Ω) | "
+        f"DB: {result.building.db_anchor.id}"
+        f"{' | ' + branding_line if branding_line else ''}"
+    )
+    sub_lines, sub_fs = fit_text_lines(sub_txt, hdr_w, 11.0, max_lines=1, min_font_px=9.0)
+    title_lh = round(title_fs * 1.25, 1)
+    sub_lh = round(sub_fs * 1.35, 1)
+    hdr_extra = math.ceil((len(title_lines) - 1) * title_lh + (len(sub_lines) - 1) * sub_lh)
+    hdr_parts: list[str] = []
+    hy = 44.0
+    for ln in title_lines:
+        hdr_parts.append(
+            f'  <text x="34" y="{hy:.1f}" class="title" style="font-size:{title_fs}px;">'
+            f"{_esc(ln)}</text>"
+        )
+        hy += title_lh
+    hy = 44.0 + (len(title_lines) - 1) * title_lh + 18.0
+    for ln in sub_lines:
+        hdr_parts.append(
+            f'  <text x="34" y="{hy:.1f}" class="sub" style="font-size:{sub_fs}px;">'
+            f"{_esc(ln)}</text>"
+        )
+        hy += sub_lh
+
+    # Full circuit descriptions wrapped inside the 96 px load boxes (no ellipsis)
+    desc_wrap: list[tuple[list[str], float]] = [
+        fit_text_lines(c.spec.description, 88.0, 8.2, max_lines=3, min_font_px=7.2)
+        for c in circuits
+    ]
+    max_desc_lines = max((len(dl) for dl, _ in desc_wrap), default=1)
+    desc_lh = 10.4
+    load_box_h = math.ceil(14 + max_desc_lines * desc_lh + 3 + 8 + 16 + 8)
+    load_bottom = 660 + sub_offset_y - 16 + load_box_h
+    height = max(height, load_bottom + 30 + 185)
+
+    parts: list[str] = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        "__SVG_OPEN__",
+        "  <style>",
+        (
+            '    .cy-e201 text { font-family: "Noto Sans", "DejaVu Sans", Arial, sans-serif; '
+            "fill: #1a202c; }"
+        ),
+        "    .cy-e201 .title { font-size: 16px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e201 .sub { font-size: 11px; fill: #4a5568; }",
+        "    .cy-e201 .hdr { font-size: 11.5px; font-weight: 700; fill: #1b365d; }",
+        "    .cy-e201 .lbl { font-size: 10px; font-weight: 600; }",
+        "    .cy-e201 .sm { font-size: 9px; fill: #2d3748; }",
+        "    .cy-e201 .xs { font-size: 8.2px; fill: #4a5568; }",
+        "    .cy-e201 .pill { font-size: 9.5px; font-weight: 700; fill: #ffffff; }",
+        "    .cy-e201 .pass { fill: #155724; font-weight: 700; font-size: 9px; }",
+        "    .cy-e201 .fail { fill: #721c24; font-weight: 700; font-size: 9px; }",
+        "  </style>",
+        "__SHEET_FRAME__",
+        *hdr_parts,
+    ]
+    if hdr_extra > 0:
+        parts.append(f'  <g transform="translate(0,{hdr_extra})">')
+
+    _render_sld_incomer(parts, result, circuits, margin_x, cx_incomer, bus_x1, bus_y, lps_req)
+    _render_sld_busbar_and_submains(
+        parts, result, circuits, bus_x0, bus_x1, bus_y, sub_board_ids
+    )
+    _render_sld_final_feeders(
+        parts,
+        result,
+        circuits,
+        bus_x0,
+        bus_x1,
+        bus_y,
+        sub_board_ids,
+        sub_offset_y,
+        desc_wrap,
+        max_desc_lines,
+        desc_lh,
+        load_box_h,
+    )
+    height = _render_sld_titleblock(parts, result, width, height, load_bottom)
     if hdr_extra > 0:
         parts.append("  </g>")
     parts.append("</svg>")
@@ -818,8 +893,6 @@ def render_sld_dxf(result: ElectricalDesignResult) -> Drawing:
         circuits.sort(key=lambda c: sm_order.get(c.spec.board_id, len(sm_order)))
     n = max(1, len(circuits))
     sub_board_ids = {sm.board_id for sm in result.sub_mains}
-    from cyelec.solver.residential_engineering import is_spd_type12_required
-
     lps_req = is_spd_type12_required(result)
 
     col_w = 2400.0

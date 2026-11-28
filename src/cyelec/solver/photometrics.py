@@ -11,6 +11,7 @@ point-by-point illuminance grid (`0.25 m x 0.25 m` working plane):
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -246,12 +247,12 @@ def _lux_to_hex_color(lux: float) -> str:
     if lux >= stops[-1][0]:
         r, g, b = stops[-1][1]
         return f"#{r:02x}{g:02x}{b:02x}"
-    for (l0, c0), (l1, c1) in zip(stops, stops[1:], strict=False):
+    for (l0, c0), (l1, c1) in itertools.pairwise(stops):
         if l0 <= lux <= l1:
             t = (lux - l0) / max(l1 - l0, 1e-6)
-            r = int(round(c0[0] + (c1[0] - c0[0]) * t))
-            g = int(round(c0[1] + (c1[1] - c0[1]) * t))
-            b = int(round(c0[2] + (c1[2] - c0[2]) * t))
+            r = round(c0[0] + (c1[0] - c0[0]) * t)
+            g = round(c0[1] + (c1[1] - c0[1]) * t)
+            b = round(c0[2] + (c1[2] - c0[2]) * t)
             return f"#{r:02x}{g:02x}{b:02x}"
     return "#22c55e"
 

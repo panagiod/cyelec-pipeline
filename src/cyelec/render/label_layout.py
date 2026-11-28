@@ -96,10 +96,10 @@ class LabelLayoutEngine:
 
     def _cells(self, box: BBox, pad: float = 0.0) -> list[tuple[int, int]]:
         c = self._CELL
-        gx0 = int(math.floor((box[0] - pad) / c))
-        gy0 = int(math.floor((box[1] - pad) / c))
-        gx1 = int(math.floor((box[2] + pad) / c))
-        gy1 = int(math.floor((box[3] + pad) / c))
+        gx0 = math.floor((box[0] - pad) / c)
+        gy0 = math.floor((box[1] - pad) / c)
+        gx1 = math.floor((box[2] + pad) / c)
+        gy1 = math.floor((box[3] + pad) / c)
         return [(gx, gy) for gx in range(gx0, gx1 + 1) for gy in range(gy0, gy1 + 1)]
 
     def register_text_box(self, box: BBox) -> None:

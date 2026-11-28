@@ -1,0 +1,86 @@
+
+          <div style="display:flex;justify-content:space-between;align-items:center;
+                      flex-wrap:wrap;gap:8px;margin-bottom:12px;padding-bottom:8px;
+                      border-bottom:1px solid var(--border);">
+            <div>
+              <strong style="color:var(--navy);font-size:13.5px;">
+                CyElec User Documentation &amp; Cyprus BS 7671 / EAC Know-How
+              </strong>
+              <div style="color:var(--muted);font-size:11.5px;">
+                Quick operational guide right inside the workbench — zero external CDNs.
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <a href="/guide" target="_blank" rel="noopener"
+                 class="btn btn-primary btn-sm" style="text-decoration:none;">
+                Open Full Searchable Guide &amp; Formulas ↗
+              </a>
+              __DOCS_BTN__
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+                      gap:12px;">
+            <div class="panel" style="margin:0;">
+              <h2>1. 5-Step ETEK Engineer Workflow</h2>
+              <ol style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
+                <li>Select a Cyprus benchmark or upload architectural <code>.dxf</code>/<code>.ifc</code> (select 2+ <code>.dxf</code> for Multi-Floor).</li>
+                <li>If layers are non-standard, map them in the <strong>DXF Layer Mapping Wizard</strong>.</li>
+                <li>Set <strong>EAC Profile</strong> (<code>18th+A2</code> 2.5 m or <code>17th+A3</code> 3.0 m),
+                    <strong>TT earthing</strong>, PV kVA, 19%/5% VAT, Tender BOQ, and firm/ETEK branding.</li>
+                <li>Click <strong>Run Deterministic Solve</strong>, then refine visually on the
+                    <strong>Interactive Floorplan</strong> (click rooms to reclassify across 20 residential &amp; commercial types, or click
+                    <em>Relocate DB1</em> to re-route conduits).</li>
+                <li>Resolve any <strong>BLOCKER</strong> flags, save revisions in
+                    <strong>Workspace</strong>, and click <strong>Download EAC ZIP Pack</strong> (with original DXF underlay &amp; native PDF).</li>
+              </ol>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>2. Cyprus EAC &amp; BS 7671 Key Limits</h2>
+              <ul style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
+                <li><strong>Ambient &amp; Cables:</strong> 40°C indoor / 45°C roof; <code>1.5–35 mm²</code> 70°C PVC &amp; <code>50–240 mm²</code> 90°C XLPE/SWA + <code>80–400 A</code> MCCBs &amp; Type D motors.</li>
+                <li><strong>Voltage Drop (cumulative):</strong> <code>&le; 3.0%</code> lighting,
+                    <code>&le; 5.0%</code> power (sub-main + final combined) + 45% conduit/tray fill.</li>
+                <li><strong>TT Earthing (Cyprus default):</strong>
+                    <code>Ra &times; I&Delta;n &le; 50 V</code>, 30 mA RCD on finals,
+                    100 mA Type S selective RCD on TT sub-mains, plus live-conductor adiabatic check (Reg 434.5.2).</li>
+                <li><strong>Commercial &amp; Wet Zones:</strong> BS 5266 Emergency Lighting, BS 5839 Fire Alarm spur, Server UPS, 3P VRF/Lift feeders, and Sec 701 2.5 m / 3.0 m exclusion.</li>
+                <li><strong>EAC Escalations:</strong> 3P mandatory for houses/2-3 bed flats/PV &gt; 5 kVA;
+                    CT metering &gt; 100 A/ph; Substation warn &ge; 100 kVA, blocker &ge; 150 kVA.</li>
+              </ul>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>3. Messy DXF &amp; Bilingual Know-How</h2>
+              <ul style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
+                <li><strong>AutoCAD Blocks:</strong> Nested <code>INSERT</code> blocks are exploded
+                    recursively with Layer <code>"0"</code> inheritance &amp; fixture hints.</li>
+                <li><strong>Missing <code>A-ROOM</code>?</strong> Closed rooms are automatically
+                    derived via wall-to-room polygonization.</li>
+                <li><strong>EN / EL / Greeklish labels:</strong> Recognizes <code>ΣΑΛΟΝΙ</code>,
+                    <code>SALONI</code>, <code>ΚΟΥΖΙΝΑ</code>, <code>KOUZ.</code>,
+                    <code>ΥΠΝΟΔΩΜΑΤΙΟ</code>, <code>YPN. 1</code>, <code>ΜΠΑΝΙΟ</code>,
+                    <code>MPANIO</code>, <code>ΒΕΡΑΝΤΑ</code>, <code>ΠΛΥΣΤΑΡΙΟ</code>.</li>
+                <li><strong>Multi-Floor DXFs:</strong> Combine <code>GF.dxf + 1F.dxf</code> via
+                    <code>POST /v1/solve/dxf/multifloor</code> or
+                    <code>cyelec solve-multifloor</code>.</li>
+              </ul>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>4. Custom BOQ, Tender Mode &amp; Governance</h2>
+              <ul style="margin:6px 0 0 16px;padding:0;line-height:1.55;font-size:12px;">
+                <li><strong>Custom Firm Rate Card:</strong> Save your firm's EUR unit rates &amp;
+                    5% reduced VAT once via <code>PUT /v1/tenants/me</code> (<code>boq_rate_overrides</code>).</li>
+                <li><strong>Unpriced Tender BOQ:</strong> Set <code>tender_boq_blank_rates=true</code>
+                    (or <code>--tender-boq</code>) to leave Excel Column G blank while preserving
+                    live contractor bid auto-calc formulas.</li>
+                <li><strong>Statutory Gate:</strong> All outputs carry SHA-256 provenance and require
+                    formal review &amp; stamp by a licensed <strong>ETEK Electrical Engineer</strong>.</li>
+                <li><strong>EU GDPR:</strong> Export all tenant data via
+                    <code>GET /v1/tenants/me/export</code> or erase completely via
+                    <code>DELETE /v1/tenants/me</code>.</li>
+              </ul>
+            </div>
+          </div>

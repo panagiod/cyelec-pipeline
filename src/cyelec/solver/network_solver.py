@@ -12,6 +12,7 @@ NetworkX conduit topology from each distribution board to every placed load devi
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
@@ -142,7 +143,7 @@ def compute_radial_distributed_metrics(
             continue
         path = list(paths_map[node])
         horiz_m = float(lengths_map[node])
-        for a, b in zip(path, path[1:], strict=False):
+        for a, b in itertools.pairwise(path):
             edge_current[(a, b)] = edge_current.get((a, b), 0.0) + i_dev
         dev_paths.append((dev, i_dev, path, horiz_m))
 
@@ -167,7 +168,7 @@ def compute_radial_distributed_metrics(
 
         moment = spec.design_current_ib_a * db_riser_m + i_dev * drop_m
         if len(path) >= 2:
-            for a, b in zip(path, path[1:], strict=False):
+            for a, b in itertools.pairwise(path):
                 seg_len = float(g[a][b]["weight"])
                 moment += edge_current.get((a, b), i_dev) * seg_len
         else:

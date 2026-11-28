@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import itertools
 import math
 from collections import Counter
 
@@ -560,11 +561,11 @@ def route_circuits(
         horiz_m = 0.0
         used_edges: set[str] = set()
 
-        for src, dst in zip(waypoint_seq, waypoint_seq[1:], strict=False):
+        for src, dst in itertools.pairwise(waypoint_seq):
             if src == dst:
                 continue
             path_nodes = nx.shortest_path(graph, src, dst, weight="weight")
-            for u, v in zip(path_nodes, path_nodes[1:], strict=False):
+            for u, v in itertools.pairwise(path_nodes):
                 seg_len = _dist_m(u, v)
                 if seg_len <= 1e-6:
                     continue

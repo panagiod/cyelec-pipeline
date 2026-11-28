@@ -278,7 +278,8 @@ def export_tender_boq_10section_xlsx(
     wb = Workbook()
 
     ws_sum = wb.active
-    assert ws_sum is not None
+    if ws_sum is None:
+        raise RuntimeError("OpenPyXL Workbook initialized without an active worksheet.")
     ws_sum.title = "Tender Summary"
     ws_est = wb.create_sheet("Engineer Estimate (Priced)")
     ws_bid = wb.create_sheet("Contractor Tender (Blank)")

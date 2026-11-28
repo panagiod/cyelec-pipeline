@@ -8,7 +8,6 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -31,10 +30,7 @@ from cyelec.saas.auth import (
     verify_password,
 )
 from cyelec.saas.billing import QuotaStatus, current_month_key, resolve_plan_spec
-
-
-def _utc_now() -> str:
-    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+from cyelec.saas.billing import utc_now as _utc_now
 
 
 class TenantProfile(BaseModel):
@@ -420,7 +416,8 @@ class WorkspaceStore:
                 row = self._conn.execute(
                     "SELECT * FROM tenants WHERE tenant_id = ?", (tenant_id,)
                 ).fetchone()
-            assert row is not None
+            if row is None:
+                raise RuntimeError(f"Tenant '{tenant_id}' missing immediately after insert.")
             return self._row_to_tenant(row)
 
     def _row_to_tenant(self, row: sqlite3.Row) -> TenantProfile:
@@ -621,7 +618,8 @@ class WorkspaceStore:
             row = self._conn.execute(
                 "SELECT * FROM users WHERE user_id = ?", (uid,)
             ).fetchone()
-        assert row is not None
+        if row is None:
+            raise RuntimeError(f"User '{uid}' missing immediately after insert.")
         return self._row_to_user(row)
 
     def authenticate_user(self, email: str, password: str) -> UserRecord | None:
@@ -864,7 +862,8 @@ class WorkspaceStore:
             )
             self._conn.commit()
         proj = self.get_project(tenant_id, project_id)
-        assert proj is not None
+        if proj is None:
+            raise RuntimeError(f"Project '{project_id}' missing immediately after insert.")
         return proj
 
     def _hydrate_project(self, row: sqlite3.Row) -> ProjectSummary:
@@ -987,7 +986,10 @@ class WorkspaceStore:
             self._conn.commit()
 
         rec = self.get_revision(tenant_id, project_id, rev_num)
-        assert rec is not None
+        if rec is None:
+            raise RuntimeError(
+                f"Revision {rev_num} for project '{project_id}' missing after insert."
+            )
         return rec
 
     def _row_to_rev_summary(self, row: sqlite3.Row) -> RevisionSummary:

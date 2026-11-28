@@ -11,16 +11,13 @@ from ezdxf.filemanagement import new as new_dxf
 
 from cyelec.models.electrical import DinRailBoardLayout, ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
+from cyelec.render.svg_utils import unwrap_design as _unwrap
 from cyelec.render.text_fit import (
     dxf_char_budget,
     fit_text_lines,
     wrap_text_chars,
     wrap_text_to_width,
 )
-
-
-def _unwrap(result: Phase2DesignResult | ElectricalDesignResult) -> ElectricalDesignResult:
-    return result.design if isinstance(result, Phase2DesignResult) else result
 
 
 def _dxf_box_text(

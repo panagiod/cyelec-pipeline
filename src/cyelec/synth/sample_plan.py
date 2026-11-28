@@ -21,6 +21,8 @@ from cyelec.models.building import (
     WallSegment,
     WindowOpening,
 )
+from cyelec.synth._geom import rect_area_m2 as _rect_area_m2
+from cyelec.synth._geom import rect_poly as _rect_poly
 
 STANDARD_LAYERS: dict[str, int] = {
     "A-WALL": 7,   # White / Black
@@ -31,19 +33,6 @@ STANDARD_LAYERS: dict[str, int] = {
     "A-TEXT": 2,   # Yellow bilingual Greek + English labels
     "A-DB": 1,     # Red main distribution board anchor (DB1)
 }
-
-
-def _rect_poly(x0: float, y0: float, x1: float, y1: float) -> list[Point2D]:
-    return [
-        Point2D(x_mm=x0, y_mm=y0),
-        Point2D(x_mm=x1, y_mm=y0),
-        Point2D(x_mm=x1, y_mm=y1),
-        Point2D(x_mm=x0, y_mm=y1),
-    ]
-
-
-def _rect_area_m2(x0: float, y0: float, x1: float, y1: float) -> float:
-    return round(abs((x1 - x0) * (y1 - y0)) / 1_000_000.0, 4)
 
 
 def build_cyprus_3bed_model(

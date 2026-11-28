@@ -94,12 +94,13 @@ def size_conduit_or_tray(
     return "Galv. Cable Tray"
 
 
-def _tabulated_current(
+def tabulated_current(
     entry: CableEntry,
     method: Literal["B", "C"],
     is_three_phase: bool,
     insulation_type: Literal["pvc_70c", "xlpe_90c"] = "pvc_70c",
 ) -> float:
+    """Return BS 7671 Table 4D2A/4E4A tabulated current-carrying capacity It (A)."""
     if insulation_type == "xlpe_90c":
         if method == "B":
             val = entry.xlpe_method_b_3p_a if is_three_phase else entry.xlpe_method_b_1p_a
@@ -112,6 +113,9 @@ def _tabulated_current(
     if method == "B":
         return entry.method_b_3p_a if is_three_phase else entry.method_b_1p_a
     return entry.method_c_3p_a if is_three_phase else entry.method_c_1p_a
+
+
+_tabulated_current = tabulated_current
 
 
 def _mv_per_a_per_m(entry: CableEntry, is_three_phase: bool) -> float:
@@ -458,7 +462,8 @@ def solve_circuit(
             ):
                 break
 
-    assert chosen is not None
+    if chosen is None:
+        raise RuntimeError(f"No cable candidate available for circuit '{spec.circuit_id}'.")
 
     # 4. Emit audit & compliance review flags
     if upsize_reasons:

@@ -79,7 +79,29 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "PIE",
+    "PERF",
+    "PLW",
+    "PLE",
+    "RUF007",
+    "RUF046",
+    "RUF100",
+    "S101",
+    "S110",
+    "S112",
+]
+ignore = ["PERF401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+"scripts/**/*.py" = ["S101"]
 
 [tool.mypy]
 python_version = "3.12"

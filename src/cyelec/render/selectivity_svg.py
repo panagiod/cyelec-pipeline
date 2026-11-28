@@ -9,22 +9,18 @@ IEC 60909 discrimination & vendor switchgear schedule.
 
 from __future__ import annotations
 
-import html
 import math
 from pathlib import Path
 
 from cyelec.models.electrical import BreakerCurve, ElectricalDesignResult
 from cyelec.models.spatial import Phase2DesignResult
 from cyelec.render.pdf_export import export_svg_sheet_to_pdf
+from cyelec.render.svg_utils import esc as _esc
 from cyelec.render.text_fit import svg_text_mask, text_width_px, wrap_text_to_width
 
 
 def text_width_px_bold(text: str, font_px: float) -> float:
     return text_width_px(text, font_px, bold=True)
-
-
-def _esc(val: object) -> str:
-    return html.escape(str(val), quote=True)
 
 
 def _mcb_curve_points(
@@ -466,7 +462,7 @@ def render_selectivity_curves_svg(result: ElectricalDesignResult) -> str:
         parts.append("  </g>")
     parts.append("</svg>")
     body_h = max(float(h), row_y + 24.0)
-    svg_h = int(math.ceil(body_h + hdr_extra))
+    svg_h = math.ceil(body_h + hdr_extra)
     return (
         "\n".join(parts)
         .replace("__SVG_H__", str(svg_h))

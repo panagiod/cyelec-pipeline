@@ -18,7 +18,6 @@ import gzip
 import hashlib
 import os
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -39,6 +38,7 @@ from cyelec.saas.auth import (
     verify_password,
 )
 from cyelec.saas.billing import QuotaStatus, current_month_key, resolve_plan_spec
+from cyelec.saas.billing import utc_now as _utc_now
 from cyelec.saas.store import (
     ProjectSummary,
     RevisionRecord,
@@ -50,10 +50,6 @@ from cyelec.saas.store import (
     WorkspaceStore,
     WorkspaceStoreProtocol,
 )
-
-
-def _utc_now() -> str:
-    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @runtime_checkable

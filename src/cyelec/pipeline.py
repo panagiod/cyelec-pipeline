@@ -11,6 +11,7 @@ from cyelec import __version__
 from cyelec.ingest.dwg_bridge import convert_dwg_to_dxf
 from cyelec.ingest.dxf_ingest import ingest_dxf
 from cyelec.ingest.ifc_ingest import ingest_ifc
+from cyelec.ingest.pdf_vector_ingest import ingest_vector_pdf
 from cyelec.ingest.room_classifier import RoomClassifierFallback
 from cyelec.models.building import BuildingModel, BuildingType, DxfLayerMapping, RoomType
 from cyelec.models.electrical import (
@@ -30,17 +31,33 @@ from cyelec.models.electrical import (
     SolvedSubMain,
 )
 from cyelec.models.spatial import Phase2DesignResult, SpatialLayoutResult
+from cyelec.render.board_designs import export_board_designs_deliverables
 from cyelec.render.calc_report import export_calc_reports
+from cyelec.render.details_dxf import export_details_notes
+from cyelec.render.eac_forms import export_eac_application_form
+from cyelec.render.eac_pack import (
+    render_eac_submission_pack_html,
+    write_deliverables_manifest,
+)
+from cyelec.render.floorplan_svg import render_floorplan_svg
 from cyelec.render.layout_dxf import export_electrical_layout_dxf
+from cyelec.render.pdf_export import export_html_to_pdf, export_svg_sheet_to_pdf
+from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
+from cyelec.render.riser_dxf import export_riser_and_db_deliverables
 from cyelec.render.schedule_xlsx import (
     export_boq_csv,
     export_load_schedule_csv,
     export_load_schedule_xlsx,
 )
+from cyelec.render.selectivity_svg import export_selectivity_deliverables
+from cyelec.render.site_plan_dxf import export_site_plan_deliverables
+from cyelec.render.sld import export_sld_deliverables
+from cyelec.render.tender_boq_xlsx import export_tender_boq_10section_xlsx
 from cyelec.solver.balancer import balance_three_phase_loads
 from cyelec.solver.boq import generate_boq
 from cyelec.solver.bs7671 import _apply_circuit_override, solve_circuit
 from cyelec.solver.eac_compliance import evaluate_eac_compliance
+from cyelec.solver.fault_selectivity import evaluate_fault_and_selectivity
 from cyelec.solver.grouper import generate_circuits, split_oversized_routed_circuits
 from cyelec.solver.network_solver import enrich_specs_with_distributed_network
 from cyelec.solver.residential_engineering import (
@@ -340,8 +357,6 @@ def run_phase1_pipeline(
         etek_signoff_required=True,
     )
     din_rail_boards = compute_din_rail_layouts(result)
-    from cyelec.solver.fault_selectivity import evaluate_fault_and_selectivity
-
     selectivity_analysis, sel_flags = evaluate_fault_and_selectivity(result)
     all_flags = [*result.review_flags, *sel_flags]
     result = result.model_copy(
@@ -502,8 +517,6 @@ def run_phase2_pipeline(
             )
             spatial_flags.extend(ingest_flags)
         elif suffix == ".pdf":
-            from cyelec.ingest.pdf_vector_ingest import ingest_vector_pdf
-
             building, ingest_flags = ingest_vector_pdf(
                 source,
                 standards=standards,
@@ -742,23 +755,7 @@ def export_phase3_deliverables(
     source_dxf_path: Path | None = None,
 ) -> dict[str, Path]:
     """Write complete Turnkey Cyprus EAC & Tender Pack: E-100..E-301 DXF/SVG/PDF + 10-sec BOQ."""
-    from cyelec.render.board_designs import export_board_designs_deliverables
-    from cyelec.render.details_dxf import export_details_notes
-    from cyelec.render.eac_forms import export_eac_application_form
-    from cyelec.render.eac_pack import (
-        render_eac_submission_pack_html,
-        write_deliverables_manifest,
-    )
-    from cyelec.render.floorplan_svg import render_floorplan_svg
-    from cyelec.render.layout_dxf import export_electrical_layout_dxf as export_disc_dxf
-    from cyelec.render.pdf_export import export_html_to_pdf, export_svg_sheet_to_pdf
-    from cyelec.render.qet_bridge import export_qet_project, render_qet_via_subprocess
-    from cyelec.render.riser_dxf import export_riser_and_db_deliverables
-    from cyelec.render.selectivity_svg import export_selectivity_deliverables
-    from cyelec.render.site_plan_dxf import export_site_plan_deliverables
-    from cyelec.render.sld import export_sld_deliverables
-    from cyelec.render.tender_boq_xlsx import export_tender_boq_10section_xlsx
-
+    export_disc_dxf = export_electrical_layout_dxf
     # If the source was a real .dwg file on disk and no pre-converted DXF path was supplied,
     # convert it once inside a scoped temp directory so E-100..E-103 keep the real underlay.
     dwg_ctx: tempfile.TemporaryDirectory[str] | None = None

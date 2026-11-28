@@ -109,11 +109,11 @@ def extract_parallel_double_wall_lines(
     # Bucket by quantized orientation (5° buckets) for O(N) average-case wall-pair matching
     buckets: dict[int, list[tuple[int, Point2D, Point2D, float, float, float, float]]] = {}
     for item in cands:
-        b = int(round(item[4] / angle_tol_deg)) % int(round(180.0 / angle_tol_deg))
+        b = round(item[4] / angle_tol_deg) % round(180.0 / angle_tol_deg)
         buckets.setdefault(b, []).append(item)
 
     matched_indices: set[int] = set()
-    num_buckets = int(round(180.0 / angle_tol_deg))
+    num_buckets = round(180.0 / angle_tol_deg)
 
     for b_id, group in buckets.items():
         # Include adjacent angular bucket to avoid boundary misses
@@ -265,12 +265,12 @@ def bridge_nearby_wall_endpoints(
     cell = max(max_gap_mm, 20.0)
     grid: dict[tuple[int, int], list[int]] = {}
     for i, (x, y, _seg_i) in enumerate(endpoints):
-        gx, gy = int(math.floor(x / cell)), int(math.floor(y / cell))
+        gx, gy = math.floor(x / cell), math.floor(y / cell)
         grid.setdefault((gx, gy), []).append(i)
 
     seen_pairs: set[tuple[int, int]] = set()
     for i, (x0, y0, seg_i) in enumerate(endpoints):
-        gx, gy = int(math.floor(x0 / cell)), int(math.floor(y0 / cell))
+        gx, gy = math.floor(x0 / cell), math.floor(y0 / cell)
         best_j = -1
         best_d = max_gap_mm + 1.0
         for dx_c in (-1, 0, 1):

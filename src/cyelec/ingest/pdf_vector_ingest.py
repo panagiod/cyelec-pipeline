@@ -9,6 +9,7 @@ rejection (`ValueError`) on scanned bitmap/raster PDFs.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import re
 from pathlib import Path
@@ -167,7 +168,7 @@ def _extract_page_segments_pt(
         if len(pts) < 2 or len(pts) > 64:
             continue
         lw = float(cv.get("linewidth") or 0.0)
-        for a, b in zip(pts, pts[1:], strict=False):
+        for a, b in itertools.pairwise(pts):
             _add(float(a[0]), float(a[1]), float(b[0]), float(b[1]), lw)
 
     return segs

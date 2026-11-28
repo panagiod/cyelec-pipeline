@@ -11,12 +11,32 @@ import time
 import urllib.parse
 from base64 import b64encode
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-if TYPE_CHECKING:
-    from cyelec.saas.store import WorkspaceStoreProtocol
+
+def utc_now() -> str:
+    """Return an ISO-8601 UTC timestamp string (YYYY-MM-DDTHH:MM:SSZ)."""
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class BillingStoreProtocol(Protocol):
+    """Minimal store interface required by Stripe webhook processing (ISP/DIP)."""
+
+    def find_tenant_by_stripe_customer(self, stripe_customer_id: str) -> str | None: ...
+
+    def update_tenant_billing(
+        self,
+        tenant_id: str,
+        *,
+        plan: str | None = None,
+        subscription_status: str | None = None,
+        stripe_customer_id: str | None = None,
+        stripe_subscription_id: str | None = None,
+        monthly_quota_override: int | None = None,
+        clear_quota_override: bool = False,
+    ) -> object: ...
 
 
 class PlanSpec(BaseModel):
@@ -313,7 +333,7 @@ def create_stripe_portal_session(
 
 def process_stripe_event(
     event: dict[str, Any],
-    store: WorkspaceStoreProtocol,
+    store: BillingStoreProtocol,
 ) -> StripeWebhookOutcome:
     """Apply a verified Stripe webhook event to the tenant's subscription state atomically."""
     event_type = str(event.get("type", "")).strip()

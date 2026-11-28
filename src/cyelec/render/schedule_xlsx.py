@@ -83,21 +83,11 @@ def _autosize_columns(ws: Worksheet, min_width: int = 9, max_width: int = 44) ->
         ws.column_dimensions[letter].width = best
 
 
-def export_load_schedule_xlsx(
-    result: ElectricalDesignResult,
-    out_path: Path,
-    *,
-    spatial: SpatialLayoutResult | None = None,
-) -> Path:
-    """Export 6-sheet formula-backed Excel workbook (Load, EAC, BOQ, Form, HMY 58, Lighting)."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-
-    # ==================================================================
-    # Sheet 1: Load Schedule
-    # ==================================================================
+def _write_load_schedule_sheet(wb: Workbook, result: ElectricalDesignResult) -> None:
+    """Populate Sheet 1: Load Schedule with live Excel BS 7671 compliance formulas."""
     ws = wb.active
-    assert ws is not None
+    if ws is None:
+        raise RuntimeError("OpenPyXL Workbook initialized without an active worksheet.")
     ws.title = "Load Schedule"
     ws.views.sheetView[0].showGridLines = True
     ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
@@ -299,9 +289,9 @@ def export_load_schedule_xlsx(
 
     _autosize_columns(ws)
 
-    # ==================================================================
-    # Sheet 2: EAC & Review Flags
-    # ==================================================================
+
+def _write_eac_flags_sheet(wb: Workbook, result: ElectricalDesignResult) -> None:
+    """Populate Sheet 2: Cyprus EAC Compliance, Sub-Mains & ETEK Review Flags Register."""
     ws2 = wb.create_sheet(title="EAC & Review Flags")
     ws2.views.sheetView[0].showGridLines = True
     ws2.page_setup.orientation = ws2.ORIENTATION_LANDSCAPE
@@ -455,9 +445,9 @@ def export_load_schedule_xlsx(
 
     _autosize_columns(ws2, max_width=70)
 
-    # ==================================================================
-    # Sheet 3: Bill of Quantities (Priced EUR or Unpriced Tender Mode)
-    # ==================================================================
+
+def _write_boq_sheet(wb: Workbook, result: ElectricalDesignResult) -> None:
+    """Populate Sheet 3: Bill of Quantities (Priced EUR or Unpriced Tender Mode)."""
     if result.boq is not None and result.boq.items:
         boq = result.boq
         is_tender = boq.is_tender_blank_rates
@@ -532,7 +522,7 @@ def export_load_schedule_xlsx(
         sub_c.number_format = "#,##0.00"
         sub_c.border = _CELL_BORDER
 
-        vat_pct_int = int(round(boq.vat_rate * 100))
+        vat_pct_int = round(boq.vat_rate * 100)
         ws3.cell(row=vat_row, column=7, value=f"Cyprus VAT ({vat_pct_int}%)").font = _BOLD_FONT
         vat_c = ws3.cell(row=vat_row, column=8, value=f"=ROUND(H{sub_row}*{boq.vat_rate},2)")
         vat_c.font = _BOLD_FONT
@@ -548,9 +538,9 @@ def export_load_schedule_xlsx(
 
         _autosize_columns(ws3, max_width=52)
 
-    # ==================================================================
-    # Sheet 4: Cyprus EAC Plan Approval & Supply Application Schedule
-    # ==================================================================
+
+def _write_eac_application_sheet(wb: Workbook, result: ElectricalDesignResult) -> None:
+    """Populate Sheet 4: Cyprus EAC Plan Approval & Supply Application Schedule."""
     ws4 = wb.create_sheet(title="EAC Application")
     ws4.views.sheetView[0].showGridLines = True
     ws4.page_setup.orientation = ws4.ORIENTATION_PORTRAIT
@@ -658,10 +648,11 @@ def export_load_schedule_xlsx(
             c.border = _CELL_BORDER
     _autosize_columns(ws4, max_width=46)
 
-    # ==================================================================
-    # Sheet 5: Cyprus HMY 58 (18-1) BS 7671 Initial Verification Test Schedule
-    # ==================================================================
+
+def _write_hmy58_test_sheet(wb: Workbook, result: ElectricalDesignResult) -> None:
+    """Populate Sheet 5: Cyprus HMY 58 (18-1) BS 7671 Initial Verification Test Schedule."""
     ws5 = wb.create_sheet(title="HMY 58 Test Schedule")
+    earth_str = f"{result.earthing_system.value} ({result.ze_or_ra_ohm:.2f} Ω)"
     ws5.views.sheetView[0].showGridLines = True
     ws5.page_setup.orientation = ws5.ORIENTATION_LANDSCAPE
     ws5.page_setup.paperSize = ws5.PAPERSIZE_A4
@@ -721,9 +712,13 @@ def export_load_schedule_xlsx(
             tc.border = _CELL_BORDER
     _autosize_columns(ws5, max_width=32)
 
-    # ==================================================================
-    # Sheet 6: Luminaire & Switching Schedule (E-101 Construction Takeoff)
-    # ==================================================================
+
+def _write_luminaire_switching_sheet(
+    wb: Workbook,
+    result: ElectricalDesignResult,
+    spatial: SpatialLayoutResult | None,
+) -> None:
+    """Populate Sheet 6: Luminaire, Switching & CIBSE Lumen Verification Schedule."""
     ws6 = wb.create_sheet(title="Luminaire & Switching")
     ws6.views.sheetView[0].showGridLines = True
     ws6.page_setup.orientation = ws6.ORIENTATION_LANDSCAPE
@@ -887,6 +882,22 @@ def export_load_schedule_xlsx(
 
     _autosize_columns(ws6, max_width=36)
 
+
+def export_load_schedule_xlsx(
+    result: ElectricalDesignResult,
+    out_path: Path,
+    *,
+    spatial: SpatialLayoutResult | None = None,
+) -> Path:
+    """Export 6-sheet formula-backed Excel workbook (Load, EAC, BOQ, Form, HMY 58, Lighting)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    _write_load_schedule_sheet(wb, result)
+    _write_eac_flags_sheet(wb, result)
+    _write_boq_sheet(wb, result)
+    _write_eac_application_sheet(wb, result)
+    _write_hmy58_test_sheet(wb, result)
+    _write_luminaire_switching_sheet(wb, result, spatial)
     wb.save(str(out_path))
     return out_path
 
@@ -958,7 +969,7 @@ def export_boq_csv(result: ElectricalDesignResult, out_path: Path) -> Path:
                 [
                     "",
                     "",
-                    f"Cyprus VAT ({int(round(result.boq.vat_rate * 100))}%)",
+                    f"Cyprus VAT ({round(result.boq.vat_rate * 100)}%)",
                     "",
                     "",
                     "",

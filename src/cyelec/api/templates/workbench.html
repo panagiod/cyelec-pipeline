@@ -1,0 +1,871 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1b365d" />
+  <meta
+    name="description"
+    content="Deterministic BS 7671, IEC 60364 &amp; Cyprus EAC electrical engineering workbench."
+  />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="CyElec — ETEK Electrical Engineering &amp; EAC Workbench" />
+  <meta
+    property="og:description"
+    content="Deterministic BS 7671 / IEC 60364 / Cyprus EAC DXF layout, SLD, BOQ &amp; balancing."
+  />
+  <meta property="og:image" content="__OG_IMG__" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="CyElec — ETEK Electrical Engineering &amp; EAC Workbench" />
+  <meta name="twitter:image" content="__OG_IMG__" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" href="__LOGO_URL__" />
+  <title>CyElec — ETEK Engineer Review &amp; Pass-2 Workbench</title>
+  <style>
+__WORKBENCH_CSS__  </style>
+</head>
+<body>
+  <div id="authModal" class="auth-backdrop">
+    <div class="auth-card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <img src="/logo.png" alt="CyElec" width="32" height="32" style="border-radius:6px;" />
+        <div>
+          <h2>CyElec — ETEK Engineer Portal</h2>
+          <div style="font-size:11.5px;color:var(--muted);">
+            Sign in or register your Cyprus electrical engineering firm
+          </div>
+        </div>
+      </div>
+      <div class="auth-tabs">
+        <button id="mTabLogin" class="auth-tab active" onclick="switchAuthModalTab('login')">
+          Sign In
+        </button>
+        <button id="mTabReg" class="auth-tab" onclick="switchAuthModalTab('register')">
+          Create Firm Account
+        </button>
+      </div>
+      <div id="modalRegFields" style="display:none;">
+        <label for="mFirm">Consulting Firm Name</label>
+        <input id="mFirm" placeholder="e.g., Kypros MEP Consulting Ltd" />
+        <label for="mName">Lead Engineer Full Name</label>
+        <input id="mName" placeholder="e.g., N. Papadopoulos" />
+        <div id="mInviteWrap" style="display:__INVITE_DISP__;">
+          <label for="mInvite">Closed Pilot Invite Code</label>
+          <input id="mInvite" placeholder="Enter your pilot invite code" />
+        </div>
+      </div>
+      <label for="mEmail">Work Email</label>
+      <input id="mEmail" type="email" placeholder="engineer@yourfirm.cy" />
+      <label for="mPass">Password</label>
+      <input id="mPass" type="password" placeholder="Min 8 characters" />
+      <div id="mError" style="color:#c53030;font-size:11.5px;margin-top:8px;"></div>
+      <div style="display:flex;gap:8px;margin-top:12px;">
+        <button id="mSubmitBtn" class="btn btn-primary" style="flex:1;margin:0;"
+          onclick="submitAuthModal()">Sign In</button>
+        <button id="mCancelBtn" class="btn btn-secondary" style="width:auto;margin:0;"
+          onclick="closeAuthModal()">Close</button>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin:10px 0 0 0;">
+        Forgot your password? Contact your firm Owner (Team Seats -> Reset Password) or Pilot
+        Administrator for instant recovery.
+      </p>
+    </div>
+  </div>
+
+  <div id="fsModal" class="fs-backdrop" onclick="if(event.target===this)closeFullscreenSvg()">
+    <div class="fs-modal">
+      <div class="fs-hdr">
+        <strong id="fsTitle" style="font-size:13.5px;">Drawing Sheet Viewer</strong>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-xs" onclick="zoomSvg('fsBody', -25)">−</button>
+          <span id="zoomLbl_fsBody" class="zoom-pct" style="color:#fff;">100%</span>
+          <button class="btn btn-secondary btn-xs" onclick="zoomSvg('fsBody', 25)">+</button>
+          <button class="btn btn-secondary btn-xs" onclick="resetZoomSvg('fsBody')">Fit</button>
+          <button class="btn btn-secondary btn-xs" onclick="downloadCurrentFsSvg()">
+            Save SVG
+          </button>
+          <button class="btn btn-active btn-xs" onclick="closeFullscreenSvg()">Close (Esc)</button>
+        </div>
+      </div>
+      <div id="fsBody" class="fs-body"></div>
+    </div>
+  </div>
+
+  <header>
+    <div class="brand-lockup">
+      <img src="/logo.png" alt="CyElec" class="brand-logo" width="34" height="34" />
+      <h1>CyElec — ETEK Engineer Review &amp; Visual Pass-2 Workbench</h1>
+    </div>
+    <div class="hdr-right">
+      __LANG_SWITCH_HTML__
+      <button id="hdrAccountBtn" class="acct-pill" onclick="openAuthModal('login')">
+        Sign In / Register
+      </button>
+      <a class="hdr-link" href="/guide" target="_blank" rel="noopener">
+        User Guide &amp; Know-How
+      </a>
+      __API_DOCS_LINK__
+      <div class="meta">v__VERSION__ | BS 7671 / Cyprus EAC</div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="panel">
+      <h2>1. Input &amp; CAD Layer Wizard</h2>
+      <label for="benchmarkSel">Cyprus Benchmark Fixture</label>
+      <select id="benchmarkSel">
+        <option value="apartment_3bed">3-Bed Cyprus Apartment (120 m²)</option>
+        <option value="villa_pv_ev">Detached Villa + 7.5 kVA PV + 7.4 kW EV (216 m²)</option>
+        <option value="villa_2storey">
+          2-Storey Villa 228 m² (MDB -&gt; DB-GF &amp; DB-1F)
+        </option>
+        <option value="commercial_office">
+          Commercial Office 450 m² (CT Metering &amp; Substation)
+        </option>
+      </select>
+
+      <label for="dxfFile">__UPLOAD_LABEL__</label>
+      <input id="dxfFile" type="file" accept="__UPLOAD_ACCEPT__" multiple />
+      <div style="font-size:10.5px;color:#475569;margin-top:3px;line-height:1.35;">
+        <strong>Native CAD contract:</strong> Layered AutoCAD/BIM <code>.dxf</code> /
+        <code>.dwg</code> / <code>.ifc</code> with <code>TEXT/MTEXT</code> room labels
+        (raw PDF-to-DXF vector dumps fail fast with HTTP 422).
+      </div>
+      <div id="cadPreflightAlert" style="display:none;margin-top:6px;padding:7px 8px;
+           border:1px solid #f59e0b;background:#fffbeb;border-radius:5px;
+           font-size:10.5px;color:#92400e;line-height:1.4;"></div>
+      <div id="fileStatusRow" class="file-pill">
+        <span id="fileStatusTxt"></span>
+        <button id="btnClearFiles" type="button" class="btn btn-secondary btn-xs"
+          onclick="clearUploadedFiles()">Clear File</button>
+      </div>
+      <div id="multiFloorBox" class="layer-box">
+        <strong style="font-size:11px;color:#1b365d;">
+          Multi-Floor Combiner (MDB -&gt; Sub-DBs)
+        </strong>
+        <div id="multiFloorRows"></div>
+      </div>
+      <div id="layerWizard" class="layer-box">
+        <strong style="font-size:11px;color:#1b365d;">CAD Layer Mapping Wizard</strong>
+        <div id="layerRows"></div>
+      </div>
+
+      <details style="margin:10px 0 4px 0;padding:6px 8px;background:#f8fafc;
+                      border:1px solid var(--border);border-radius:4px;">
+        <summary style="font-size:11px;color:var(--muted);cursor:pointer;font-weight:600;">
+          Advanced / API Key Access (Optional)
+        </summary>
+        <label for="tenantId">Tenant Workspace ID</label>
+        <input id="tenantId" value="cy-etek-demo" />
+        <label for="apiKeyInput">Tenant API Key (session only)</label>
+        <input id="apiKeyInput" type="password" placeholder="Optional: cyelec_live_..." />
+      </details>
+
+      <h2 style="margin-top:14px;">2. BS 7671 &amp; EAC Overrides</h2>
+      <label for="eacProfile">EAC / BS 7671 Profile</label>
+      <select id="eacProfile">
+        <option value="cyprus_eac_18th_a2">cyprus_eac_18th_a2 (2.5 m Bath Excl)</option>
+        <option value="cyprus_eac_17th_a3">cyprus_eac_17th_a3 (3.0 m Bath Excl)</option>
+      </select>
+
+      <label for="earthing">Earthing System</label>
+      <select id="earthing">
+        <option value="TT">TT (Cyprus EAC Default)</option>
+        <option value="TN-S">TN-S</option>
+        <option value="TN-C-S">TN-C-S</option>
+      </select>
+
+      <label for="zeRa">Ze / Ra (Ω, optional)</label>
+      <input id="zeRa" type="number" step="0.1" placeholder="Default (TT=80, TN-S=0.8)" />
+
+      <label for="ambientC">Global Ambient Override (°C, optional)</label>
+      <input id="ambientC" type="number" step="1" placeholder="Default (40°C / 45°C)" />
+
+      <label for="pvKva">PV Capacity Override (kVA, optional)</label>
+      <input id="pvKva" type="number" step="0.5" placeholder="Use model default" />
+
+      <label for="supplyHeadroomSel">EAC Supply Headroom / Min Main Breaker</label>
+      <select id="supplyHeadroomSel">
+        <option value="auto">Auto (Exact Diversified Demand)</option>
+        <option value="headroom20">Future-Ready (+20% Spare Headroom)</option>
+        <option value="min60">Minimum 3×60A (41.6 kVA)</option>
+        <option value="min80">Minimum 3×80A (55.4 kVA)</option>
+        <option value="min100">Minimum 3×100A (69.3 kVA)</option>
+      </select>
+
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;">
+        <input id="corridorCgChk" type="checkbox" style="width:auto;" />
+        <span>Apply Auto Corridor Cg Grouping (Trunking / Tray Mode)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+        <input id="ttMainRcdChk" type="checkbox" checked style="width:auto;" />
+        <span>Include 100mA Type-S Main RCD on TT SLD (E-201)</span>
+      </label>
+
+      <h2 style="margin-top:14px;">3. Branding, BOQ &amp; Language</h2>
+      <label for="reportLang">Deliverable Language</label>
+      <select id="reportLang">
+        <option value="en">English (EN)</option>
+        <option value="el">Ελληνικά (EL)</option>
+        <option value="bilingual">Bilingual (EN / EL)</option>
+      </select>
+      <label for="vatRateSel">Cyprus VAT Rate (BOQ)</label>
+      <select id="vatRateSel">
+        <option value="0.19">19% Standard Cyprus VAT</option>
+        <option value="0.05">5% Reduced Primary Residence VAT</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;">
+        <input id="tenderBoqChk" type="checkbox" style="width:auto;" />
+        <span>Unpriced Tender BOQ (Blank Contractor Rates)</span>
+      </label>
+      <label for="firmName">Consulting Firm Name</label>
+      <input id="firmName" placeholder="e.g., Kypros MEP Consulting Ltd" />
+      <label for="engName">ETEK Engineer Name</label>
+      <input id="engName" placeholder="e.g., N. Papadopoulos" />
+      <label for="etekReg">ETEK Registration No.</label>
+      <input id="etekReg" placeholder="e.g., ETEK-E-4821" />
+      <button class="btn btn-secondary" onclick="saveFirmDefaults()">
+        Save Firm Branding &amp; VAT Defaults
+      </button>
+
+      <details id="briefBox" style="margin-top:10px;border:1px solid #93c5fd;border-radius:6px;
+               padding:8px 10px;background:#eff6ff;">
+        <summary style="font-size:11.5px;font-weight:700;color:#1e3a8a;cursor:pointer;">
+          3b. 60-Sec Cyprus Engineering Brief (HVAC / BESS / ELV / Site)
+        </summary>
+        <label for="briefHvac">HVAC Plant System</label>
+        <select id="briefHvac">
+          <option value="split_ac">Split A/C Units (20A DP Isolators)</option>
+          <option value="heat_pump_ufh">Air-to-Water Heat Pump (3P) + UFH Manifolds</option>
+          <option value="vrv">VRV / VRF Central (3P) + Indoor FCUs</option>
+        </select>
+        <div class="row2 stack">
+          <div>
+            <label for="briefEvKw">EV Wallbox (Sec. 722)</label>
+            <select id="briefEvKw">
+              <option value="">Auto / Model</option>
+              <option value="0">None (0 kW)</option>
+              <option value="7.4">7.4 kW (1P 32A)</option>
+              <option value="11">11 kW (3P 16A)</option>
+              <option value="22">22 kW (3P 32A)</option>
+            </select>
+          </div>
+          <div>
+            <label for="briefConduitStyle">CAD Conduit Style</label>
+            <select id="briefConduitStyle">
+              <option value="homerun_arcs">Cyprus Home-Run Arrows</option>
+              <option value="full_routed">Full Routed Conduits</option>
+            </select>
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="briefBatteryKwh">Battery Storage BESS (kWh)</label>
+            <input id="briefBatteryKwh" type="number" step="2.5" min="0" max="200" value="0" />
+          </div>
+          <div>
+            <label for="briefPvWp">PV Module Rating (Wp)</label>
+            <input id="briefPvWp" type="number" step="5" min="300" max="750" value="550" />
+          </div>
+        </div>
+        <div class="row2 stack">
+          <div>
+            <label for="briefEarthing">Site Earthing</label>
+            <select id="briefEarthing">
+              <option value="foundation_ring">Foundation / Ring Earth</option>
+              <option value="rod_pit">Copper Rod Pit (Ø16)</option>
+            </select>
+          </div>
+          <div>
+            <label for="briefHeightM">Building Height (m)</label>
+            <input id="briefHeightM" type="number" step="0.5" min="3" max="40" value="7.5" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="briefPlotW">Plot Width (m)</label>
+            <input id="briefPlotW" type="number" step="1" min="6" max="150" value="18" />
+          </div>
+          <div>
+            <label for="briefPlotL">Plot Length (m)</label>
+            <input id="briefPlotL" type="number" step="1" min="6" max="150" value="24" />
+          </div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+          <input id="briefShutters" type="checkbox" checked style="width:auto;" />
+          <span>Motorized Electric Shutters</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefElv" type="checkbox" checked style="width:auto;" />
+          <span>ELV Pack (9U Rack, Cat6, TV, Wi-Fi, Intercom, Alarm, CCTV)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefSmoke" type="checkbox" checked style="width:auto;" />
+          <span>BS 5839-6 Grade D1 Interlinked Smoke/Heat</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefKitchenFcus" type="checkbox" checked style="width:auto;" />
+          <span>Kitchen Hood / Fridge / Microwave FCUs</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefPumps" type="checkbox" checked style="width:auto;" />
+          <span>Water Booster &amp; Hot Water Recirc Pumps</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefGate" type="checkbox" checked style="width:auto;" />
+          <span>Sliding Yard Gate / Garage Motor</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefSite" type="checkbox" checked style="width:auto;" />
+          <span>Site Trenching, Garden Bollards &amp; IEC 62305-2 LPS</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefWallSconces" type="checkbox" style="width:auto;" />
+          <span>Decorative Wall Sconces (Φωτιστικά Τοίχου — Bed &amp; Living)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefEpsBackup" type="checkbox" style="width:auto;" />
+          <span>EPS Backup Automatic Transfer Switch (Requires BESS kWh &gt; 0)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefPool" type="checkbox" style="width:auto;" />
+          <span>Swimming Pool Plant Sub-DB (BS 7671 Sec. 702)</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+          <input id="briefKnx" type="checkbox" style="width:auto;" />
+          <span>Smart Home KNX Bus Automation &amp; Keypads</span>
+        </label>
+      </details>
+
+      <details id="eacMetaBox" style="margin-top:10px;border:1px solid #cbd5e0;border-radius:6px;
+               padding:8px 10px;background:#f8fafc;">
+        <summary style="font-size:11.5px;font-weight:700;color:#1b365d;cursor:pointer;">
+          4. EAC Cadastral, Contractor &amp; Η.Μ.Υ. 58.18-1 Pre-Fill
+        </summary>
+        <label for="eacDistrict">EAC District (Επαρχία)</label>
+        <select id="eacDistrict">
+          <option value="">-- Optional --</option>
+          <option value="Nicosia">Nicosia (Λευκωσία)</option>
+          <option value="Limassol">Limassol (Λεμεσός)</option>
+          <option value="Larnaca">Larnaca (Λάρνακα)</option>
+          <option value="Paphos">Paphos (Πάφος)</option>
+          <option value="Famagusta">Famagusta (Αμμόχωστος)</option>
+        </select>
+        <label for="eacMunicipality">Municipality / Village</label>
+        <input id="eacMunicipality" placeholder="e.g., Strovolos / Germasogeia" />
+        <label for="eacSheetPlan">Cadastral Sheet / Plan</label>
+        <input id="eacSheetPlan" placeholder="e.g., 21/54E2" />
+        <label for="eacPlotNo">Plot No. (Αρ. Τεμαχίου)</label>
+        <input id="eacPlotNo" placeholder="e.g., 412" />
+        <label for="eacPermitNo">Building Permit No.</label>
+        <input id="eacPermitNo" placeholder="e.g., BP-2026/0841" />
+        <label for="eacOwner">Property Owner / Applicant</label>
+        <input id="eacOwner" placeholder="Owner full name or company" />
+        <label for="eacPremisesNo">EAC Premises / Account No.</label>
+        <input id="eacPremisesNo" placeholder="e.g., 10482910" />
+        <label for="eacSupplyConn">EAC Service Feed Type (Section I / SPD*1)</label>
+        <select id="eacSupplyConn">
+          <option value="underground">Underground Cable (Υπόγεια — SPD Type 2)</option>
+          <option value="overhead">Overhead Line (Εναέρια — Escalates SPD Type 1+2)</option>
+        </select>
+        <label for="eacTariff">EAC Tariff Code (optional)</label>
+        <input id="eacTariff" placeholder="Auto (e.g., Code 01 Domestic)" />
+        <label for="eacContractor">Licensed Installer Name</label>
+        <input id="eacContractor" placeholder="Class A Electrical Contractor" />
+        <label for="eacHmyReg">Contractor HMY Licence No.</label>
+        <input id="eacHmyReg" placeholder="e.g., HMY-A-1420" />
+        <label for="eacInspDate">Commissioning / Inspection Date</label>
+        <input id="eacInspDate" placeholder="e.g., 2026-11-27" />
+        <div style="margin-top:8px;padding-top:6px;border-top:1px dashed #cbd5e1;
+                    font-size:10.5px;color:#475569;">
+          <strong>Site Commissioning Measurements (Optional Η.Μ.Υ. 58.18-1 Pre-Fill):</strong>
+          Physical site testing &amp; licensed ETEK/HMY stamp remain legally mandatory.
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measZe">Measured Ze (Ω)</label>
+            <input id="measZe" type="number" step="0.01" placeholder="e.g., 0.35" />
+          </div>
+          <div>
+            <label for="measRa">Measured Ra (Ω)</label>
+            <input id="measRa" type="number" step="0.1" placeholder="e.g., 28.5" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measMainBond">Main Bond (Ω ≤0.5)</label>
+            <input id="measMainBond" type="number" step="0.01" placeholder="e.g., 0.18" />
+          </div>
+          <div>
+            <label for="measIr">Min IR (MΩ ≥1.0)</label>
+            <input id="measIr" type="number" step="1" placeholder="e.g., 500" />
+          </div>
+        </div>
+        <div class="row2">
+          <div>
+            <label for="measRcd1x">RCD 1×IΔn (ms ≤200)</label>
+            <input id="measRcd1x" type="number" step="1" placeholder="e.g., 24" />
+          </div>
+          <div>
+            <label for="measRcd5x">RCD 5×IΔn (ms ≤40)</label>
+            <input id="measRcd5x" type="number" step="1" placeholder="e.g., 14" />
+          </div>
+        </div>
+      </details>
+
+      <div class="sidebar-actions">
+        <button id="btnRunSolve" class="btn btn-primary" style="margin-top:0;"
+          onclick="runSolve()">Run Deterministic Solve</button>
+        <button id="btnDownloadZip" class="btn btn-secondary"
+          onclick="downloadBundle()">Download EAC ZIP Pack</button>
+        <div id="statusLine" class="status-line">Ready. Click Run Deterministic Solve.</div>
+      </div>
+    </aside>
+
+    <main>
+      <div id="authGateBanner" class="auth-gate-banner">
+        <div>
+          <strong>ETEK Firm Sign-In Required:</strong>
+          Sign in or create a firm account to run solves and export EAC submission packs.
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="openAuthModal('login')">
+          Sign In / Register
+        </button>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="kpi">
+          <div class="k">Recommended EAC Supply</div><div class="v" id="kSupply">-</div>
+        </div>
+        <div class="kpi">
+          <div class="k">Diversified / Connected</div><div class="v" id="kKva">-</div>
+        </div>
+        <div class="kpi">
+          <div class="k">3-Phase Balance / Conduit</div><div class="v" id="kBal">-</div>
+        </div>
+        <div class="kpi">
+          <div class="k">Indicative BOQ (incl. VAT)</div><div class="v" id="kBoq">-</div>
+        </div>
+        <div class="kpi">
+          <div class="k">ETEK Review Gate</div><div class="v" id="kFlags">-</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="tabs">
+          <button class="tab active" onclick="openTab('tabCircuits', this)">
+            Circuits &amp; Pass-2 Overrides
+          </button>
+          <button class="tab" onclick="openTab('tabFloorplan', this)">
+            Drawing Set (E-100..E-103)
+          </button>
+          <button class="tab" onclick="openTab('tabSite', this)">
+            Site &amp; Earthing (E-104)
+          </button>
+          <button class="tab" onclick="openTab('tabSld', this)">
+            SLD (E-201)
+          </button>
+          <button class="tab" onclick="openTab('tabRiser', this)">
+            Riser &amp; DIN-Rail DB (E-202)
+          </button>
+          <button class="tab" onclick="openTab('tabSelectivity', this)">
+            I-t Selectivity (E-203)
+          </button>
+          <button class="tab" onclick="openTab('tabBoards', this)">
+            Board Designs (E-204)
+          </button>
+          <button class="tab" onclick="openTab('tabDetails', this)">
+            Details &amp; Notes (E-301)
+          </button>
+          <button class="tab" onclick="openTab('tabBoq', this)">
+            Bill of Quantities (EUR)
+          </button>
+          <button id="tabBtnFlags" class="tab" onclick="openTab('tabFlags', this)">
+            ETEK Review Flags
+          </button>
+          <button class="tab" onclick="openTab('tabWorkspace', this); loadProjects();">
+            Workspace &amp; Revision Diff
+          </button>
+          <button class="tab" onclick="openTab('tabGuide', this)">
+            Guide &amp; Know-How
+          </button>
+        </div>
+
+        <div id="tabCircuits" class="tab-pane active">
+          <div id="balanceBars" style="margin-bottom:12px;"></div>
+          <div id="stage5EngSummary" style="margin-bottom:12px;"></div>
+          <div id="subMainsBox" style="margin-bottom:12px;"></div>
+          <div id="pendingEditsBar" class="pending-bar">
+            <span id="pendingEditsTxt">Pending circuit edits.</span>
+            <div style="display:flex;gap:6px;">
+              <button class="btn btn-primary btn-xs" onclick="runSolve()">
+                Apply &amp; Re-Solve
+              </button>
+              <button class="btn btn-secondary btn-xs" onclick="clearCircuitEdits()">
+                Discard Edits
+              </button>
+            </div>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th><th>Board</th><th>Description</th><th>Phase (Override)</th><th>Cg</th>
+                  <th class="r">Ib (A)</th><th>Device</th><th class="c">Cable/CPC</th>
+                  <th class="r">L (m)</th><th class="r">Iz/Req</th><th class="r">ΔV (%)</th>
+                  <th class="c">Status</th>
+                </tr>
+              </thead>
+              <tbody id="circuitsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="tabFloorplan" class="tab-pane">
+          <div class="fp-toolbar" style="margin-bottom:8px;gap:6px;flex-wrap:wrap;">
+            <strong>Sheet View:</strong>
+            <button id="btnSheetCombined" class="btn btn-primary btn-sm"
+              onclick="selectDrawingSheet('combined')">E-100 Combined</button>
+            <button id="btnSheetLighting" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('lighting')">E-101 Lighting</button>
+            <button id="btnSheetHeatmap" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('heatmap')">E-101 Lux Heatmap</button>
+            <button id="btnSheetPower" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('power')">E-102 Power &amp; Plant</button>
+            <button id="btnSheetElv" class="btn btn-secondary btn-sm"
+              onclick="selectDrawingSheet('elv')">E-103 ELV &amp; Security</button>
+            <span style="margin-left:4px;">|</span>
+            <select id="anchorTargetSel" class="fit-auto" title="Select key anchor to relocate"
+              onchange="updateAnchorBtnLabel()">
+              <option value="db">Anchor: DB1 / MDB</option>
+              <option value="meter">Anchor: EAC Meter</option>
+              <option value="earth_pit">Anchor: TT Earth Pit</option>
+              <option value="telecom">Anchor: 9U Telecom</option>
+            </select>
+            <button id="btnDbMode" class="btn btn-secondary btn-sm" onclick="toggleDbMode()">
+              Relocate DB1 on Floorplan
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="resetVisualOverrides()">
+              Reset Visual Overrides
+            </button>
+            <span id="roomEditBox" style="display:none;gap:6px;align-items:center;">
+              <strong id="roomEditLbl"></strong>
+              <select id="roomTypeSel" style="width:150px;"></select>
+              <button class="btn btn-primary btn-sm" onclick="applyRoomOverride()">
+                Apply &amp; Re-Solve
+              </button>
+            </span>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('floorplanSvg', -25)">−</button>
+              <span id="zoomLbl_floorplanSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('floorplanSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('floorplanSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('floorplanSvg', 'Drawing Sheet (E-100..E-103)')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('floorplanSvg', 'floorplan_sheet.svg')">Save SVG</button>
+            </div>
+          </div>
+          <div id="floorplanSvg" class="svg-box">Run a solve to render floorplan overlay.</div>
+        </div>
+
+        <div id="tabSite" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-104 Site Works, Underground Trenching, Earthing &amp; LPS</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('siteSvg', -25)">−</button>
+              <span id="zoomLbl_siteSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('siteSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('siteSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('siteSvg', 'E-104 Site Works & Earthing')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('siteSvg', 'E104_site_earthing_plan.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="siteSvg" class="svg-box">
+            Run a solve to render E-104 Site Works, Underground Trenching, Earthing &amp; LPS.
+          </div>
+        </div>
+
+        <div id="tabSld" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-201 Single-Line Diagram (IEC 60617 / BS 7671)</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('sldSvg', -25)">−</button>
+              <span id="zoomLbl_sldSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('sldSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs" onclick="resetZoomSvg('sldSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('sldSvg', 'E-201 Single-Line Diagram')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('sldSvg', 'E201_single_line_diagram.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="sldSvg" class="svg-box">Run a solve to render Single-Line Diagram.</div>
+        </div>
+
+        <div id="tabRiser" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-202 Vertical Riser Diagram &amp; Physical 18mm DIN-Rail DB Elevation</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('riserSvg', -25)">−</button>
+              <span id="zoomLbl_riserSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs" onclick="zoomSvg('riserSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('riserSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('riserSvg', 'E-202 Riser & DIN-Rail DB')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('riserSvg', 'E202_riser_and_db_layout.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="riserSvg" class="svg-box">
+            Run a solve to render E-202 Vertical Riser Diagram &amp; 18mm DIN-Rail DB Elevation.
+          </div>
+        </div>
+
+        <div id="tabSelectivity" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-203 Time-Current (I-t) Selectivity &amp; IEC 60909 Coordination</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('selectivitySvg', -25)">−</button>
+              <span id="zoomLbl_selectivitySvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('selectivitySvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('selectivitySvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('selectivitySvg', 'E-203 Time-Current Selectivity')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('selectivitySvg', 'E203_selectivity_curves.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="selectivitySvg" class="svg-box">
+            Run a solve to render E-203 Log-Log Time-Current (I-t) Selectivity Curves.
+          </div>
+        </div>
+
+        <div id="tabBoards" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>
+              E-204 Main &amp; Secondary Distribution Board Front Elevations &amp; Door Schedules
+            </strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('boardsSvg', -25)">−</button>
+              <span id="zoomLbl_boardsSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('boardsSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('boardsSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('boardsSvg', 'E-204 Main & Secondary Board Designs')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('boardsSvg', 'E204_board_designs.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="boardsSvg" class="svg-box">
+            Run a solve to render E-204 Main &amp; Secondary Distribution Board Designs.
+          </div>
+        </div>
+
+        <div id="tabDetails" class="tab-pane">
+          <div class="fp-toolbar">
+            <strong>E-301 Construction Details, Earthing &amp; General Notes</strong>
+            <div class="zoom-group">
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('detailsSvg', -25)">−</button>
+              <span id="zoomLbl_detailsSvg" class="zoom-pct">100%</span>
+              <button class="btn btn-secondary btn-xs"
+                onclick="zoomSvg('detailsSvg', 25)">+</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="resetZoomSvg('detailsSvg')">Fit</button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="openFullscreenSvg('detailsSvg', 'E-301 Construction Details & Notes')">
+                Fullscreen
+              </button>
+              <button class="btn btn-secondary btn-xs"
+                onclick="downloadSvgBox('detailsSvg', 'E301_details_notes.svg')">
+                Save SVG
+              </button>
+            </div>
+          </div>
+          <div id="detailsSvg" class="svg-box">
+            Run a solve to render E-301 Construction Details, Earthing &amp; General Notes.
+          </div>
+        </div>
+
+        <div id="tabBoq" class="tab-pane">
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Item</th><th>Category</th><th>Description</th><th class="c">Unit</th>
+                  <th class="r">Qty</th><th class="r">Rate (EUR)</th><th class="r">Total (EUR)</th>
+                </tr>
+              </thead>
+              <tbody id="boqBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="tabFlags" class="tab-pane">
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Severity</th><th>Code</th><th>Category</th>
+                  <th>Circuit</th><th>Regulation</th><th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="flagsBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="tabWorkspace" class="tab-pane">
+          <div class="fp-toolbar">
+            <input id="projName" style="width:200px;" placeholder="New Project Name" />
+            <button class="btn btn-primary btn-sm" onclick="createAndSaveRevision()">
+              Save as New Revision
+            </button>
+            <select id="projectSel" class="fit-auto" style="min-width:220px;"
+              onchange="loadRevisions()"></select>
+            <button class="btn btn-secondary btn-sm" onclick="diffLatestRevisions()">
+              Diff Latest 2 Revisions
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick="exportTenantGdpr()">
+              Export Data (GDPR Art. 20)
+            </button>
+            <button class="btn btn-active btn-sm" onclick="eraseTenantGdpr()">
+              Erase Tenant (GDPR Art. 17)
+            </button>
+            <span id="wsStatus" style="color:var(--muted);"></span>
+          </div>
+          <div id="revListBox" style="margin-bottom:12px;"></div>
+          <div id="revDiffBox" style="margin-bottom:14px;"></div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+                      gap:12px;border-top:1px solid var(--border);padding-top:12px;">
+            <div class="panel" style="margin:0;">
+              <h2>Firm Sign In / Self-Serve Registration (JWT)</h2>
+              <div id="authBadge" style="font-size:11.5px;color:var(--muted);margin-bottom:6px;">
+                Not signed in via JWT.
+              </div>
+              <input id="authFirm" placeholder="Firm Name (for new signup)"
+                style="margin-bottom:5px;" />
+              <input id="authDisplayName" placeholder="Lead Engineer Name (for new signup)"
+                style="margin-bottom:5px;" />
+              <input id="authInvite" placeholder="Closed Pilot Invite Code (if required)"
+                style="margin-bottom:5px;display:__INVITE_DISP__;" />
+              <input id="authEmail" type="email" placeholder="Work Email"
+                style="margin-bottom:5px;" />
+              <input id="authPass" type="password" placeholder="Password (min 8 chars)"
+                style="margin-bottom:8px;" />
+              <div class="fp-toolbar" style="margin:0;">
+                <button class="btn btn-primary btn-sm" onclick="firmLogin()">Sign In</button>
+                <button class="btn btn-secondary btn-sm" onclick="firmRegister()">
+                  Register Firm
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="firmLogout()">Sign Out</button>
+              </div>
+              <details style="margin-top:8px;font-size:11.5px;">
+                <summary style="cursor:pointer;color:var(--navy);font-weight:600;">
+                  Change My Password
+                </summary>
+                <input id="chgCurPass" type="password" placeholder="Current Password"
+                  style="margin:6px 0 4px 0;" />
+                <input id="chgNewPass" type="password" placeholder="New Password (8+ chars)"
+                  style="margin-bottom:6px;" />
+                <button class="btn btn-secondary btn-sm" onclick="changeMyPassword()">
+                  Save New Password
+                </button>
+              </details>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>Plan, Monthly Solve Quota &amp; Stripe Billing</h2>
+              <div id="subBox" style="font-size:12px;margin-bottom:8px;color:var(--muted);">
+                Click Refresh Billing to inspect plan &amp; monthly solves.
+              </div>
+              <div class="fp-toolbar" style="margin:0;">
+                <button class="btn btn-secondary btn-sm" onclick="loadSubscriptionAndTeam()">
+                  Refresh Billing &amp; Team
+                </button>
+                <button class="btn btn-primary btn-sm" onclick="startCheckout('pilot')">
+                  Pilot €29/mo
+                </button>
+                <button class="btn btn-primary btn-sm" onclick="startCheckout('pro')">
+                  Pro €99/mo
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="openBillingPortal()">
+                  Billing Portal
+                </button>
+              </div>
+            </div>
+
+            <div class="panel" style="margin:0;">
+              <h2>Firm Team Seats (Owner / Engineer / Viewer)</h2>
+              <div id="teamBox" style="font-size:11.5px;margin-bottom:8px;color:var(--muted);">
+                No firm seats loaded.
+              </div>
+              <input id="memEmail" type="email" placeholder="Member Email"
+                style="margin-bottom:4px;" />
+              <input id="memName" placeholder="Full Name" style="margin-bottom:4px;" />
+              <div class="row2 stack" style="margin-bottom:6px;">
+                <input id="memPass" type="password" placeholder="Temp Password (8+)" />
+                <select id="memRole">
+                  <option value="engineer">Engineer</option>
+                  <option value="viewer">Viewer (Read-Only)</option>
+                  <option value="owner">Co-Owner</option>
+                </select>
+              </div>
+              <button class="btn btn-secondary btn-sm" onclick="addTeamMember()">
+                Add Team Seat (Owner)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="tabGuide" class="tab-pane">
+          __GUIDE_TAB_HTML__
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+__WORKBENCH_JS__  </script>
+</body>
+</html>

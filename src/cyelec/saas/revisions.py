@@ -236,34 +236,91 @@ def carry_forward_overrides(
     merged_rooms = dict(prev_overrides.room_type_overrides)
     merged_rooms.update(new_overrides.room_type_overrides)
 
-    def _pick(field: str) -> object:
-        nv = getattr(new_overrides, field)
-        pv = getattr(prev_overrides, field)
-        dv = getattr(defaults, field)
+    def _pick[T](nv: T, pv: T, dv: T) -> T:
         if dv is None:
             return nv if nv is not None else pv
         return nv if nv != dv else pv
 
     return DesignOverrides(
-        eac_profile=_pick("eac_profile"),  # type: ignore[arg-type]
-        earthing_system=_pick("earthing_system"),  # type: ignore[arg-type]
-        ze_or_ra_ohm=_pick("ze_or_ra_ohm"),  # type: ignore[arg-type]
-        ambient_temp_c=_pick("ambient_temp_c"),  # type: ignore[arg-type]
-        pv_capacity_kva=_pick("pv_capacity_kva"),  # type: ignore[arg-type]
-        prospective_fault_current_ka=_pick("prospective_fault_current_ka"),  # type: ignore[arg-type]
+        eac_profile=_pick(
+            new_overrides.eac_profile, prev_overrides.eac_profile, defaults.eac_profile
+        ),
+        earthing_system=_pick(
+            new_overrides.earthing_system,
+            prev_overrides.earthing_system,
+            defaults.earthing_system,
+        ),
+        ze_or_ra_ohm=_pick(
+            new_overrides.ze_or_ra_ohm, prev_overrides.ze_or_ra_ohm, defaults.ze_or_ra_ohm
+        ),
+        ambient_temp_c=_pick(
+            new_overrides.ambient_temp_c, prev_overrides.ambient_temp_c, defaults.ambient_temp_c
+        ),
+        pv_capacity_kva=_pick(
+            new_overrides.pv_capacity_kva,
+            prev_overrides.pv_capacity_kva,
+            defaults.pv_capacity_kva,
+        ),
+        prospective_fault_current_ka=_pick(
+            new_overrides.prospective_fault_current_ka,
+            prev_overrides.prospective_fault_current_ka,
+            defaults.prospective_fault_current_ka,
+        ),
         circuit_overrides=merged_circuits,
         room_type_overrides=merged_rooms,
-        db_location_override_mm=_pick("db_location_override_mm"),  # type: ignore[arg-type]
-        meter_location_override_mm=_pick("meter_location_override_mm"),  # type: ignore[arg-type]
-        earth_pit_location_override_mm=_pick("earth_pit_location_override_mm"),  # type: ignore[arg-type]
-        telecom_location_override_mm=_pick("telecom_location_override_mm"),  # type: ignore[arg-type]
-        residential_brief=_pick("residential_brief"),  # type: ignore[arg-type]
-        report_language=_pick("report_language"),  # type: ignore[arg-type]
-        branding=_pick("branding"),  # type: ignore[arg-type]
-        boq_rate_overrides=_pick("boq_rate_overrides"),  # type: ignore[arg-type]
-        tender_boq_blank_rates=_pick("tender_boq_blank_rates"),  # type: ignore[arg-type]
-        apply_corridor_grouping=_pick("apply_corridor_grouping"),  # type: ignore[arg-type]
-        include_tt_main_rcd_s=_pick("include_tt_main_rcd_s"),  # type: ignore[arg-type]
-        eac_metadata=_pick("eac_metadata"),  # type: ignore[arg-type]
-        notes=_pick("notes"),  # type: ignore[arg-type]
+        db_location_override_mm=_pick(
+            new_overrides.db_location_override_mm,
+            prev_overrides.db_location_override_mm,
+            defaults.db_location_override_mm,
+        ),
+        meter_location_override_mm=_pick(
+            new_overrides.meter_location_override_mm,
+            prev_overrides.meter_location_override_mm,
+            defaults.meter_location_override_mm,
+        ),
+        earth_pit_location_override_mm=_pick(
+            new_overrides.earth_pit_location_override_mm,
+            prev_overrides.earth_pit_location_override_mm,
+            defaults.earth_pit_location_override_mm,
+        ),
+        telecom_location_override_mm=_pick(
+            new_overrides.telecom_location_override_mm,
+            prev_overrides.telecom_location_override_mm,
+            defaults.telecom_location_override_mm,
+        ),
+        residential_brief=_pick(
+            new_overrides.residential_brief,
+            prev_overrides.residential_brief,
+            defaults.residential_brief,
+        ),
+        report_language=_pick(
+            new_overrides.report_language,
+            prev_overrides.report_language,
+            defaults.report_language,
+        ),
+        branding=_pick(new_overrides.branding, prev_overrides.branding, defaults.branding),
+        boq_rate_overrides=_pick(
+            new_overrides.boq_rate_overrides,
+            prev_overrides.boq_rate_overrides,
+            defaults.boq_rate_overrides,
+        ),
+        tender_boq_blank_rates=_pick(
+            new_overrides.tender_boq_blank_rates,
+            prev_overrides.tender_boq_blank_rates,
+            defaults.tender_boq_blank_rates,
+        ),
+        apply_corridor_grouping=_pick(
+            new_overrides.apply_corridor_grouping,
+            prev_overrides.apply_corridor_grouping,
+            defaults.apply_corridor_grouping,
+        ),
+        include_tt_main_rcd_s=_pick(
+            new_overrides.include_tt_main_rcd_s,
+            prev_overrides.include_tt_main_rcd_s,
+            defaults.include_tt_main_rcd_s,
+        ),
+        eac_metadata=_pick(
+            new_overrides.eac_metadata, prev_overrides.eac_metadata, defaults.eac_metadata
+        ),
+        notes=_pick(new_overrides.notes, prev_overrides.notes, defaults.notes),
     )
